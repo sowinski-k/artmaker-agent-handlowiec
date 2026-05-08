@@ -315,6 +315,15 @@ def render_discovery(provider: str, model: str) -> None:
         per_source = c3.number_input(
             "Max / źródło", min_value=5, max_value=50, value=20, key="discovery_limit"
         )
+        custom_target = st.text_area(
+            "Lub opisz własny target (free-form, ma pierwszeństwo nad segmentem)",
+            placeholder=(
+                "Np. 'producenci sztalug i ram do obrazów w Polsce, którzy mogliby "
+                "kupować od nas hurtowo lub robić private label'"
+            ),
+            height=70,
+            key="discovery_custom_target",
+        )
         f1, f2 = st.columns([3, 2])
         use_relevance_filter = f1.checkbox(
             "Filtr trafności LLM (zalecane — odsiewa mismatche zanim wydasz tokeny na research)",
@@ -325,6 +334,12 @@ def render_discovery(provider: str, model: str) -> None:
             "Próg trafności (auto-zaznacz ≥)",
             min_value=0, max_value=10, value=6, key="discovery_threshold",
             help="Wpisy poniżej progu nie są domyślnie zaznaczone (możesz je dozaznaczyć ręcznie).",
+        )
+        auto_research = st.checkbox(
+            "🔥 Auto-research: po wyszukaniu odpal research na wszystkich pasujących bez ręcznego klikania",
+            value=False,
+            key="discovery_auto_research",
+            help="Łączy Szukaj → Filtr → Bulk research w jeden ruch. Wymaga włączonego filtra trafności.",
         )
         submitted = st.form_submit_button("Szukaj", type="primary")
 
@@ -344,7 +359,16 @@ def render_discovery(provider: str, model: str) -> None:
             st.warning("Podaj miasto (chyba że używasz tylko CSV).")
             return
 
-        query = f"{segment} {city}".strip()
+        custom_target_clean = custom_target.strip()
+        # Search query: free-form description if provided, else preset segment
+        # value with underscores replaced by spaces for nicer Google parsing.
+        search_phrase = (
+            custom_target_clean
+            if custom_target_clean
+            else segment.replace("_", " ")
+        )
+        query = f"{search_phrase} {city}".strip()
+
         sources = _build_sources(selected_sources, csv_bytes)
         with st.spinner(f"Szukam '{query}' w {len(sources)} źródłach równolegle..."):
             places, diagnostics = run_search(
@@ -362,6 +386,7 @@ def render_discovery(provider: str, model: str) -> None:
                         places,
                         segment=segment,
                         city=city.strip() or None,
+                        custom_description=custom_target_clean or None,
                     )
                     for item in items:
                         if 0 <= item.idx < len(places):
@@ -378,10 +403,14 @@ def render_discovery(provider: str, model: str) -> None:
         st.session_state["discovery_query"] = query
         st.session_state["discovery_diag"] = [d.model_dump() for d in diagnostics]
         st.session_state["discovery_segment_used"] = segment
+        st.session_state["discovery_custom_target_used"] = custom_target_clean
         st.session_state["discovery_city_used"] = city.strip()
         st.session_state["discovery_relevance"] = relevance_map
         st.session_state["discovery_relevance_warning"] = relevance_warning
         st.session_state["discovery_threshold_used"] = int(relevance_threshold)
+        st.session_state["discovery_auto_research_pending"] = bool(
+            auto_research and use_relevance_filter and relevance_map
+        )
 
     places_data = st.session_state.get("discovery_places") or []
     diag_data = st.session_state.get("discovery_diag") or []
@@ -485,39 +514,62 @@ def render_discovery(provider: str, model: str) -> None:
     if skipped_no_website:
         st.caption(f"Pominę {skipped_no_website} zaznaczonych firm bez adresu www.")
 
+    # Auto-research path: if user ticked the checkbox before searching, fire
+    # research on every place above threshold without requiring another click.
+    auto_pending = st.session_state.pop("discovery_auto_research_pending", False)
+    if auto_pending:
+        auto_targets = [
+            places_data[i]
+            for i, rel in relevance_map.items()
+            if rel["score"] >= threshold and places_data[i].get("website")
+        ]
+        if auto_targets:
+            st.info(
+                f"🔥 Auto-research: lecę na {len(auto_targets)} pasujących leadach "
+                f"(score ≥ {threshold})."
+            )
+            _run_bulk_research(auto_targets, provider, model)
+        else:
+            st.warning("Auto-research: żaden kandydat nie przeszedł progu trafności.")
+
     if st.button(
         f"Researchuj zaznaczone ({len(selected_places)}) — model: {provider}/{model}",
         type="primary",
         disabled=not selected_places,
     ):
-        progress = st.progress(0.0, text="Startuję bulk research...")
-        log_area = st.container()
-        ok, fail = 0, 0
-        seg_hint = st.session_state.get("discovery_segment_used")
-        city_hint = st.session_state.get("discovery_city_used") or None
-        for i, place in enumerate(selected_places, start=1):
-            url = place["website"]
-            progress.progress(
-                i / len(selected_places),
-                text=f"{i}/{len(selected_places)}: {place['name']}",
+        _run_bulk_research(selected_places, provider, model)
+
+
+def _run_bulk_research(targets: list[dict], provider: str, model: str) -> None:
+    """Loop selected places through research_and_save with progress + log."""
+    progress = st.progress(0.0, text="Startuję bulk research...")
+    log_area = st.container()
+    ok, fail = 0, 0
+    seg_hint = st.session_state.get("discovery_segment_used")
+    city_hint = st.session_state.get("discovery_city_used") or None
+    for i, place in enumerate(targets, start=1):
+        url = place["website"]
+        progress.progress(
+            i / len(targets),
+            text=f"{i}/{len(targets)}: {place['name']}",
+        )
+        try:
+            lead_id, result = research_and_save(
+                url,
+                segment_hint=seg_hint,
+                city_hint=city_hint,
+                provider=provider,
+                model=model,
             )
-            try:
-                lead_id, result = research_and_save(
-                    url,
-                    segment_hint=seg_hint,
-                    city_hint=city_hint,
-                    provider=provider,
-                    model=model,
-                )
-                ok += 1
-                log_area.success(
-                    f"#{lead_id} **{result.company_name}** — score {result.score.total}/10"
-                )
-            except Exception as exc:
-                fail += 1
-                log_area.error(f"❌ {place['name']} ({url}): {exc}")
-        progress.progress(1.0, text=f"Gotowe — {ok} OK, {fail} błędów.")
-        st.success(f"Bulk research zakończony: {ok} powodzeń, {fail} błędów.")
+            ok += 1
+            log_area.success(
+                f"#{lead_id} **{result.company_name}** — score {result.score.total}/10"
+            )
+        except Exception as exc:
+            fail += 1
+            log_area.error(f"❌ {place['name']} ({url}): {exc}")
+    progress.progress(1.0, text=f"Gotowe — {ok} OK, {fail} błędów.")
+    st.success(f"Bulk research zakończony: {ok} powodzeń, {fail} błędów.")
 
 
 def render_leads(provider: str, model: str) -> None:

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from core.config import settings
 from core.llm import parse_structured
+from prompts.brand import BRAND_CONTEXT
 
 
 class DiscoveredPlace(BaseModel):
@@ -350,6 +351,7 @@ def score_relevance_batch(
     *,
     segment: str,
     city: str | None = None,
+    custom_description: str | None = None,
     provider: str = "gemini",
     model: str = "gemini-2.5-flash-lite",
 ) -> tuple[list[RelevanceItem], dict]:
@@ -360,13 +362,23 @@ def score_relevance_batch(
     20-50 candidates at a time and cost a fraction of a cent. The full
     research pipeline (research_and_save) is ~30x more expensive per lead,
     so filtering here saves both money and time.
+
+    If `custom_description` is provided it overrides the preset segment
+    definition — useful when the user types a free-form target like
+    "producenci sztalug pod private label".
     """
     if not places:
         return [], {}
 
-    description = SEGMENT_DESCRIPTIONS.get(
-        segment, SEGMENT_DESCRIPTIONS["inne"]
-    )
+    if custom_description and custom_description.strip():
+        target_label = "(własny target)"
+        target_description = custom_description.strip()
+    else:
+        target_label = segment
+        target_description = SEGMENT_DESCRIPTIONS.get(
+            segment, SEGMENT_DESCRIPTIONS["inne"]
+        )
+
     catalog_lines = []
     for i, p in enumerate(places):
         category = p.notes or "?"
@@ -375,20 +387,21 @@ def score_relevance_batch(
     catalog = "\n".join(catalog_lines)
 
     system = (
-        "Jesteś bezlitosnym filtrem leadów dla agenta sprzedaży B2B. Twoim "
-        "zadaniem jest odsiać firmy, które nie pasują do zadanego segmentu. "
-        "Lepiej odrzucić wątpliwy lead niż zmarnować budżet research'u na "
-        "ewidentny mismatch. Bądź surowy. Zwracasz wyłącznie poprawny JSON "
-        "zgodny ze schematem."
+        f"{BRAND_CONTEXT}\n\n"
+        "Jesteś bezlitosnym filtrem leadów dla agenta sprzedaży B2B Artmakera. "
+        "Twoim zadaniem jest odsiać firmy, które nie pasują do zadanego segmentu "
+        "ani do oferty Artmakera. Lepiej odrzucić wątpliwy lead niż zmarnować "
+        "budżet research'u na ewidentny mismatch. Bądź surowy. Zwracasz wyłącznie "
+        "poprawny JSON zgodny ze schematem."
     )
     city_clause = f"Miasto docelowe: {city}\n" if city else ""
     user = (
-        f"Segment docelowy: {segment}\n"
-        f"Definicja segmentu: {description}\n"
+        f"Segment docelowy: {target_label}\n"
+        f"Definicja targetu: {target_description}\n"
         f"{city_clause}\n"
         f"Kandydaci (idx | nazwa | kategoria | adres):\n{catalog}\n\n"
         "Dla KAŻDEGO kandydata zwróć obiekt {idx, score, reason}:\n"
-        "- score 10 = idealny lead, dokładnie ten typ firmy\n"
+        "- score 10 = idealny lead, dokładnie ten typ firmy + pasuje do oferty Artmakera\n"
         "- score 7-9 = bardzo prawdopodobny lead, warto zresearchować\n"
         "- score 4-6 = niepewny, potencjalnie pasuje ale ryzyko mismatch\n"
         "- score 1-3 = ewidentnie nie pasuje (inna branża, inne miasto)\n"
