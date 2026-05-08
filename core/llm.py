@@ -130,10 +130,10 @@ def _parse_anthropic(
     )
     parsed: T = response.parsed_output  # type: ignore[assignment]
     usage = {
-        "input_tokens": getattr(response.usage, "input_tokens", 0),
-        "output_tokens": getattr(response.usage, "output_tokens", 0),
-        "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
-        "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
+        "input_tokens": int(getattr(response.usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(response.usage, "output_tokens", 0) or 0),
+        "cache_read_input_tokens": int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
+        "cache_creation_input_tokens": int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
     }
     return parsed, usage
 
@@ -197,9 +197,9 @@ def _parse_gemini(
     parsed = output_schema.model_validate_json(text)
     meta = getattr(response, "usage_metadata", None)
     usage = {
-        "input_tokens": getattr(meta, "prompt_token_count", 0) if meta else 0,
-        "output_tokens": getattr(meta, "candidates_token_count", 0) if meta else 0,
-        "cache_read_input_tokens": getattr(meta, "cached_content_token_count", 0) if meta else 0,
+        "input_tokens": int(getattr(meta, "prompt_token_count", 0) or 0),
+        "output_tokens": int(getattr(meta, "candidates_token_count", 0) or 0),
+        "cache_read_input_tokens": int(getattr(meta, "cached_content_token_count", 0) or 0),
         "cache_creation_input_tokens": 0,
     }
     return parsed, usage
@@ -236,10 +236,10 @@ def estimate_cost_usd(provider: str, model: str, usage: dict) -> float | None:
     pricing = MODEL_PRICING.get((provider, model))
     if not pricing:
         return None
-    in_tokens = usage.get("input_tokens", 0)
-    out_tokens = usage.get("output_tokens", 0)
-    cache_read = usage.get("cache_read_input_tokens", 0)
-    cache_write = usage.get("cache_creation_input_tokens", 0)
+    in_tokens = usage.get("input_tokens") or 0
+    out_tokens = usage.get("output_tokens") or 0
+    cache_read = usage.get("cache_read_input_tokens") or 0
+    cache_write = usage.get("cache_creation_input_tokens") or 0
     fresh_in = max(in_tokens - cache_read - cache_write, 0)
     cost = (
         fresh_in * pricing["input"] / 1_000_000
