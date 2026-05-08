@@ -27,7 +27,15 @@ nieimplementowana.
     pip install -r requirements.txt
     cp .env.example .env               # i uzupełnij klucze
 
-### Klucz Anthropic (wymagany do researchu i generowania)
+### Wybór providera LLM
+
+Aplikacja wspiera **Anthropic Claude** i **Google Gemini** zamiennie. Możesz
+przełączać model w panelu po lewej w GUI bez restartu aplikacji.
+
+Domyślny provider ustawia `LLM_PROVIDER` w `.env` (`anthropic` lub `gemini`).
+Klucze obu providerów mogą być ustawione równolegle.
+
+### Klucz Anthropic (Claude)
 
 1. Załóż konto na https://console.anthropic.com, doładuj kredyty (~5 USD na start).
 2. Settings → API Keys → Create Key.
@@ -35,17 +43,26 @@ nieimplementowana.
 
        ANTHROPIC_API_KEY=sk-ant-...
 
+### Klucz Google Gemini
+
+1. Załóż klucz w https://aistudio.google.com/apikey (free tier dostępny).
+2. Wklej do `.env`:
+
+       GEMINI_API_KEY=AIza...
+
 ### Klucze na Streamlit Cloud
 
 `.env` jest lokalny i nie wjeżdża do gita. Dla wersji wdrożonej na Streamlit
 Community Cloud trzeba dodać sekrety w panelu aplikacji:
 
 1. share.streamlit.io → Twoja aplikacja → **Settings** → **Secrets**.
-2. Wklej w formacie TOML:
+2. Wklej w formacie TOML (możesz oba):
 
        ANTHROPIC_API_KEY = "sk-ant-..."
+       GEMINI_API_KEY = "AIza..."
 
-Aplikacja zrestartuje się i pobierze sekrety przez `st.secrets`.
+Aplikacja zrestartuje się i pobierze sekrety przez `st.secrets`. Status klucza
+(OK / brak) jest widoczny w panelu LLM po lewej.
 
 ## GUI
 

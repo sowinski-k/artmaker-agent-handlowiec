@@ -12,8 +12,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    llm_provider: str = "anthropic"
+
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-4-7"
+    anthropic_model: str = "claude-sonnet-4-6"
+
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.1-pro-preview"
 
     woodpecker_api_key: str = ""
     woodpecker_campaign_id: str = ""

@@ -22,8 +22,81 @@ from core.db import (
     init_db,
 )
 from core.kill_switch import is_stopped, resume, stop
+from core.llm import (
+    ANTHROPIC_MODELS,
+    GEMINI_MODELS,
+    MODEL_PRICING,
+    has_anthropic_key,
+    has_gemini_key,
+)
 
 SEGMENT_VALUES: list[str] = [s.value for s in LeadSegment]
+
+
+def _render_llm_selector() -> tuple[str, str]:
+    """Sidebar: pick provider + model. Returns (provider, model)."""
+    with st.sidebar:
+        st.header("Model AI")
+
+        provider = st.selectbox(
+            "Provider",
+            ["anthropic", "gemini"],
+            index=0 if settings.llm_provider == "anthropic" else 1,
+            key="llm_provider_select",
+        )
+
+        if provider == "anthropic":
+            default_idx = (
+                ANTHROPIC_MODELS.index(settings.anthropic_model)
+                if settings.anthropic_model in ANTHROPIC_MODELS
+                else 0
+            )
+            model = st.selectbox(
+                "Model Anthropic",
+                ANTHROPIC_MODELS,
+                index=default_idx,
+                key="llm_model_anthropic_select",
+            )
+            if has_anthropic_key():
+                st.success("Klucz ANTHROPIC_API_KEY: OK")
+            else:
+                st.error(
+                    "Brak ANTHROPIC_API_KEY. Dodaj w `.env` lokalnie albo w "
+                    "Streamlit Cloud → Settings → Secrets."
+                )
+        else:
+            default_idx = (
+                GEMINI_MODELS.index(settings.gemini_model)
+                if settings.gemini_model in GEMINI_MODELS
+                else 0
+            )
+            model = st.selectbox(
+                "Model Gemini",
+                GEMINI_MODELS,
+                index=default_idx,
+                key="llm_model_gemini_select",
+            )
+            if has_gemini_key():
+                st.success("Klucz GEMINI_API_KEY: OK")
+            else:
+                st.error(
+                    "Brak GEMINI_API_KEY. Dodaj w `.env` lokalnie albo w "
+                    "Streamlit Cloud → Settings → Secrets."
+                )
+
+        pricing = MODEL_PRICING.get((provider, model))
+        if pricing:
+            # Rough estimate: 10k input, 600 output per lead. Cache reads
+            # cost less on Anthropic, ignored here.
+            est = (10_000 * pricing["input"] + 600 * pricing["output"]) / 1_000_000
+            st.caption(
+                f"Szacunek per lead: ~${est:.4f}\n\n"
+                f"100 leadów: ~${est * 100:.2f}"
+            )
+        else:
+            st.caption("Pricing dla tego modelu nieznany — sprawdź w panelu providera.")
+
+        return provider, model
 
 st.set_page_config(page_title="Artmaker — Agent Handlowiec", layout="wide")
 
@@ -116,8 +189,9 @@ def render_dashboard() -> None:
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
-def _render_manual_entry_form() -> None:
+def _render_manual_entry_form(provider: str, model: str) -> None:
     with st.expander("Dodaj leada (researchuj URL)", expanded=False):
+        st.caption(f"Researchuję modelem **{provider} / {model}** (zmień w panelu po lewej).")
         with st.form("manual_lead_form", clear_on_submit=True):
             url = st.text_input(
                 "URL strony firmy",
@@ -141,11 +215,13 @@ def _render_manual_entry_form() -> None:
             with st.status("Researchuję leada...", expanded=True) as status:
                 try:
                     status.write("Pobieram treść strony i podstrony (kontakt, o nas, oferta)...")
-                    status.write("Wysyłam do Claude'a do oceny według rubryki...")
+                    status.write(f"Wysyłam do {provider}/{model} do oceny według rubryki...")
                     lead_id, result = research_and_save(
                         url.strip(),
                         segment_hint=seg,
                         city_hint=city_hint.strip() or None,
+                        provider=provider,
+                        model=model,
                     )
                     status.update(label=f"Gotowe — score {result.score.total}/10", state="complete")
                     st.success(
@@ -168,8 +244,8 @@ def _score_label(score: float | None) -> str:
     return "COLD"
 
 
-def render_leads() -> None:
-    _render_manual_entry_form()
+def render_leads(provider: str, model: str) -> None:
+    _render_manual_entry_form(provider, model)
 
     with SessionLocal() as session:
         leads = (
@@ -351,6 +427,8 @@ def render_logs() -> None:
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
+selected_provider, selected_model = _render_llm_selector()
+
 st.title("Artmaker — Agent Handlowiec")
 st.caption(
     f"Firma: {settings.company_name} • "
@@ -365,7 +443,7 @@ with tab_dashboard:
     render_dashboard()
 
 with tab_leads:
-    render_leads()
+    render_leads(selected_provider, selected_model)
 
 with tab_drafts:
     render_drafts()

@@ -26,7 +26,7 @@ from agent.scoring import ResearchResult
 from core.config import PROJECT_ROOT, settings
 from core.db import Lead, LeadStatus, SessionLocal, init_db
 from core.kill_switch import is_stopped
-from core.llm import get_client
+from core.llm import estimate_cost_usd, parse_structured
 from core.logger import logger, setup_logging
 
 SYSTEM_PROMPT_PATH = PROJECT_ROOT / "prompts" / "research_prompt.md"
@@ -38,13 +38,30 @@ def _load_system_prompt() -> str:
     return SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def _resolve_provider_model(
+    provider: str | None, model: str | None
+) -> tuple[str, str]:
+    provider = (provider or settings.llm_provider).lower()
+    if model:
+        return provider, model
+    if provider == "anthropic":
+        return provider, settings.anthropic_model
+    if provider == "gemini":
+        return provider, settings.gemini_model
+    raise ValueError(f"Unknown LLM provider: {provider!r}")
+
+
 def research_url(
     url: str,
     *,
     segment_hint: str | None = None,
     city_hint: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> ResearchResult:
-    """Pure research: fetch pages → call Claude → return parsed result."""
+    """Pure research: fetch pages → call LLM → return parsed result."""
+    provider, model = _resolve_provider_model(provider, model)
+
     gathered = gather_pages(url)
     user_message = build_user_message(
         target_url=url,
@@ -53,32 +70,31 @@ def research_url(
         city_hint=city_hint,
     )
 
-    client = get_client()
-    response = client.messages.parse(
-        model=settings.anthropic_model,
+    result, usage = parse_structured(
+        provider=provider,
+        model=model,
+        system=_load_system_prompt(),
+        user=user_message,
+        output_schema=ResearchResult,
         max_tokens=MAX_TOKENS,
-        system=[
-            {
-                "type": "text",
-                "text": _load_system_prompt(),
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": user_message}],
-        output_format=ResearchResult,
     )
-    result: ResearchResult = response.parsed_output
+
+    cost_usd = estimate_cost_usd(provider, model, usage)
     logger.bind(
         source="research",
         payload={
             "url": url,
+            "provider": provider,
+            "model": model,
             "score_total": result.score.total,
             "segment": result.segment,
-            "cache_read_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "usage": usage,
+            "cost_usd": cost_usd,
         },
-    ).info(f"Researched {url}: {result.company_name} (score={result.score.total})")
+    ).info(
+        f"Researched {url}: {result.company_name} "
+        f"(score={result.score.total}, model={provider}/{model}, cost~${cost_usd or '?'})"
+    )
     return result
 
 
@@ -109,9 +125,17 @@ def research_and_save(
     *,
     segment_hint: str | None = None,
     city_hint: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> tuple[int, ResearchResult]:
     """Research a URL and persist the result. Returns (lead_id, result)."""
-    result = research_url(url, segment_hint=segment_hint, city_hint=city_hint)
+    result = research_url(
+        url,
+        segment_hint=segment_hint,
+        city_hint=city_hint,
+        provider=provider,
+        model=model,
+    )
     lead_id = save_lead(url, result)
     return lead_id, result
 
@@ -121,6 +145,8 @@ def main() -> None:
     parser.add_argument("--url", required=True, help="URL strony do oceny")
     parser.add_argument("--segment", default=None, help="Hint segmentu (opcjonalny)")
     parser.add_argument("--city", default=None, help="Hint miasta (opcjonalny)")
+    parser.add_argument("--provider", default=None, help="anthropic | gemini (default: z .env)")
+    parser.add_argument("--model", default=None, help="ID modelu (default: z .env)")
     args = parser.parse_args()
 
     setup_logging()
@@ -132,7 +158,11 @@ def main() -> None:
 
     try:
         lead_id, result = research_and_save(
-            args.url, segment_hint=args.segment, city_hint=args.city
+            args.url,
+            segment_hint=args.segment,
+            city_hint=args.city,
+            provider=args.provider,
+            model=args.model,
         )
     except Exception as exc:
         logger.bind(source="research").exception(f"Research failed for {args.url}: {exc}")
