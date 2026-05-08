@@ -9,6 +9,15 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import func, select
 
+from agent.discovery import (
+    ApifySource,
+    CSVSource,
+    DiscoveredPlace,
+    GooglePlacesSource,
+    has_apify_token,
+    has_places_key,
+    run_search,
+)
 from agent.research import research_and_save
 from core.config import settings
 from core.db import (
@@ -244,6 +253,186 @@ def _score_label(score: float | None) -> str:
     return "COLD"
 
 
+SOURCE_LABELS = {
+    "apify": "Apify Google Maps",
+    "google_places": "Google Places API",
+    "csv": "Import CSV",
+}
+
+
+def _build_sources(selected: list[str], csv_bytes: bytes | None) -> list:
+    """Map UI selection to LeadSource instances."""
+    sources: list = []
+    if "apify" in selected:
+        sources.append(ApifySource())
+    if "google_places" in selected:
+        sources.append(GooglePlacesSource())
+    if "csv" in selected:
+        sources.append(CSVSource(csv_bytes=csv_bytes))
+    return sources
+
+
+def render_discovery(provider: str, model: str) -> None:
+    st.subheader("Pozyskiwanie leadów")
+    st.caption(
+        "Wybierz źródła, podaj zapytanie i uruchom kilku agentów równolegle. "
+        "Wyniki są deduplikowane po adresie www, zaznaczasz które researchować."
+    )
+
+    apify_ok = has_apify_token()
+    places_ok = has_places_key()
+
+    src_col1, src_col2, src_col3 = st.columns(3)
+    use_apify = src_col1.checkbox(
+        f"Apify Google Maps {'✓' if apify_ok else '✗'}",
+        value=apify_ok,
+        disabled=not apify_ok,
+        help="Apify Google Maps Scraper actor. Wymaga APIFY_API_TOKEN.",
+    )
+    use_places = src_col2.checkbox(
+        f"Google Places API {'✓' if places_ok else '✗'}",
+        value=places_ok,
+        disabled=not places_ok,
+        help="Google Places API (New) Text Search. Wymaga GOOGLE_PLACES_API_KEY.",
+    )
+    use_csv = src_col3.checkbox(
+        "Import CSV",
+        value=False,
+        help="Wgraj CSV z kolumną 'url' (i opcjonalnie 'name', 'address', 'phone').",
+    )
+
+    csv_bytes: bytes | None = None
+    if use_csv:
+        uploaded = st.file_uploader("Plik CSV", type=["csv"], key="discovery_csv")
+        if uploaded is not None:
+            csv_bytes = uploaded.read()
+
+    with st.form("discovery_form"):
+        c1, c2, c3 = st.columns([2, 2, 1])
+        segment = c1.selectbox("Segment", SEGMENT_VALUES, key="discovery_segment")
+        city = c2.text_input("Miasto", placeholder="Warszawa", key="discovery_city")
+        per_source = c3.number_input(
+            "Max / źródło", min_value=5, max_value=50, value=20, key="discovery_limit"
+        )
+        submitted = st.form_submit_button("Szukaj", type="primary")
+
+    if submitted:
+        selected_sources = [
+            name
+            for name, on in (("apify", use_apify), ("google_places", use_places), ("csv", use_csv))
+            if on
+        ]
+        if not selected_sources:
+            st.warning("Zaznacz przynajmniej jedno źródło.")
+            return
+        if "csv" in selected_sources and csv_bytes is None:
+            st.warning("Wybrałeś CSV, ale nie wgrałeś pliku.")
+            return
+        if any(s != "csv" for s in selected_sources) and not city.strip():
+            st.warning("Podaj miasto (chyba że używasz tylko CSV).")
+            return
+
+        query = f"{segment} {city}".strip()
+        sources = _build_sources(selected_sources, csv_bytes)
+        with st.spinner(f"Szukam '{query}' w {len(sources)} źródłach równolegle..."):
+            places, diagnostics = run_search(
+                sources, query=query, max_results_per_source=int(per_source)
+            )
+        st.session_state["discovery_places"] = [p.model_dump() for p in places]
+        st.session_state["discovery_query"] = query
+        st.session_state["discovery_diag"] = [d.model_dump() for d in diagnostics]
+        st.session_state["discovery_segment_used"] = segment
+        st.session_state["discovery_city_used"] = city.strip()
+
+    places_data = st.session_state.get("discovery_places") or []
+    diag_data = st.session_state.get("discovery_diag") or []
+
+    if diag_data:
+        diag_cols = st.columns(len(diag_data))
+        for idx, d in enumerate(diag_data):
+            label = SOURCE_LABELS.get(d["source"], d["source"])
+            if d.get("error"):
+                diag_cols[idx].error(f"{label}: {d['error'][:80]}")
+            else:
+                diag_cols[idx].success(
+                    f"{label}: {len(d.get('places', []))} firm "
+                    f"({d.get('duration_s', 0)}s)"
+                )
+
+    if not places_data:
+        return
+
+    st.markdown(f"### {len(places_data)} firm znalezionych dla `{st.session_state.get('discovery_query', '')}`")
+    df_rows = []
+    for p in places_data:
+        df_rows.append(
+            {
+                "Wybierz": bool(p.get("website")),
+                "Źródło": SOURCE_LABELS.get(p["source"], p["source"]),
+                "Nazwa": p["name"],
+                "Adres": p.get("address") or "—",
+                "Ocena": p.get("rating") or "—",
+                "Opinii": p.get("review_count") or "—",
+                "WWW": p.get("website") or "(brak)",
+            }
+        )
+    df = pd.DataFrame(df_rows)
+    edited = st.data_editor(
+        df,
+        column_config={
+            "Wybierz": st.column_config.CheckboxColumn(
+                help="Tylko firmy z adresem www zostaną zresearchowane."
+            ),
+            "WWW": st.column_config.LinkColumn(),
+        },
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Źródło", "Nazwa", "Adres", "Ocena", "Opinii", "WWW"],
+        key="discovery_table",
+    )
+    selected_idx = edited.index[edited["Wybierz"]].tolist()
+    selected_places = [
+        places_data[i] for i in selected_idx if places_data[i].get("website")
+    ]
+    skipped_no_website = sum(1 for i in selected_idx if not places_data[i].get("website"))
+    if skipped_no_website:
+        st.caption(f"Pominę {skipped_no_website} zaznaczonych firm bez adresu www.")
+
+    if st.button(
+        f"Researchuj zaznaczone ({len(selected_places)}) — model: {provider}/{model}",
+        type="primary",
+        disabled=not selected_places,
+    ):
+        progress = st.progress(0.0, text="Startuję bulk research...")
+        log_area = st.container()
+        ok, fail = 0, 0
+        seg_hint = st.session_state.get("discovery_segment_used")
+        city_hint = st.session_state.get("discovery_city_used") or None
+        for i, place in enumerate(selected_places, start=1):
+            url = place["website"]
+            progress.progress(
+                i / len(selected_places),
+                text=f"{i}/{len(selected_places)}: {place['name']}",
+            )
+            try:
+                lead_id, result = research_and_save(
+                    url,
+                    segment_hint=seg_hint,
+                    city_hint=city_hint,
+                    provider=provider,
+                    model=model,
+                )
+                ok += 1
+                log_area.success(
+                    f"#{lead_id} **{result.company_name}** — score {result.score.total}/10"
+                )
+            except Exception as exc:
+                fail += 1
+                log_area.error(f"❌ {place['name']} ({url}): {exc}")
+        progress.progress(1.0, text=f"Gotowe — {ok} OK, {fail} błędów.")
+        st.success(f"Bulk research zakończony: {ok} powodzeń, {fail} błędów.")
+
+
 def render_leads(provider: str, model: str) -> None:
     _render_manual_entry_form(provider, model)
 
@@ -435,12 +624,15 @@ st.caption(
     f"Właściciel: {settings.owner_name or '(uzupełnij OWNER_NAME w .env)'}"
 )
 
-tab_dashboard, tab_leads, tab_drafts, tab_logs = st.tabs(
-    ["Dashboard", "Leady", "Drafty", "Logi"]
+tab_dashboard, tab_discovery, tab_leads, tab_drafts, tab_logs = st.tabs(
+    ["Dashboard", "Pozyskiwanie", "Leady", "Drafty", "Logi"]
 )
 
 with tab_dashboard:
     render_dashboard()
+
+with tab_discovery:
+    render_discovery(selected_provider, selected_model)
 
 with tab_leads:
     render_leads(selected_provider, selected_model)

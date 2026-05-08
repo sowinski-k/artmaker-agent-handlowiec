@@ -50,6 +50,41 @@ Klucze obu providerów mogą być ustawione równolegle.
 
        GEMINI_API_KEY=AIza...
 
+### Źródła leadów (zakładka *Pozyskiwanie*)
+
+Możesz włączyć dowolną kombinację — agenci uderzają w źródła równolegle, a
+wyniki są deduplikowane po URL. Każde źródło jest opcjonalne.
+
+#### Apify Google Maps Scraper (rekomendowane)
+
+Najtańsze i najbogatsze pole danych (telefon, kategoria, rating).
+
+1. Zarejestruj się na https://console.apify.com (free tier 5 USD/mies).
+2. Settings → Integrations → API tokens → skopiuj `apify_api_token`.
+3. Wklej do `.env` lub Streamlit secrets:
+
+       APIFY_API_TOKEN=apify_api_xxx
+
+Domyślny actor: `compass~google-maps-scraper`. Możesz zmienić przez
+`APIFY_GMAPS_ACTOR=...` jeśli chcesz np. `nwua9Gu5YrADL7ZDj` (oficjalny Apify).
+
+#### Google Places API (New)
+
+1. https://console.cloud.google.com/google/maps-apis/api-list → włącz
+   *Places API (New)* w nowym projekcie.
+2. APIs & Services → Credentials → Create credentials → API key.
+3. (Zalecane) ogranicz klucz do *Places API (New)* w sekcji *API restrictions*.
+4. Wklej do `.env` lub Streamlit secrets:
+
+       GOOGLE_PLACES_API_KEY=AIza...
+
+Free tier: $200/miesiąc kredytu (~6000-8000 zapytań Text Search z naszym field mask'em).
+
+#### Import CSV
+
+Bez klucza, za darmo. Wgrywasz plik z kolumną `url` (wymagane). Opcjonalnie
+`name`, `address`, `phone`, `notes`. Akceptuje przecinek lub średnik (Excel PL).
+
 ### Klucze na Streamlit Cloud
 
 `.env` jest lokalny i nie wjeżdża do gita. Dla wersji wdrożonej na Streamlit
@@ -60,6 +95,9 @@ Community Cloud trzeba dodać sekrety w panelu aplikacji:
 
        ANTHROPIC_API_KEY = "sk-ant-..."
        GEMINI_API_KEY = "AIza..."
+       # Discovery (opcjonalne, ile chcesz):
+       APIFY_API_TOKEN = "apify_api_..."
+       GOOGLE_PLACES_API_KEY = "AIza..."
 
 Aplikacja zrestartuje się i pobierze sekrety przez `st.secrets`. Status klucza
 (OK / brak) jest widoczny w panelu LLM po lewej.

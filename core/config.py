@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.1-pro-preview"
 
+    apify_api_token: str = ""
+    apify_gmaps_actor: str = "compass~google-maps-scraper"
+    google_places_api_key: str = ""
+
     woodpecker_api_key: str = ""
     woodpecker_campaign_id: str = ""
 
