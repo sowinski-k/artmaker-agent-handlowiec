@@ -17,6 +17,18 @@ from core.config import settings
 
 T = TypeVar("T", bound=BaseModel)
 
+# ---- Tunables ---------------------------------------------------------------
+# Default request timeout in seconds. Gemini thinking models can be slow on
+# preview tier — 180s gives them room without hanging the GUI forever.
+REQUEST_TIMEOUT_S = 180.0
+
+# Cap thinking budget on Gemini thinking-capable models. Setting a low cap
+# (instead of unlimited) gives 3-5x speedup on preview models with negligible
+# quality loss on our scoring task. Set to 0 to disable thinking entirely on
+# models that allow it (flash); pro/preview models often require >0.
+GEMINI_THINKING_BUDGET = 1024
+
+
 # ---- Pricing reference (USD per 1M tokens). ----------------------------------
 # Used only for "estimated cost" hints in the GUI. Do not rely on this for
 # billing — actual prices come from your provider invoice.
@@ -103,7 +115,10 @@ def _parse_anthropic(
 ) -> tuple[T, dict]:
     import anthropic
 
-    client = anthropic.Anthropic(api_key=_require_anthropic_key())
+    client = anthropic.Anthropic(
+        api_key=_require_anthropic_key(),
+        timeout=REQUEST_TIMEOUT_S,
+    )
     response = client.messages.parse(
         model=model,
         max_tokens=max_tokens,
@@ -125,6 +140,29 @@ def _parse_anthropic(
 
 # ---- Gemini backend ---------------------------------------------------------
 
+def _gemini_thinking_config(model: str):
+    """Low-cap ThinkingConfig for thinking-capable Gemini models.
+
+    Returns None for non-thinking models (e.g. older flash) so we don't pass
+    an unsupported field. The cap drastically cuts latency on preview models.
+    """
+    try:
+        from google.genai.types import ThinkingConfig
+    except ImportError:
+        return None
+
+    name = model.lower()
+    is_thinking_capable = (
+        "preview" in name
+        or "2.5-pro" in name
+        or "2.5-flash" in name
+        or name.startswith("gemini-3")
+    )
+    if not is_thinking_capable:
+        return None
+    return ThinkingConfig(thinking_budget=GEMINI_THINKING_BUDGET)
+
+
 def _parse_gemini(
     *,
     model: str,
@@ -136,17 +174,24 @@ def _parse_gemini(
     from google import genai
     from google.genai import types as genai_types
 
-    client = genai.Client(api_key=_require_gemini_key())
+    http_options = genai_types.HttpOptions(timeout=int(REQUEST_TIMEOUT_S * 1000))
+    client = genai.Client(api_key=_require_gemini_key(), http_options=http_options)
+
+    config_kwargs = dict(
+        system_instruction=system,
+        response_mime_type="application/json",
+        response_schema=output_schema,
+        max_output_tokens=max_tokens,
+        temperature=0.3,
+    )
+    thinking = _gemini_thinking_config(model)
+    if thinking is not None:
+        config_kwargs["thinking_config"] = thinking
+
     response = client.models.generate_content(
         model=model,
         contents=user,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=system,
-            response_mime_type="application/json",
-            response_schema=output_schema,
-            max_output_tokens=max_tokens,
-            temperature=0.3,
-        ),
+        config=genai_types.GenerateContentConfig(**config_kwargs),
     )
     text = response.text or ""
     parsed = output_schema.model_validate_json(text)
