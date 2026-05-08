@@ -17,6 +17,7 @@ from agent.discovery import (
     has_apify_token,
     has_places_key,
     run_search,
+    score_relevance_batch,
 )
 from agent.research import research_and_save
 from core.config import settings
@@ -314,6 +315,17 @@ def render_discovery(provider: str, model: str) -> None:
         per_source = c3.number_input(
             "Max / źródło", min_value=5, max_value=50, value=20, key="discovery_limit"
         )
+        f1, f2 = st.columns([3, 2])
+        use_relevance_filter = f1.checkbox(
+            "Filtr trafności LLM (zalecane — odsiewa mismatche zanim wydasz tokeny na research)",
+            value=True,
+            key="discovery_use_filter",
+        )
+        relevance_threshold = f2.slider(
+            "Próg trafności (auto-zaznacz ≥)",
+            min_value=0, max_value=10, value=6, key="discovery_threshold",
+            help="Wpisy poniżej progu nie są domyślnie zaznaczone (możesz je dozaznaczyć ręcznie).",
+        )
         submitted = st.form_submit_button("Szukaj", type="primary")
 
     if submitted:
@@ -338,11 +350,38 @@ def render_discovery(provider: str, model: str) -> None:
             places, diagnostics = run_search(
                 sources, query=query, max_results_per_source=int(per_source)
             )
+
+        relevance_map: dict[int, dict] = {}
+        relevance_warning: str | None = None
+        if use_relevance_filter and places:
+            with st.spinner(
+                f"Filtr trafności: oceniam {len(places)} kandydatów tanim modelem..."
+            ):
+                try:
+                    items, _usage = score_relevance_batch(
+                        places,
+                        segment=segment,
+                        city=city.strip() or None,
+                    )
+                    for item in items:
+                        if 0 <= item.idx < len(places):
+                            relevance_map[item.idx] = {
+                                "score": int(item.score),
+                                "reason": item.reason,
+                            }
+                except Exception as exc:
+                    relevance_warning = (
+                        f"Filtr trafności padł ({exc}). Pokazuję wszystkich kandydatów bez scoringu."
+                    )
+
         st.session_state["discovery_places"] = [p.model_dump() for p in places]
         st.session_state["discovery_query"] = query
         st.session_state["discovery_diag"] = [d.model_dump() for d in diagnostics]
         st.session_state["discovery_segment_used"] = segment
         st.session_state["discovery_city_used"] = city.strip()
+        st.session_state["discovery_relevance"] = relevance_map
+        st.session_state["discovery_relevance_warning"] = relevance_warning
+        st.session_state["discovery_threshold_used"] = int(relevance_threshold)
 
     places_data = st.session_state.get("discovery_places") or []
     diag_data = st.session_state.get("discovery_diag") or []
@@ -362,12 +401,48 @@ def render_discovery(provider: str, model: str) -> None:
     if not places_data:
         return
 
+    relevance_map: dict[int, dict] = st.session_state.get("discovery_relevance", {}) or {}
+    relevance_warning = st.session_state.get("discovery_relevance_warning")
+    threshold = int(st.session_state.get("discovery_threshold_used", 6))
+
     st.markdown(f"### {len(places_data)} firm znalezionych dla `{st.session_state.get('discovery_query', '')}`")
+    if relevance_warning:
+        st.warning(relevance_warning)
+
+    if relevance_map:
+        kept = sum(1 for s in relevance_map.values() if s["score"] >= threshold)
+        rejected = len(relevance_map) - kept
+        st.caption(
+            f"Filtr trafności: {kept} pasuje (≥{threshold}), {rejected} odrzucone. "
+            "Sortuję od najtrafniejszych. Możesz przesunąć zaznaczenia ręcznie."
+        )
+
+    # Build rows; if scoring is on, sort by relevance desc so the best leads
+    # surface first.
+    indexed_places = list(enumerate(places_data))
+    if relevance_map:
+        def _key(item: tuple[int, dict]) -> tuple[int, int]:
+            i, p = item
+            score = relevance_map.get(i, {}).get("score", -1)
+            reviews = p.get("review_count") or 0
+            return (-score, -reviews)
+        indexed_places.sort(key=_key)
+
     df_rows = []
-    for p in places_data:
+    for original_idx, p in indexed_places:
+        rel = relevance_map.get(original_idx)
+        score_val = rel["score"] if rel else None
+        # Default selection: only "good enough" leads with a website.
+        if rel:
+            default_selected = bool(p.get("website")) and score_val >= threshold
+        else:
+            default_selected = bool(p.get("website"))
         df_rows.append(
             {
-                "Wybierz": bool(p.get("website")),
+                "_orig_idx": original_idx,
+                "Wybierz": default_selected,
+                "Trafność": score_val if score_val is not None else "—",
+                "Komentarz": (rel["reason"] if rel else ""),
                 "Źródło": SOURCE_LABELS.get(p["source"], p["source"]),
                 "Nazwa": p["name"],
                 "Adres": p.get("address") or "—",
@@ -377,24 +452,36 @@ def render_discovery(provider: str, model: str) -> None:
             }
         )
     df = pd.DataFrame(df_rows)
+    visible_cols = [c for c in df.columns if c != "_orig_idx"]
     edited = st.data_editor(
-        df,
+        df[visible_cols],
         column_config={
             "Wybierz": st.column_config.CheckboxColumn(
                 help="Tylko firmy z adresem www zostaną zresearchowane."
             ),
+            "Trafność": st.column_config.NumberColumn(
+                help="Ocena LLM 0-10 (10 = idealny lead). '—' = filtr wyłączony.",
+                format="%d",
+            ),
+            "Komentarz": st.column_config.TextColumn(width="medium"),
             "WWW": st.column_config.LinkColumn(),
         },
         hide_index=True,
         use_container_width=True,
-        disabled=["Źródło", "Nazwa", "Adres", "Ocena", "Opinii", "WWW"],
+        disabled=[c for c in visible_cols if c != "Wybierz"],
         key="discovery_table",
     )
-    selected_idx = edited.index[edited["Wybierz"]].tolist()
-    selected_places = [
-        places_data[i] for i in selected_idx if places_data[i].get("website")
+    # Map editor row indexes (positions in sorted df) back to original places_data indexes.
+    selected_orig_idxs = [
+        int(df.iloc[row_pos]["_orig_idx"])
+        for row_pos in edited.index[edited["Wybierz"]].tolist()
     ]
-    skipped_no_website = sum(1 for i in selected_idx if not places_data[i].get("website"))
+    selected_places = [
+        places_data[i] for i in selected_orig_idxs if places_data[i].get("website")
+    ]
+    skipped_no_website = sum(
+        1 for i in selected_orig_idxs if not places_data[i].get("website")
+    )
     if skipped_no_website:
         st.caption(f"Pominę {skipped_no_website} zaznaczonych firm bez adresu www.")
 

@@ -20,6 +20,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from core.config import settings
+from core.llm import parse_structured
 
 
 class DiscoveredPlace(BaseModel):
@@ -42,6 +43,58 @@ class SourceResult(BaseModel):
     places: list[DiscoveredPlace] = Field(default_factory=list)
     error: str | None = None
     duration_s: float | None = None
+
+
+# ---- Per-segment relevance hints --------------------------------------------
+# Plain-language description of what each LeadSegment really means in business
+# terms — used to anchor the LLM relevance filter so it can spot e.g. that a
+# Kaufland is NOT a sklep plastyczny even though Google Maps loosely matched.
+SEGMENT_DESCRIPTIONS: dict[str, str] = {
+    "sklep_plastyczny": (
+        "Sklep z artykułami plastycznymi i papierniczymi dla artystów, plastyków, "
+        "uczniów i hobbystów: farby, pędzle, płótna, papiery, glina, materiały "
+        "do rękodzieła, scrapbooking. NIE: supermarkety, apteki, sklepy "
+        "medyczne, motoryzacyjne, AGD/RTV, ogólne sklepy przemysłowe, sklepy "
+        "z zabawkami, zoologiczne."
+    ),
+    "paint_and_sip": (
+        "Studio paint & sip / wieczory ze sztalugą — rozrywka, w której goście "
+        "malują obraz przy lampce wina pod okiem instruktora. NIE: zwykłe "
+        "kawiarnie, restauracje, sklepy z farbami."
+    ),
+    "warsztaty_dzieci": (
+        "Firma prowadząca regularne warsztaty kreatywne, plastyczne, "
+        "ceramiczne, artystyczne dla dzieci i młodzieży. NIE: szkoły publiczne, "
+        "przedszkola, kluby sportowe, sklepy z zabawkami."
+    ),
+    "animatorzy_eventy": (
+        "Animatorzy zabaw dziecięcych, organizatorzy urodzin i eventów dla "
+        "dzieci, firmy eventowe robiące rękodzieło lub plastyczne aktywności. "
+        "NIE: cateringi, sale weselne, fotografowie."
+    ),
+    "szkola_artystyczna": (
+        "Szkoła plastyczna, artystyczna, pracownia malarstwa, kurs rysunku, "
+        "ASP, prywatna szkoła sztuk pięknych. NIE: szkoły muzyczne, "
+        "językowe, podstawowe."
+    ),
+    "marka_wlasna": (
+        "Producent / marka oferująca produkty plastyczne/artystyczne pod własnym "
+        "logo lub firma poszukująca dostawcy do white-label. NIE: ogólne sklepy."
+    ),
+    "inne": "Inny segment — oceniaj na podstawie nazwy i kategorii.",
+}
+
+
+# ---- Pydantic models for relevance batch ------------------------------------
+
+class RelevanceItem(BaseModel):
+    idx: int = Field(description="Indeks kandydata z listy wejściowej (0-based)")
+    score: int = Field(description="Trafność 0-10 (10 = idealny lead, 0 = ewidentnie nie pasuje)")
+    reason: str = Field(description="Krótkie uzasadnienie po polsku, max 1 zdanie")
+
+
+class RelevanceBatch(BaseModel):
+    items: list[RelevanceItem]
 
 
 # ---- Secret resolution (env first, Streamlit secrets as fallback) -----------
@@ -288,3 +341,67 @@ def run_search(
             else:
                 seen[key] = place
     return list(seen.values()), results
+
+
+# ---- Relevance filter (cheap LLM batch scoring) -----------------------------
+
+def score_relevance_batch(
+    places: list[DiscoveredPlace],
+    *,
+    segment: str,
+    city: str | None = None,
+    provider: str = "gemini",
+    model: str = "gemini-2.5-flash-lite",
+) -> tuple[list[RelevanceItem], dict]:
+    """Score relevance of every candidate against the target segment+city in
+    a single LLM call. Returns (items, usage_dict).
+
+    Default model is the cheapest available — this is meant to be run on
+    20-50 candidates at a time and cost a fraction of a cent. The full
+    research pipeline (research_and_save) is ~30x more expensive per lead,
+    so filtering here saves both money and time.
+    """
+    if not places:
+        return [], {}
+
+    description = SEGMENT_DESCRIPTIONS.get(
+        segment, SEGMENT_DESCRIPTIONS["inne"]
+    )
+    catalog_lines = []
+    for i, p in enumerate(places):
+        category = p.notes or "?"
+        addr = p.address or "?"
+        catalog_lines.append(f"[{i}] {p.name} | kategoria: {category} | adres: {addr}")
+    catalog = "\n".join(catalog_lines)
+
+    system = (
+        "Jesteś bezlitosnym filtrem leadów dla agenta sprzedaży B2B. Twoim "
+        "zadaniem jest odsiać firmy, które nie pasują do zadanego segmentu. "
+        "Lepiej odrzucić wątpliwy lead niż zmarnować budżet research'u na "
+        "ewidentny mismatch. Bądź surowy. Zwracasz wyłącznie poprawny JSON "
+        "zgodny ze schematem."
+    )
+    city_clause = f"Miasto docelowe: {city}\n" if city else ""
+    user = (
+        f"Segment docelowy: {segment}\n"
+        f"Definicja segmentu: {description}\n"
+        f"{city_clause}\n"
+        f"Kandydaci (idx | nazwa | kategoria | adres):\n{catalog}\n\n"
+        "Dla KAŻDEGO kandydata zwróć obiekt {idx, score, reason}:\n"
+        "- score 10 = idealny lead, dokładnie ten typ firmy\n"
+        "- score 7-9 = bardzo prawdopodobny lead, warto zresearchować\n"
+        "- score 4-6 = niepewny, potencjalnie pasuje ale ryzyko mismatch\n"
+        "- score 1-3 = ewidentnie nie pasuje (inna branża, inne miasto)\n"
+        "- score 0 = na pewno śmieć (supermarket, apteka, motoryzacja itp.)\n"
+        "Pisz reason po polsku, jedno krótkie zdanie. Zwróć WSZYSTKIE indeksy."
+    )
+
+    parsed, usage = parse_structured(
+        system=system,
+        user=user,
+        output_schema=RelevanceBatch,
+        provider=provider,
+        model=model,
+        max_tokens=4096,
+    )
+    return parsed.items, usage
