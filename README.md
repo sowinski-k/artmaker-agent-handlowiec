@@ -27,6 +27,26 @@ nieimplementowana.
     pip install -r requirements.txt
     cp .env.example .env               # i uzupełnij klucze
 
+### Klucz Anthropic (wymagany do researchu i generowania)
+
+1. Załóż konto na https://console.anthropic.com, doładuj kredyty (~5 USD na start).
+2. Settings → API Keys → Create Key.
+3. Wklej do `.env`:
+
+       ANTHROPIC_API_KEY=sk-ant-...
+
+### Klucze na Streamlit Cloud
+
+`.env` jest lokalny i nie wjeżdża do gita. Dla wersji wdrożonej na Streamlit
+Community Cloud trzeba dodać sekrety w panelu aplikacji:
+
+1. share.streamlit.io → Twoja aplikacja → **Settings** → **Secrets**.
+2. Wklej w formacie TOML:
+
+       ANTHROPIC_API_KEY = "sk-ant-..."
+
+Aplikacja zrestartuje się i pobierze sekrety przez `st.secrets`.
+
 ## GUI
 
     streamlit run gui/app.py
@@ -35,10 +55,17 @@ Otwiera się na http://localhost:8501.
 
 ## Moduły agenta
 
-    python -m agent.research
+    python -m agent.research --url https://przyklad.pl
+    python -m agent.research --url https://przyklad.pl --segment paint_and_sip --city Warszawa
     python -m agent.generate
     python -m agent.push_to_sender
     python -m agent.followup
+
+`agent.research` pobiera homepage + podstrony (kontakt / o nas / oferta),
+wysyła treść do Claude'a, który ocenia lead według rubryki (5 kategorii × 0-2pkt)
+i klasyfikuje do jednego z 7 segmentów. Zapisuje wynik do bazy ze statusem
+`researched`. Manualnie można też dodawać przez formularz w GUI (zakładka
+Leady).
 
 Każdy moduł sprawdza `STOP.txt` i `DRY_RUN` zanim zrobi cokolwiek wychodzącego
 na zewnątrz.

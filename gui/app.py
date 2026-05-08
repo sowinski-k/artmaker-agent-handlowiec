@@ -9,17 +9,21 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import func, select
 
+from agent.research import research_and_save
 from core.config import settings
 from core.db import (
     DraftStatus,
     EmailDraft,
     Event,
     Lead,
+    LeadSegment,
     LeadStatus,
     SessionLocal,
     init_db,
 )
 from core.kill_switch import is_stopped, resume, stop
+
+SEGMENT_VALUES: list[str] = [s.value for s in LeadSegment]
 
 st.set_page_config(page_title="Artmaker — Agent Handlowiec", layout="wide")
 
@@ -112,32 +116,169 @@ def render_dashboard() -> None:
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
+def _render_manual_entry_form() -> None:
+    with st.expander("Dodaj leada (researchuj URL)", expanded=False):
+        with st.form("manual_lead_form", clear_on_submit=True):
+            url = st.text_input(
+                "URL strony firmy",
+                placeholder="https://przyklad.pl",
+                help="Wklej link do strony www potencjalnego klienta. Agent ją przeczyta i oceni.",
+            )
+            c1, c2 = st.columns(2)
+            segment_hint = c1.selectbox(
+                "Segment (hint, opcjonalnie)",
+                ["(pozwól agentowi wybrać)", *SEGMENT_VALUES],
+                index=0,
+            )
+            city_hint = c2.text_input("Miasto (hint, opcjonalnie)", placeholder="np. Warszawa")
+            submitted = st.form_submit_button("Researchuj", type="primary")
+
+        if submitted:
+            if not url.strip():
+                st.warning("Podaj URL.")
+                return
+            seg = None if segment_hint == "(pozwól agentowi wybrać)" else segment_hint
+            with st.status("Researchuję leada...", expanded=True) as status:
+                try:
+                    status.write("Pobieram treść strony i podstrony (kontakt, o nas, oferta)...")
+                    status.write("Wysyłam do Claude'a do oceny według rubryki...")
+                    lead_id, result = research_and_save(
+                        url.strip(),
+                        segment_hint=seg,
+                        city_hint=city_hint.strip() or None,
+                    )
+                    status.update(label=f"Gotowe — score {result.score.total}/10", state="complete")
+                    st.success(
+                        f"**{result.company_name}** zapisany jako lead #{lead_id}. "
+                        f"Segment: `{result.segment}`, score: **{result.score.total}/10**."
+                    )
+                    st.caption(result.rationale)
+                except Exception as exc:
+                    status.update(label="Research nie powiódł się", state="error")
+                    st.error(f"Błąd: {exc}")
+
+
+def _score_label(score: float | None) -> str:
+    if score is None:
+        return "—"
+    if score >= 7:
+        return "HOT"
+    if score >= 5:
+        return "WARM"
+    return "COLD"
+
+
 def render_leads() -> None:
+    _render_manual_entry_form()
+
     with SessionLocal() as session:
         leads = (
-            session.execute(select(Lead).order_by(Lead.created_at.desc())).scalars().all()
+            session.execute(select(Lead).order_by(Lead.score.desc().nullslast(), Lead.created_at.desc()))
+            .scalars()
+            .all()
         )
+
     if not leads:
-        st.info(
-            "Baza leadów jest pusta. Moduł `agent/research.py` jeszcze nie zaimplementowany."
-        )
+        st.info("Baza leadów jest pusta. Użyj formularza powyżej, żeby dodać pierwszego.")
         return
+
+    f1, f2, f3 = st.columns([2, 2, 2])
+    seg_filter = f1.multiselect("Segment", SEGMENT_VALUES, default=[])
+    status_filter = f2.multiselect(
+        "Status", [s.value for s in LeadStatus], default=[]
+    )
+    min_score = f3.slider("Min score", 0.0, 10.0, 0.0, 0.5)
+
+    filtered = [
+        lead
+        for lead in leads
+        if (not seg_filter or lead.segment in seg_filter)
+        and (not status_filter or lead.status in status_filter)
+        and (lead.score is None or lead.score >= min_score)
+    ]
+
+    st.caption(f"Pokazuję {len(filtered)} z {len(leads)} leadów.")
+
     df = pd.DataFrame(
         [
             {
                 "id": lead.id,
+                "score": f"{_score_label(lead.score)} {lead.score:.1f}" if lead.score is not None else "-",
                 "firma": lead.company_name,
                 "segment": lead.segment,
-                "miasto": lead.city,
-                "email": lead.email,
-                "score": lead.score,
+                "miasto": lead.city or "-",
+                "email": lead.email or "-",
+                "kontakt": lead.contact_name or "-",
                 "status": lead.status,
                 "dodany": lead.created_at.strftime("%Y-%m-%d"),
             }
-            for lead in leads
+            for lead in filtered
         ]
     )
     st.dataframe(df, hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.subheader("Szczegóły leadów")
+
+    for lead in filtered[:20]:
+        score_display = f"{lead.score:.1f}" if lead.score is not None else "-"
+        title = (
+            f"#{lead.id}  {_score_label(lead.score)} {score_display}/10  "
+            f"— {lead.company_name}  ({lead.segment})"
+        )
+        with st.expander(title):
+            data = lead.research_data or {}
+            score = data.get("score") or {}
+
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                if data.get("rationale"):
+                    st.markdown(f"**Uzasadnienie:** {data['rationale']}")
+
+                hooks = data.get("concrete_hooks") or []
+                if hooks:
+                    st.markdown("**Konkretne sygnały (hooki do personalizacji):**")
+                    for h in hooks:
+                        st.markdown(f"- *{h.get('text', '')}* — _{h.get('source', '')}_")
+
+                warnings = data.get("warning_flags") or []
+                if warnings:
+                    st.warning("Warning flags: " + "; ".join(warnings))
+
+            with c2:
+                st.markdown("**Score breakdown:**")
+                if score:
+                    st.markdown(
+                        f"- Activity: {score.get('activity', '?')}/2\n"
+                        f"- Scale: {score.get('scale', '?')}/2\n"
+                        f"- Fit: {score.get('fit', '?')}/2\n"
+                        f"- Bulk potential: {score.get('bulk_potential', '?')}/2\n"
+                        f"- Contact quality: {score.get('contact_quality', '?')}/2\n"
+                        f"- **TOTAL: {score.get('total', '?')}/10**"
+                    )
+                if data.get("estimated_monthly_volume"):
+                    st.markdown(f"**Szacowany wolumen:** {data['estimated_monthly_volume']}")
+
+                st.markdown("**Kontakt:**")
+                st.markdown(
+                    f"- Email: {lead.email or '-'}\n"
+                    f"- Telefon: {lead.phone or '-'}\n"
+                    f"- WWW: {lead.website or '-'}\n"
+                    f"- Instagram: {lead.instagram or '-'}\n"
+                    f"- Osoba: {lead.contact_name or '-'}"
+                )
+
+            del_col, _ = st.columns([1, 5])
+            if del_col.button("Usuń leada", key=f"delete-lead-{lead.id}"):
+                with SessionLocal() as s:
+                    obj = s.get(Lead, lead.id)
+                    if obj is not None:
+                        s.delete(obj)
+                        s.commit()
+                st.rerun()
+
+    if len(filtered) > 20:
+        st.caption(f"...i {len(filtered) - 20} więcej (zawęź filtrami).")
 
 
 def render_drafts() -> None:
