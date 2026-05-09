@@ -90,7 +90,15 @@ def _load_campaigns(path: Path) -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _run_campaign(campaign: dict, *, max_total_research: int) -> dict:
+def _run_campaign(
+    campaign: dict,
+    *,
+    max_total_research: int,
+    research_provider: str | None = None,
+    research_model: str | None = None,
+    draft_provider: str | None = None,
+    draft_model: str | None = None,
+) -> dict:
     name = campaign.get("name") or "(unnamed)"
     log = logger.bind(source="nightly", campaign=name)
     log.info(f"Starting campaign: {name}")
@@ -168,6 +176,8 @@ def _run_campaign(campaign: dict, *, max_total_research: int) -> dict:
                 place.website,
                 segment_hint=campaign.get("segment"),
                 city_hint=campaign.get("city") or None,
+                provider=research_provider,
+                model=research_model,
             )
         except Exception as exc:
             failed += 1
@@ -183,7 +193,9 @@ def _run_campaign(campaign: dict, *, max_total_research: int) -> dict:
         )
         if result.score.total >= draft_threshold:
             try:
-                draft_id = generate_draft_for_lead(lead_id)
+                draft_id = generate_draft_for_lead(
+                    lead_id, provider=draft_provider, model=draft_model
+                )
                 drafted += 1
                 log.info(f"Draft #{draft_id} for lead #{lead_id}.")
             except Exception as exc:
@@ -213,6 +225,22 @@ def main() -> None:
         default=50,
         help="Hard cap on total researches across the whole run.",
     )
+    parser.add_argument(
+        "--research-provider", default=None,
+        help="LLM provider for research (anthropic|gemini). Default: from .env / settings.",
+    )
+    parser.add_argument(
+        "--research-model", default=None,
+        help="LLM model id for research. Default: from .env / settings.",
+    )
+    parser.add_argument(
+        "--draft-provider", default=None,
+        help="LLM provider for draft generation. Default: same as research.",
+    )
+    parser.add_argument(
+        "--draft-model", default=None,
+        help="LLM model id for draft generation. Default: same as research.",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -222,6 +250,9 @@ def main() -> None:
         logger.bind(source="nightly").warning("STOP.txt present — nightly aborted.")
         return
 
+    draft_provider = args.draft_provider or args.research_provider
+    draft_model = args.draft_model or args.research_model
+
     campaigns = _load_campaigns(Path(args.campaigns))
     summaries = []
     remaining_budget = int(args.max)
@@ -230,7 +261,14 @@ def main() -> None:
             break
         if is_stopped():
             break
-        result = _run_campaign(campaign, max_total_research=remaining_budget)
+        result = _run_campaign(
+            campaign,
+            max_total_research=remaining_budget,
+            research_provider=args.research_provider,
+            research_model=args.research_model,
+            draft_provider=draft_provider,
+            draft_model=draft_model,
+        )
         summaries.append(result)
         remaining_budget -= int(result.get("researched", 0))
 

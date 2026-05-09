@@ -112,6 +112,7 @@ def _parse_anthropic(
     user: str,
     output_schema: type[T],
     max_tokens: int,
+    temperature: float = 0.3,
 ) -> tuple[T, dict]:
     import anthropic
 
@@ -122,6 +123,7 @@ def _parse_anthropic(
     response = client.messages.parse(
         model=model,
         max_tokens=max_tokens,
+        temperature=temperature,
         system=[
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
         ],
@@ -170,6 +172,7 @@ def _parse_gemini(
     user: str,
     output_schema: type[T],
     max_tokens: int,
+    temperature: float = 0.3,
 ) -> tuple[T, dict]:
     from google import genai
     from google.genai import types as genai_types
@@ -182,7 +185,7 @@ def _parse_gemini(
         response_mime_type="application/json",
         response_schema=output_schema,
         max_output_tokens=max_tokens,
-        temperature=0.3,
+        temperature=temperature,
     )
     thinking = _gemini_thinking_config(model)
     if thinking is not None:
@@ -215,18 +218,26 @@ def parse_structured(
     user: str,
     output_schema: type[T],
     max_tokens: int = 4096,
+    temperature: float = 0.3,
 ) -> tuple[T, dict]:
-    """Call the chosen provider, return (parsed_pydantic_model, usage_info)."""
+    """Call the chosen provider, return (parsed_pydantic_model, usage_info).
+
+    Default temperature 0.3 is right for grounded, deterministic structured
+    output (research scoring, relevance classification). Bump for creative
+    work — drafts use ~0.85 to escape AI-cliché defaults.
+    """
     provider = provider.lower()
     if provider == "anthropic":
         return _parse_anthropic(
             model=model, system=system, user=user,
             output_schema=output_schema, max_tokens=max_tokens,
+            temperature=temperature,
         )
     if provider == "gemini":
         return _parse_gemini(
             model=model, system=system, user=user,
             output_schema=output_schema, max_tokens=max_tokens,
+            temperature=temperature,
         )
     raise ValueError(f"Unknown LLM provider: {provider!r}. Use 'anthropic' or 'gemini'.")
 

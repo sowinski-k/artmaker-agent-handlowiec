@@ -123,8 +123,17 @@ def _start_of_day_utc() -> datetime:
 
 
 def render_dashboard() -> None:
+    # ---- Top metrics ----
     with SessionLocal() as session:
         total_leads = session.scalar(select(func.count(Lead.id))) or 0
+        researched = (
+            session.scalar(
+                select(func.count(Lead.id)).where(
+                    Lead.status == LeadStatus.RESEARCHED.value
+                )
+            )
+            or 0
+        )
         drafts_pending = (
             session.scalar(
                 select(func.count(EmailDraft.id)).where(
@@ -148,59 +157,107 @@ def render_dashboard() -> None:
             )
             or 0
         )
+        avg_score = session.scalar(select(func.avg(Lead.score))) or 0.0
+        hot_leads = (
+            session.scalar(
+                select(func.count(Lead.id)).where(Lead.score >= 7.0)
+            )
+            or 0
+        )
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Leady (total)", total_leads)
-    c2.metric("Drafty do review", drafts_pending)
-    c3.metric("Wysłane dziś", sent_today)
-    c4.metric("Odpowiedzi", replied)
+    c1.metric("Leady (total)", total_leads, help="Wszystkie firmy w bazie.")
+    c2.metric(
+        "🔥 Hot leady", hot_leads,
+        help="Leady ze score ≥ 7 - priorytet do wysyłki.",
+    )
+    c3.metric("Drafty do review", drafts_pending)
+    c4.metric("Średni score", f"{avg_score:.1f}/10" if avg_score else "—")
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Researchowane", researched)
+    c6.metric("Wysłane dziś", sent_today)
+    c7.metric("Odpowiedzi", replied)
+    if total_leads > 0:
+        reply_rate = (replied / total_leads) * 100
+        c8.metric("Reply rate", f"{reply_rate:.1f}%")
+    else:
+        c8.metric("Reply rate", "—")
 
     st.divider()
-    st.subheader("Status agenta")
 
-    stopped = is_stopped()
-    bcol1, bcol2 = st.columns([1, 4])
-    with bcol1:
+    # ---- Quick actions ----
+    qa1, qa2 = st.columns([3, 2])
+    with qa1:
+        st.subheader("Co dalej?")
+        if total_leads == 0:
+            st.info("👉 Zacznij od zakładki **Pozyskiwanie** żeby znaleźć pierwsze leady.")
+        elif drafts_pending > 0:
+            st.success(
+                f"✉️ Masz **{drafts_pending}** draftów do review w zakładce **Drafty**."
+            )
+        elif researched > 0:
+            st.info(
+                f"📝 **{researched}** leadów czeka na drafty maili. "
+                "Wygeneruj je w zakładce **Drafty** (przycisk 'Bulk-generuj drafty')."
+            )
+        else:
+            st.caption("Wszystko ogarnięte. Możesz odpalić nową rundę pozyskiwania.")
+    with qa2:
+        st.subheader("Status agenta")
+        stopped = is_stopped()
         if stopped:
-            if st.button("Wznów agenta", type="primary", use_container_width=True):
+            st.error("⛔ ZATRZYMANY")
+            if st.button("Wznów", type="primary", use_container_width=True):
                 resume()
                 st.rerun()
         else:
-            if st.button("ZATRZYMAJ AGENTA", type="primary", use_container_width=True):
+            st.success("✅ Aktywny")
+            if st.button("⛔ Zatrzymaj", use_container_width=True):
                 stop("stopped from GUI")
                 st.rerun()
-    with bcol2:
-        if stopped:
-            st.error("Agent ZATRZYMANY (STOP.txt obecny). Skrypty agenta nie wykonują akcji.")
-        else:
-            st.success("Agent aktywny. Skrypty mogą wykonywać akcje.")
         if settings.dry_run:
-            st.info("DRY_RUN=true — żadne zewnętrzne wywołania nie wyjdą (Woodpecker itp.).")
+            st.warning("DRY_RUN=true (nic nie wyjdzie na zewnątrz)")
 
     st.divider()
-    st.subheader("Ostatnie zdarzenia")
-    with SessionLocal() as session:
-        events = (
-            session.execute(select(Event).order_by(Event.created_at.desc()).limit(10))
-            .scalars()
-            .all()
+
+    # ---- Segment breakdown + recent events side-by-side ----
+    bd_col, ev_col = st.columns([2, 3])
+    with bd_col:
+        st.subheader("Leady wg segmentu")
+        with SessionLocal() as session:
+            seg_rows = session.execute(
+                select(Lead.segment, func.count(Lead.id))
+                .group_by(Lead.segment)
+                .order_by(func.count(Lead.id).desc())
+            ).all()
+        if seg_rows:
+            seg_df = pd.DataFrame(seg_rows, columns=["Segment", "Liczba"])
+            st.dataframe(seg_df, hide_index=True, use_container_width=True)
+        else:
+            st.caption("Brak leadów.")
+    with ev_col:
+        st.subheader("Ostatnie zdarzenia")
+        with SessionLocal() as session:
+            events = (
+                session.execute(select(Event).order_by(Event.created_at.desc()).limit(8))
+                .scalars()
+                .all()
+            )
+        if not events:
+            st.caption("Brak zdarzeń.")
+            return
+        df = pd.DataFrame(
+            [
+                {
+                    "kiedy": e.created_at.strftime("%m-%d %H:%M"),
+                    "źródło": e.source or "",
+                    "wiadomość": (e.message[:80] + "...") if len(e.message) > 80 else e.message,
+                }
+                for e in events
+            ]
         )
-    if not events:
-        st.caption("Brak zdarzeń. Uruchom moduł agenta, żeby zobaczyć aktywność.")
-        return
-    df = pd.DataFrame(
-        [
-            {
-                "kiedy": e.created_at.strftime("%Y-%m-%d %H:%M"),
-                "poziom": e.level,
-                "źródło": e.source or "",
-                "typ": e.type,
-                "wiadomość": e.message,
-            }
-            for e in events
-        ]
-    )
-    st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, use_container_width=True)
 
 
 def _render_manual_entry_form(provider: str, model: str) -> None:
@@ -299,10 +356,10 @@ def _build_sources(selected: list[str], csv_bytes: bytes | None) -> list:
 
 
 def render_discovery(provider: str, model: str) -> None:
-    st.subheader("Pozyskiwanie leadów")
+    st.subheader("🎯 Pozyskiwanie leadów")
     st.caption(
-        "Wybierz źródła, podaj zapytanie i uruchom kilku agentów równolegle. "
-        "Wyniki są deduplikowane po adresie www, zaznaczasz które researchować."
+        f"Modele: research **{provider}/{model}**, draft też. "
+        "Filtr trafności jedzie tanim Gemini flash-lite niezależnie."
     )
 
     apify_ok = has_apify_token()
@@ -310,49 +367,50 @@ def render_discovery(provider: str, model: str) -> None:
     allegro_ok = apify_ok and bool(_settings_for_apify.apify_allegro_actor)
     linkedin_ok = apify_ok and bool(_settings_for_apify.apify_linkedin_actor)
 
-    row1 = st.columns(3)
-    use_apify = row1[0].checkbox(
-        f"Apify Google Maps {'✓' if apify_ok else '✗'}",
-        value=apify_ok,
-        disabled=not apify_ok,
-        help="Apify Google Maps Scraper actor. Wymaga APIFY_API_TOKEN.",
-    )
-    use_places = row1[1].checkbox(
-        f"Google Places API {'✓' if places_ok else '✗'}",
-        value=places_ok,
-        disabled=not places_ok,
-        help="Google Places API (New) Text Search. Wymaga GOOGLE_PLACES_API_KEY.",
-    )
-    use_csv = row1[2].checkbox(
-        "Import CSV",
-        value=False,
-        help="Wgraj CSV z kolumną 'url' (i opcjonalnie 'name', 'address', 'phone').",
-    )
-    row2 = st.columns(3)
-    use_allegro = row2[0].checkbox(
-        f"Apify Allegro {'✓' if allegro_ok else '✗'}",
-        value=False,
-        disabled=not allegro_ok,
-        help=(
-            "Apify Allegro Scraper. Wymaga APIFY_API_TOKEN + APIFY_ALLEGRO_ACTOR "
-            "(actor id z apify.com/store)."
-        ),
-    )
-    use_linkedin = row2[1].checkbox(
-        f"Apify LinkedIn {'✓' if linkedin_ok else '✗'}",
-        value=False,
-        disabled=not linkedin_ok,
-        help=(
-            "Apify LinkedIn Companies Scraper. Wymaga APIFY_API_TOKEN + "
-            "APIFY_LINKEDIN_ACTOR. Sprawdź TOS LinkedIn i przepisy GDPR."
-        ),
-    )
+    with st.expander("📡 Źródła leadów", expanded=True):
+        row1 = st.columns(3)
+        use_apify = row1[0].checkbox(
+            f"Apify Google Maps {'✓' if apify_ok else '✗'}",
+            value=apify_ok,
+            disabled=not apify_ok,
+            help="Apify Google Maps Scraper actor. Wymaga APIFY_API_TOKEN.",
+        )
+        use_places = row1[1].checkbox(
+            f"Google Places API {'✓' if places_ok else '✗'}",
+            value=places_ok,
+            disabled=not places_ok,
+            help="Google Places API (New) Text Search. Wymaga GOOGLE_PLACES_API_KEY.",
+        )
+        use_csv = row1[2].checkbox(
+            "Import CSV",
+            value=False,
+            help="Wgraj CSV z kolumną 'url' (i opcjonalnie 'name', 'address', 'phone').",
+        )
+        row2 = st.columns(3)
+        use_allegro = row2[0].checkbox(
+            f"Apify Allegro {'✓' if allegro_ok else '✗'}",
+            value=False,
+            disabled=not allegro_ok,
+            help=(
+                "Apify Allegro Scraper. Wymaga APIFY_API_TOKEN + APIFY_ALLEGRO_ACTOR "
+                "(actor id z apify.com/store)."
+            ),
+        )
+        use_linkedin = row2[1].checkbox(
+            f"Apify LinkedIn {'✓' if linkedin_ok else '✗'}",
+            value=False,
+            disabled=not linkedin_ok,
+            help=(
+                "Apify LinkedIn Companies Scraper. Wymaga APIFY_API_TOKEN + "
+                "APIFY_LINKEDIN_ACTOR. Sprawdź TOS LinkedIn i przepisy GDPR."
+            ),
+        )
 
-    csv_bytes: bytes | None = None
-    if use_csv:
-        uploaded = st.file_uploader("Plik CSV", type=["csv"], key="discovery_csv")
-        if uploaded is not None:
-            csv_bytes = uploaded.read()
+        csv_bytes: bytes | None = None
+        if use_csv:
+            uploaded = st.file_uploader("Plik CSV", type=["csv"], key="discovery_csv")
+            if uploaded is not None:
+                csv_bytes = uploaded.read()
 
     with st.form("discovery_form"):
         c1, c2 = st.columns([2, 1])
@@ -389,7 +447,7 @@ def render_discovery(provider: str, model: str) -> None:
             wojewodztwo = ""
 
         custom_target = st.text_area(
-            "Lub opisz własny target (free-form, ma pierwszeństwo nad segmentem)",
+            "✏️ Lub opisz własny target (free-form, nadpisuje segment powyżej)",
             placeholder=(
                 "Np. 'producenci sztalug i ram do obrazów w Polsce, którzy mogliby "
                 "kupować od nas hurtowo lub robić private label'"
@@ -397,39 +455,40 @@ def render_discovery(provider: str, model: str) -> None:
             height=70,
             key="discovery_custom_target",
         )
-        f1, f2 = st.columns([3, 2])
+
+        st.markdown("**⚡ Automatyzacja**")
+        f1, f2 = st.columns([3, 1])
         use_relevance_filter = f1.checkbox(
-            "Filtr trafności LLM (zalecane — odsiewa mismatche zanim wydasz tokeny na research)",
+            "🎯 Filtr trafności LLM",
             value=True,
             key="discovery_use_filter",
+            help="Odsiewa mismatche taniutkim modelem zanim wydasz tokeny na research. ~$0.001 / 20 firm.",
         )
         relevance_threshold = f2.slider(
-            "Próg trafności (auto-zaznacz ≥)",
+            "Min trafność",
             min_value=0, max_value=10, value=6, key="discovery_threshold",
-            help="Wpisy poniżej progu nie są domyślnie zaznaczone (możesz je dozaznaczyć ręcznie).",
         )
-        auto_research = st.checkbox(
-            "🔥 Auto-research: po wyszukaniu odpal research na wszystkich pasujących bez ręcznego klikania",
+
+        a1, a2, a3 = st.columns([2, 2, 1])
+        auto_research = a1.checkbox(
+            "🔥 Auto-research",
             value=False,
             key="discovery_auto_research",
-            help="Łączy Szukaj → Filtr → Bulk research w jeden ruch. Wymaga włączonego filtra trafności.",
+            help="Po filtrze odpala research na wszystkich pasujących bez klikania.",
         )
-        ap1, ap2 = st.columns([3, 2])
-        auto_draft = ap1.checkbox(
-            "✉️ Auto-pipeline: gdy research wyjdzie z wysokim score, od razu generuj draft maila",
+        auto_draft = a2.checkbox(
+            "✉️ Auto-pipeline (draft)",
             value=False,
             key="discovery_auto_draft",
-            help=(
-                "Po pozytywnym researchu odpala generator maila (agent/generate.py) "
-                "i zapisuje draft do review w zakładce Drafty."
-            ),
+            help="Po researchu z wysokim score od razu generuje draft maila.",
         )
-        auto_draft_threshold = ap2.slider(
-            "Próg score → draft",
+        auto_draft_threshold = a3.slider(
+            "Min score draftu",
             min_value=0, max_value=10, value=7,
             key="discovery_auto_draft_threshold",
         )
-        submitted = st.form_submit_button("Szukaj", type="primary")
+
+        submitted = st.form_submit_button("🚀 Szukaj", type="primary", use_container_width=True)
 
     if submitted:
         selected_sources = [

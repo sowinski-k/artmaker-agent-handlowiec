@@ -2,8 +2,8 @@
 
 Reads:
     - leads.research_data (ResearchResult JSON, includes concrete_hooks)
-    - prompts/brand.py (Artmaker positioning — single source of truth)
-    - prompts/few_shot_examples/*.md (owner's real writing — voice anchor; optional)
+    - prompts/brand.py (Artmaker positioning - single source of truth)
+    - prompts/few_shot_examples/*.md (owner's real writing - voice anchor; optional)
 
 Writes:
     - email_drafts row with status=draft (subject + snippet1..snippet5 Woodpecker-compatible)
@@ -13,6 +13,12 @@ Personalization rule: every snippet that references the lead must use a
 concrete_hook from research_data. No generic "hope this finds you well"
 openers. Subject must be specific to the lead's segment and what we offer.
 
+Anti-AI defaults:
+    - temperature=0.85 (escape deterministic AI cliche basin)
+    - hard rules in the prompt (no em-dash, no buzzwords, short sentences)
+    - _strip_ai_artifacts post-process strips dashes / smart quotes / leftover
+      AI tells before the draft hits the DB
+
 CLI usage:
     python -m agent.generate --lead-id 42
     python -m agent.generate --all-researched   # bulk for all researched leads
@@ -20,6 +26,7 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from typing import Optional
 
@@ -42,6 +49,66 @@ from prompts.brand import BRAND_CONTEXT
 
 
 FEW_SHOT_DIR = PROJECT_ROOT / "prompts" / "few_shot_examples"
+
+
+# Drafting temperature - escape the deterministic AI cliche basin while
+# staying coherent. 0.85 is the sweet spot for cold email copy.
+DRAFT_TEMPERATURE = 0.85
+
+
+# Punctuation substitutions: kill em-dash, en-dash, smart quotes that AI
+# detectors love and that scream "generated".
+_PUNCT_REPLACEMENTS = {
+    "—": "-",   # em-dash
+    "–": "-",   # en-dash
+    "−": "-",   # minus sign
+    "“": '"',   # left double smart quote
+    "”": '"',   # right double smart quote
+    "„": '"',   # double low-9 quote (Polish opening)
+    "‚": "'",   # single low-9 quote
+    "‘": "'",   # left single smart quote
+    "’": "'",   # right single smart quote / apostrophe
+    "«": '"',   # left guillemet
+    "»": '"',   # right guillemet
+    "…": "...", # ellipsis
+    " ": " ",   # non-breaking space
+}
+
+# Phrases the LLM tends to slip in despite instructions. Hard-strip them.
+# Order matters: longer first to avoid partial matches.
+_AI_CLICHES = [
+    r"Mam nadzieję, że ta wiadomość zastanie [^.,!?\n]*[.,!?]?\s*",
+    r"Mam nadzieję, że [^.,!?\n]*?dobrym zdrowiu[.,!?]?\s*",
+    r"Pozdrawiam serdecznie[,.!]?\s*",
+    r"Z wyrazami szacunku[,.!]?\s*",
+    r"Z poważaniem[,.!]?\s*",
+    r"Pragnę (?:poinformować|zaproponować|przedstawić)[^.,!?\n]*[.,!?]?\s*",
+    r"Chciał(?:a)?bym (?:zaproponować|przedstawić)[^.,!?\n]*[.,!?]?\s*",
+    r"Korzystając z okazji[^.,!?\n]*[.,!?]?\s*",
+    r"Uprzejmie informuję[^.,!?\n]*[.,!?]?\s*",
+    r"W dzisiejszych czasach\s+",
+]
+_AI_CLICHE_PATTERN = re.compile("|".join(_AI_CLICHES), re.IGNORECASE)
+
+
+def _strip_ai_artifacts(text: str | None) -> str | None:
+    """Punctuation + cliche scrub. Idempotent.
+
+    - Replaces em-dash / en-dash / smart quotes with ASCII equivalents.
+    - Removes blacklisted AI/corpo phrases the model occasionally smuggles in.
+    - Collapses runs of spaces and trims edges.
+
+    Returns the cleaned string, or None if input was None/empty.
+    """
+    if not text:
+        return text
+    out = text
+    for src, dst in _PUNCT_REPLACEMENTS.items():
+        out = out.replace(src, dst)
+    out = _AI_CLICHE_PATTERN.sub("", out)
+    out = re.sub(r"[ \t]+", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 class EmailDraftPayload(BaseModel):
@@ -99,39 +166,139 @@ def _build_user_prompt(lead: Lead) -> str:
     hooks = rd.get("concrete_hooks") or []
     hook_lines = "\n".join(
         f"- {h.get('text', '').strip()}" for h in hooks if h.get("text")
-    ) or "(brak haków — bądź ostrożny, oprzyj się o segment i nazwę firmy)"
+    ) or "(brak haków - oprzyj się TYLKO na nazwie i segmencie, nie zmyślaj)"
 
     rationale = rd.get("rationale") or "(brak)"
     monthly = rd.get("estimated_monthly_volume") or "(nieznane)"
-    contact = lead.contact_name or "(brak nazwiska decydenta)"
+    contact = lead.contact_name or "(nieznany)"
     segment = rd.get("segment") or lead.segment or "inne"
 
+    # Tone hint: if we have a first name only, it's likely informal.
+    if lead.contact_name and " " not in lead.contact_name.strip():
+        tone_hint = (
+            f"Kontakt podany imieniem ({contact}) - mail luźniejszy, "
+            "po imieniu, ale bez przesady."
+        )
+    elif lead.contact_name:
+        tone_hint = (
+            f"Mamy nazwisko ({contact}) - forma Pan/Pani, ale naturalna, nie sztywna."
+        )
+    else:
+        tone_hint = (
+            "Brak konkretnej osoby - bezosobowo do firmy. "
+            "Bez 'Szanowni Państwo', otwórz konkretem."
+        )
+
     return (
-        f"## Lead\n"
+        f"## Lead do napisania\n"
         f"Firma: {lead.company_name}\n"
         f"Strona: {lead.website or '(brak)'}\n"
         f"Miasto: {lead.city or '(brak)'}\n"
         f"Segment: {segment}\n"
         f"Kontakt: {contact}\n"
-        f"Email do wysyłki: {lead.email or '(brak — używaj formy bezosobowej lub Pan/Pani)'}\n"
-        f"Szacunkowy wolumen: {monthly}\n\n"
-        f"## Konkretne haki z researchu (UŻYJ ich w mailu, nie zmyślaj nowych)\n"
+        f"Email do wysyłki: {lead.email or '(brak)'}\n"
+        f"Szacunkowy wolumen B2B: {monthly}\n"
+        f"Ton: {tone_hint}\n\n"
+        f"## Haki researchowe (UŻYJ co najmniej jednego, NIE WYMYŚLAJ nowych)\n"
         f"{hook_lines}\n\n"
-        f"## Uzasadnienie scoringu\n"
+        f"## Co o nich wiemy z researchu\n"
         f"{rationale}\n\n"
-        f"## Twoje zadanie\n"
-        f"Wygeneruj cold email B2B od Artmakera do tej firmy. ZASADY:\n"
-        f"1. snippet1 MUSI nawiązać do konkretnego haka z listy powyżej (cytuj/parafrazuj).\n"
-        f"2. Brzmienie polskie, naturalne, bez korpomowy, bez 'mam nadzieję, że ta wiadomość zastanie...'.\n"
-        f"3. Subject < 60 znaków, konkretny (np. 'Hurtowe ceny farb dla {lead.company_name}'), bez clickbaitów.\n"
-        f"4. Wartość: cena producenta z naszych chińskich fabryk + opcja private label.\n"
-        f"5. CTA: krótka rozmowa 15 min albo przesłanie katalogu/cennika — coś niskiego ryzyka.\n"
-        f"6. Mail całość: 80-150 słów. Krótko."
+        f"## Co napisać\n"
+        f"Cold mail od Artmakera do {lead.company_name}.\n\n"
+        f"### Struktura snippetów (każdy = jeden akapit, każdy krótki):\n"
+        f"- subject: temat maila. Max 50 znaków. Format: pytanie/liczba/konkret. "
+        f"  Patrz zasady w system prompt. Test: jeśli zobaczyłbyś ten subject "
+        f"  w skrzynce, otworzyłbyś bez wahania? Jak nie - przeformułuj.\n"
+        f"- snippet1: pierwsze zdanie/dwa. MUSI nawiązać do konkretnego haka. "
+        f"  Bez 'Dzień dobry'. Zacznij od mięsa - pytania, obserwacji, konkretu.\n"
+        f"- snippet2: kim jesteś (krótko, 1 zdanie) i dlaczego piszesz "
+        f"  AKURAT do nich (połącz to z hakiem). Max 2 zdania.\n"
+        f"- snippet3: konkretna oferta. Liczby. Co jest taniej, o ile, jak. "
+        f"  Wspomnij Chiny + private label tylko jeśli to ma sens dla ich biznesu.\n"
+        f"- snippet4: opcjonalny social proof / liczba (np. 'Ostatnio zrobiliśmy "
+        f"  5000 sztalug pod marką własną dla sieci sklepów hobbystycznych.'). "
+        f"  Jeśli nie masz NIC autentycznego - zwróć null. Lepsze null niż wymyślone.\n"
+        f"- snippet5: CTA-PYTANIE. Niski wysiłek dla odbiorcy. Np. "
+        f"  'Wysłać cennik na 50 sztalug?' albo 'Otworzy Pani 10 minut w czwartek po 14?'.\n\n"
+        f"### Cały mail (snippet1+2+3+4?+5) MUSI mieć 70-130 słów. KRÓTKO.\n"
+        f"### NIGDY nie używaj — ani – w żadnym snippecie. Tylko zwykły -.\n"
     )
 
 
+PERSONA_AND_RULES = """\
+## Kim jesteś
+
+Jesteś polskim handlowcem z 15-letnim doświadczeniem w branży importu z Chin
+i sprzedaży hurtowej do sklepów detalicznych. Dorobiłeś się fortuny bo
+piszesz maile, które ludzie naprawdę otwierają i czytają. Twoja przewaga:
+brzmisz jak człowiek, nie jak generator. Konkret zamiast lania wody.
+Polski biznes znasz od podszewki - wiesz jak rozmawia mały sklep w Łomży,
+a jak właściciel sieci e-commerce w Warszawie. Dopasowujesz ton.
+
+## Twoje zadanie teraz
+
+Napisać cold mail B2B w imieniu Artmakera. Mail ma być TAK dobry, że odbiorca
+otwiera go w 2 sekundy po dostaniu, czyta cały, i odpowiada w ciągu doby.
+
+## ZASADY HARD (łamanie = mail trafia do spamu albo do kosza)
+
+### Czego NIE WOLNO pisać
+
+NIE WOLNO używać tych fraz (typowe AI/korpomowa, każdy je zna na pamięć):
+- "Mam nadzieję, że ta wiadomość zastanie Pana/Panią w dobrym zdrowiu"
+- "Pragnę zaproponować", "Chciałbym przedstawić", "Pozwolę sobie"
+- "Z przyjemnością", "Z poważaniem", "Pozdrawiam serdecznie"
+- "Korzystając z okazji", "Uprzejmie informuję", "Pragnę poinformować"
+- "Rzucić światło na", "Otworzyć drzwi do", "W dzisiejszych czasach"
+- "Rewolucyjny", "Innowacyjny", "Wyjątkowy", "Unikatowy", "Najwyższej jakości"
+- "Dynamicznie rozwijający się", "Lider w branży", "Synergii"
+- "Skłaniam się do", "Pewnie się Pan/Pani zastanawia"
+- Otwarcie maila od "Dzień dobry," (typowe AI; lepiej od konkretu lub "Cześć")
+
+NIE WOLNO używać tych znaków (każdy AI-detektor je łapie):
+- DŁUGI MYŚLNIK em-dash "—" (Alt+0151) - ZAKAZANE, używaj zwykłego "-"
+- ŚREDNI MYŚLNIK en-dash "–" (Alt+0150) - ZAKAZANE, używaj zwykłego "-"
+- Cudzysłowy typograficzne ("..."): tylko proste "..." albo '...'
+- Emoji w tekście maila (ALE w subject MOŻESZ jedno strategicznie umieścić)
+- Wykrzykniki w body (max 0; w subject max 1, jeśli pasuje)
+
+### Co MUSISZ pisać
+
+1. **Krótkie zdania.** Średnio 10-14 słów. Najwyżej 18.
+2. **Personalny otwór.** snippet1 MUSI nawiązać do konkretnego haka z researchu
+   (cytuj/parafrazuj coś co rzeczywiście jest na ich stronie). Zacznij tak,
+   żeby od pierwszego zdania wiedzieli że to NIE masówka.
+3. **Wartość w liczbach.** Konkretne procenty oszczędności, ilości, terminy.
+   Nie "atrakcyjne ceny" tylko "30-40% taniej niż polska hurtownia".
+4. **CTA jako pytanie.** Zamiast "Czekam na odpowiedź" - "Otworzy Pan 10 minut
+   we wtorek po 14?" albo "Wysłać Państwu cennik na sztalugi 60x80?"
+5. **Polska forma.** Pan/Pani jeśli decydent jest "po nazwisku" w researchu.
+   Po imieniu (np. Marek, Kasia) jeśli kontakt jest podany imieniem.
+   Jeśli kontaktu brak - bezosobowo, do firmy ("Państwa sklep", "Wasza oferta").
+6. **Naturalny ton.** Możesz użyć kolokwializmów ("krótko", "tak konkretnie",
+   "rzucam temat", "z mojej strony"). Mail ma brzmieć jak napisany szybko
+   przez człowieka, nie wypolerowany przez bota.
+7. **Sygnatura prosta.** Bez "Z poważaniem". Po prostu imię + Artmaker.
+   snippet5 zawiera CTA-pytanie. Nie pisz sygnatury w snippetach - zostawiamy ją systemowi.
+
+### Subject - to się ZA NAJWIĘCEJ liczy
+
+Subject decyduje o open-rate. ZASADY:
+- Max 50 znaków (idealnie 35-45). Krótszy = lepszy open-rate.
+- BEZ "Oferta:", "Propozycja współpracy", "Zapytanie ofertowe" - to filtry spamu.
+- Najlepsze formaty:
+  - Pytanie odwołujące się do ich biznesu: "Skąd bierzecie płótna do {firma}?"
+  - Konkretna liczba intrygująca: "300 płócien miesięcznie?"
+  - Wzmianka o ich konkurencie albo kategorii: "Cennik dla sklepów plastycznych w Warszawie"
+  - Krótka korzyść: "30-40% taniej na farby akrylowe"
+- Subject MOŻE zawierać nazwę firmy adresata (boost personalizacji).
+- ZAKAZ używania słów spam-trigger: "darmowe", "okazja", "tylko dziś", "100%", "promocja", "rabat".
+- Pierwsza litera duża, reszta małymi (chyba że nazwa własna). Bez ALL CAPS.
+"""
+
+
 def _build_system_prompt() -> str:
-    """System prompt: brand context + voice anchor (few-shots) if present."""
+    """System prompt: brand context + persona + hard anti-AI rules + voice anchor."""
     examples = _load_few_shot_examples()
     examples_block = (
         f"\n\n## Przykłady stylu autora (trzymaj się tego brzmienia)\n{examples}"
@@ -140,11 +307,10 @@ def _build_system_prompt() -> str:
     )
     return (
         f"{BRAND_CONTEXT}\n\n"
-        "Jesteś copywriterem B2B Artmakera. Piszesz krótkie, personalizowane "
-        "cold maile do polskich firm. Twój styl: konkret, brak korpomowy, "
-        "naturalny ton. Każdy mail MUSI zawierać konkret o adresacie zaczerpnięty "
-        "z dostarczonych haków researchu — nie wolno generować generycznych "
-        "otwarć ani zmyślać faktów. Zwracasz wyłącznie JSON zgodny ze schematem."
+        f"{PERSONA_AND_RULES}\n\n"
+        "Zwracasz wyłącznie poprawny JSON zgodny ze schematem. Każdy snippet "
+        "to jeden krótki akapit. Nie powtarzaj brand context'u w mailu - "
+        "odbiorca chce wiedzieć co ma z tego ON, nie kim jesteśmy."
         f"{examples_block}"
     )
 
@@ -192,6 +358,17 @@ def generate_draft_for_lead(
         user=user,
         output_schema=EmailDraftPayload,
         max_tokens=2000,
+        temperature=DRAFT_TEMPERATURE,
+    )
+
+    # Scrub AI artifacts (em-dash, smart quotes, clichés) before persisting.
+    payload = EmailDraftPayload(
+        subject=_strip_ai_artifacts(payload.subject) or payload.subject,
+        snippet1=_strip_ai_artifacts(payload.snippet1) or payload.snippet1,
+        snippet2=_strip_ai_artifacts(payload.snippet2) or payload.snippet2,
+        snippet3=_strip_ai_artifacts(payload.snippet3) or payload.snippet3,
+        snippet4=_strip_ai_artifacts(payload.snippet4),
+        snippet5=_strip_ai_artifacts(payload.snippet5) or payload.snippet5,
     )
 
     full_preview = _assemble_preview(payload)
