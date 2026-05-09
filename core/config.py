@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     apify_api_token: str = ""
     apify_gmaps_actor: str = "compass~google-maps-scraper"
+    apify_allegro_actor: str = ""
+    apify_linkedin_actor: str = ""
     google_places_api_key: str = ""
 
     woodpecker_api_key: str = ""

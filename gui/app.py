@@ -10,6 +10,8 @@ import streamlit as st
 from sqlalchemy import func, select
 
 from agent.discovery import (
+    ApifyAllegroSource,
+    ApifyLinkedInSource,
     ApifySource,
     CSVSource,
     DiscoveredPlace,
@@ -19,6 +21,8 @@ from agent.discovery import (
     run_search,
     score_relevance_batch,
 )
+from core.config import settings as _settings_for_apify
+from core.regions import WOJEWODZTWA, location_label, location_phrase
 from agent.research import research_and_save
 from core.config import settings
 from core.db import (
@@ -215,6 +219,10 @@ def _render_manual_entry_form(provider: str, model: str) -> None:
                 index=0,
             )
             city_hint = c2.text_input("Miasto (hint, opcjonalnie)", placeholder="np. Warszawa")
+            force_refresh = st.checkbox(
+                "🔄 Force refresh (re-researchuj jeśli URL już jest w bazie)",
+                value=False,
+            )
             submitted = st.form_submit_button("Researchuj", type="primary")
 
         if submitted:
@@ -224,21 +232,32 @@ def _render_manual_entry_form(provider: str, model: str) -> None:
             seg = None if segment_hint == "(pozwól agentowi wybrać)" else segment_hint
             with st.status("Researchuję leada...", expanded=True) as status:
                 try:
+                    status.write("Sprawdzam czy lead nie istnieje w bazie...")
                     status.write("Pobieram treść strony i podstrony (kontakt, o nas, oferta)...")
                     status.write(f"Wysyłam do {provider}/{model} do oceny według rubryki...")
-                    lead_id, result = research_and_save(
+                    lead_id, result, was_researched = research_and_save(
                         url.strip(),
                         segment_hint=seg,
                         city_hint=city_hint.strip() or None,
                         provider=provider,
                         model=model,
+                        force_refresh=force_refresh,
                     )
-                    status.update(label=f"Gotowe — score {result.score.total}/10", state="complete")
-                    st.success(
-                        f"**{result.company_name}** zapisany jako lead #{lead_id}. "
-                        f"Segment: `{result.segment}`, score: **{result.score.total}/10**."
-                    )
-                    st.caption(result.rationale)
+                    if not was_researched:
+                        status.update(
+                            label=f"Pominięte — lead #{lead_id} już istnieje", state="complete"
+                        )
+                        st.info(
+                            f"Ten URL już jest w bazie jako lead #{lead_id}. "
+                            "Zaznacz '🔄 Force refresh' żeby zresearchować ponownie."
+                        )
+                    else:
+                        status.update(label=f"Gotowe — score {result.score.total}/10", state="complete")
+                        st.success(
+                            f"**{result.company_name}** zapisany jako lead #{lead_id}. "
+                            f"Segment: `{result.segment}`, score: **{result.score.total}/10**."
+                        )
+                        st.caption(result.rationale)
                 except Exception as exc:
                     status.update(label="Research nie powiódł się", state="error")
                     st.error(f"Błąd: {exc}")
@@ -257,6 +276,8 @@ def _score_label(score: float | None) -> str:
 SOURCE_LABELS = {
     "apify": "Apify Google Maps",
     "google_places": "Google Places API",
+    "apify_allegro": "Apify Allegro",
+    "apify_linkedin": "Apify LinkedIn",
     "csv": "Import CSV",
 }
 
@@ -268,6 +289,10 @@ def _build_sources(selected: list[str], csv_bytes: bytes | None) -> list:
         sources.append(ApifySource())
     if "google_places" in selected:
         sources.append(GooglePlacesSource())
+    if "apify_allegro" in selected:
+        sources.append(ApifyAllegroSource())
+    if "apify_linkedin" in selected:
+        sources.append(ApifyLinkedInSource())
     if "csv" in selected:
         sources.append(CSVSource(csv_bytes=csv_bytes))
     return sources
@@ -282,24 +307,45 @@ def render_discovery(provider: str, model: str) -> None:
 
     apify_ok = has_apify_token()
     places_ok = has_places_key()
+    allegro_ok = apify_ok and bool(_settings_for_apify.apify_allegro_actor)
+    linkedin_ok = apify_ok and bool(_settings_for_apify.apify_linkedin_actor)
 
-    src_col1, src_col2, src_col3 = st.columns(3)
-    use_apify = src_col1.checkbox(
+    row1 = st.columns(3)
+    use_apify = row1[0].checkbox(
         f"Apify Google Maps {'✓' if apify_ok else '✗'}",
         value=apify_ok,
         disabled=not apify_ok,
         help="Apify Google Maps Scraper actor. Wymaga APIFY_API_TOKEN.",
     )
-    use_places = src_col2.checkbox(
+    use_places = row1[1].checkbox(
         f"Google Places API {'✓' if places_ok else '✗'}",
         value=places_ok,
         disabled=not places_ok,
         help="Google Places API (New) Text Search. Wymaga GOOGLE_PLACES_API_KEY.",
     )
-    use_csv = src_col3.checkbox(
+    use_csv = row1[2].checkbox(
         "Import CSV",
         value=False,
         help="Wgraj CSV z kolumną 'url' (i opcjonalnie 'name', 'address', 'phone').",
+    )
+    row2 = st.columns(3)
+    use_allegro = row2[0].checkbox(
+        f"Apify Allegro {'✓' if allegro_ok else '✗'}",
+        value=False,
+        disabled=not allegro_ok,
+        help=(
+            "Apify Allegro Scraper. Wymaga APIFY_API_TOKEN + APIFY_ALLEGRO_ACTOR "
+            "(actor id z apify.com/store)."
+        ),
+    )
+    use_linkedin = row2[1].checkbox(
+        f"Apify LinkedIn {'✓' if linkedin_ok else '✗'}",
+        value=False,
+        disabled=not linkedin_ok,
+        help=(
+            "Apify LinkedIn Companies Scraper. Wymaga APIFY_API_TOKEN + "
+            "APIFY_LINKEDIN_ACTOR. Sprawdź TOS LinkedIn i przepisy GDPR."
+        ),
     )
 
     csv_bytes: bytes | None = None
@@ -309,12 +355,39 @@ def render_discovery(provider: str, model: str) -> None:
             csv_bytes = uploaded.read()
 
     with st.form("discovery_form"):
-        c1, c2, c3 = st.columns([2, 2, 1])
+        c1, c2 = st.columns([2, 1])
         segment = c1.selectbox("Segment", SEGMENT_VALUES, key="discovery_segment")
-        city = c2.text_input("Miasto", placeholder="Warszawa", key="discovery_city")
-        per_source = c3.number_input(
+        per_source = c2.number_input(
             "Max / źródło", min_value=5, max_value=50, value=20, key="discovery_limit"
         )
+
+        loc_mode = st.radio(
+            "Tryb lokalizacji",
+            ["Miasto", "Województwo", "Cała Polska"],
+            horizontal=True,
+            key="discovery_loc_mode",
+            help=(
+                "Miasto = wąsko (np. Łask). "
+                "Województwo = szeroko (cały region, np. mazowieckie). "
+                "Cała Polska = bez ograniczeń."
+            ),
+        )
+        loc_col1, loc_col2 = st.columns(2)
+        if loc_mode == "Miasto":
+            city = loc_col1.text_input(
+                "Miasto", placeholder="Warszawa", key="discovery_city"
+            )
+            wojewodztwo = ""
+        elif loc_mode == "Województwo":
+            wojewodztwo = loc_col1.selectbox(
+                "Województwo", WOJEWODZTWA, key="discovery_wojewodztwo"
+            )
+            city = ""
+        else:
+            loc_col1.caption("Szukam w całej Polsce. Może zwrócić więcej niż 20 wyników na źródło — zwiększ limit.")
+            city = ""
+            wojewodztwo = ""
+
         custom_target = st.text_area(
             "Lub opisz własny target (free-form, ma pierwszeństwo nad segmentem)",
             placeholder=(
@@ -341,12 +414,33 @@ def render_discovery(provider: str, model: str) -> None:
             key="discovery_auto_research",
             help="Łączy Szukaj → Filtr → Bulk research w jeden ruch. Wymaga włączonego filtra trafności.",
         )
+        ap1, ap2 = st.columns([3, 2])
+        auto_draft = ap1.checkbox(
+            "✉️ Auto-pipeline: gdy research wyjdzie z wysokim score, od razu generuj draft maila",
+            value=False,
+            key="discovery_auto_draft",
+            help=(
+                "Po pozytywnym researchu odpala generator maila (agent/generate.py) "
+                "i zapisuje draft do review w zakładce Drafty."
+            ),
+        )
+        auto_draft_threshold = ap2.slider(
+            "Próg score → draft",
+            min_value=0, max_value=10, value=7,
+            key="discovery_auto_draft_threshold",
+        )
         submitted = st.form_submit_button("Szukaj", type="primary")
 
     if submitted:
         selected_sources = [
             name
-            for name, on in (("apify", use_apify), ("google_places", use_places), ("csv", use_csv))
+            for name, on in (
+                ("apify", use_apify),
+                ("google_places", use_places),
+                ("apify_allegro", use_allegro),
+                ("apify_linkedin", use_linkedin),
+                ("csv", use_csv),
+            )
             if on
         ]
         if not selected_sources:
@@ -355,8 +449,13 @@ def render_discovery(provider: str, model: str) -> None:
         if "csv" in selected_sources and csv_bytes is None:
             st.warning("Wybrałeś CSV, ale nie wgrałeś pliku.")
             return
-        if any(s != "csv" for s in selected_sources) and not city.strip():
-            st.warning("Podaj miasto (chyba że używasz tylko CSV).")
+
+        loc_suffix = location_phrase(loc_mode, city=city, wojewodztwo=wojewodztwo)
+        if any(s != "csv" for s in selected_sources) and loc_mode == "Miasto" and not city.strip():
+            st.warning("Tryb 'Miasto' wymaga nazwy miasta. Wybierz inny tryb albo wpisz miasto.")
+            return
+        if any(s != "csv" for s in selected_sources) and loc_mode == "Województwo" and not wojewodztwo:
+            st.warning("Tryb 'Województwo' wymaga wybrania województwa.")
             return
 
         custom_target_clean = custom_target.strip()
@@ -367,7 +466,7 @@ def render_discovery(provider: str, model: str) -> None:
             if custom_target_clean
             else segment.replace("_", " ")
         )
-        query = f"{search_phrase} {city}".strip()
+        query = f"{search_phrase} {loc_suffix}".strip()
 
         sources = _build_sources(selected_sources, csv_bytes)
         with st.spinner(f"Szukam '{query}' w {len(sources)} źródłach równolegle..."):
@@ -385,7 +484,7 @@ def render_discovery(provider: str, model: str) -> None:
                     items, _usage = score_relevance_batch(
                         places,
                         segment=segment,
-                        city=city.strip() or None,
+                        city=location_label(loc_mode, city=city, wojewodztwo=wojewodztwo),
                         custom_description=custom_target_clean or None,
                     )
                     for item in items:
@@ -404,12 +503,19 @@ def render_discovery(provider: str, model: str) -> None:
         st.session_state["discovery_diag"] = [d.model_dump() for d in diagnostics]
         st.session_state["discovery_segment_used"] = segment
         st.session_state["discovery_custom_target_used"] = custom_target_clean
-        st.session_state["discovery_city_used"] = city.strip()
+        # Pass a meaningful location hint to research_and_save: the city if
+        # provided, else None (research won't override LLM's own extraction).
+        st.session_state["discovery_city_used"] = (
+            city.strip() if loc_mode == "Miasto" else ""
+        )
         st.session_state["discovery_relevance"] = relevance_map
         st.session_state["discovery_relevance_warning"] = relevance_warning
         st.session_state["discovery_threshold_used"] = int(relevance_threshold)
         st.session_state["discovery_auto_research_pending"] = bool(
             auto_research and use_relevance_filter and relevance_map
+        )
+        st.session_state["discovery_auto_draft_threshold"] = (
+            int(auto_draft_threshold) if auto_draft else None
         )
 
     places_data = st.session_state.get("discovery_places") or []
@@ -517,6 +623,9 @@ def render_discovery(provider: str, model: str) -> None:
     # Auto-research path: if user ticked the checkbox before searching, fire
     # research on every place above threshold without requiring another click.
     auto_pending = st.session_state.pop("discovery_auto_research_pending", False)
+    auto_draft_threshold_pending = st.session_state.pop(
+        "discovery_auto_draft_threshold", None
+    )
     if auto_pending:
         auto_targets = [
             places_data[i]
@@ -524,11 +633,18 @@ def render_discovery(provider: str, model: str) -> None:
             if rel["score"] >= threshold and places_data[i].get("website")
         ]
         if auto_targets:
+            draft_msg = (
+                f", auto-draft dla score ≥ {auto_draft_threshold_pending}"
+                if auto_draft_threshold_pending is not None else ""
+            )
             st.info(
                 f"🔥 Auto-research: lecę na {len(auto_targets)} pasujących leadach "
-                f"(score ≥ {threshold})."
+                f"(trafność ≥ {threshold}){draft_msg}."
             )
-            _run_bulk_research(auto_targets, provider, model)
+            _run_bulk_research(
+                auto_targets, provider, model,
+                auto_draft_threshold=auto_draft_threshold_pending,
+            )
         else:
             st.warning("Auto-research: żaden kandydat nie przeszedł progu trafności.")
 
@@ -540,11 +656,23 @@ def render_discovery(provider: str, model: str) -> None:
         _run_bulk_research(selected_places, provider, model)
 
 
-def _run_bulk_research(targets: list[dict], provider: str, model: str) -> None:
-    """Loop selected places through research_and_save with progress + log."""
+def _run_bulk_research(
+    targets: list[dict],
+    provider: str,
+    model: str,
+    *,
+    auto_draft_threshold: int | None = None,
+) -> None:
+    """Loop selected places through research_and_save with progress + log.
+
+    Skips URLs that already exist in the leads table (dedup via Lead.website).
+    If `auto_draft_threshold` is set, leads with score >= threshold trigger
+    immediate draft generation in the same run.
+    """
     progress = st.progress(0.0, text="Startuję bulk research...")
     log_area = st.container()
-    ok, fail = 0, 0
+    ok, fail, skipped = 0, 0, 0
+    drafts_made, drafts_failed = 0, 0
     seg_hint = st.session_state.get("discovery_segment_used")
     city_hint = st.session_state.get("discovery_city_used") or None
     for i, place in enumerate(targets, start=1):
@@ -554,22 +682,51 @@ def _run_bulk_research(targets: list[dict], provider: str, model: str) -> None:
             text=f"{i}/{len(targets)}: {place['name']}",
         )
         try:
-            lead_id, result = research_and_save(
+            lead_id, result, was_researched = research_and_save(
                 url,
                 segment_hint=seg_hint,
                 city_hint=city_hint,
                 provider=provider,
                 model=model,
             )
+            if not was_researched:
+                skipped += 1
+                log_area.info(
+                    f"⏭️ {place['name']} — duplikat (lead #{lead_id} już w bazie), pomijam."
+                )
+                continue
             ok += 1
             log_area.success(
                 f"#{lead_id} **{result.company_name}** — score {result.score.total}/10"
             )
+            if auto_draft_threshold is not None and result.score.total >= auto_draft_threshold:
+                try:
+                    from agent.generate import generate_draft_for_lead
+
+                    draft_id = generate_draft_for_lead(
+                        lead_id, provider=provider, model=model
+                    )
+                    drafts_made += 1
+                    log_area.success(
+                        f"✉️ Draft #{draft_id} wygenerowany dla leada #{lead_id} "
+                        f"(score {result.score.total} ≥ próg {auto_draft_threshold})"
+                    )
+                except Exception as draft_exc:
+                    drafts_failed += 1
+                    log_area.warning(
+                        f"⚠️ Draft dla leada #{lead_id} się nie udał: {draft_exc}"
+                    )
         except Exception as exc:
             fail += 1
             log_area.error(f"❌ {place['name']} ({url}): {exc}")
-    progress.progress(1.0, text=f"Gotowe — {ok} OK, {fail} błędów.")
-    st.success(f"Bulk research zakończony: {ok} powodzeń, {fail} błędów.")
+    progress.progress(
+        1.0,
+        text=f"Gotowe — {ok} OK, {skipped} duplikatów, {fail} błędów.",
+    )
+    summary = f"Bulk research: {ok} researche, {skipped} pominięte (duplikaty), {fail} błędów."
+    if auto_draft_threshold is not None:
+        summary += f" Drafty: {drafts_made} OK, {drafts_failed} fail."
+    st.success(summary)
 
 
 def render_leads(provider: str, model: str) -> None:
@@ -672,7 +829,24 @@ def render_leads(provider: str, model: str) -> None:
                     f"- Osoba: {lead.contact_name or '-'}"
                 )
 
-            del_col, _ = st.columns([1, 5])
+            draft_col, del_col, _ = st.columns([2, 1, 4])
+            can_draft = lead.status in (
+                LeadStatus.RESEARCHED.value, LeadStatus.DRAFTED.value
+            )
+            if draft_col.button(
+                "✉️ Generuj draft maila",
+                key=f"gen-draft-{lead.id}",
+                disabled=not can_draft,
+            ):
+                from agent.generate import generate_draft_for_lead
+                try:
+                    with st.spinner(f"Generuję draft dla #{lead.id}..."):
+                        draft_id = generate_draft_for_lead(
+                            lead.id, provider=provider, model=model
+                        )
+                    st.success(f"Draft #{draft_id} zapisany. Sprawdź zakładkę Drafty.")
+                except Exception as exc:
+                    st.error(f"Generator padł: {exc}")
             if del_col.button("Usuń leada", key=f"delete-lead-{lead.id}"):
                 with SessionLocal() as s:
                     obj = s.get(Lead, lead.id)
@@ -685,7 +859,35 @@ def render_leads(provider: str, model: str) -> None:
         st.caption(f"...i {len(filtered) - 20} więcej (zawęź filtrami).")
 
 
-def render_drafts() -> None:
+def render_drafts(provider: str, model: str) -> None:
+    from agent.generate import generate_all_researched
+
+    with st.expander("⚙️ Bulk-generuj drafty z researchowanych leadów", expanded=False):
+        with SessionLocal() as session:
+            researched_count = (
+                session.execute(
+                    select(func.count(Lead.id)).where(
+                        Lead.status == LeadStatus.RESEARCHED.value
+                    )
+                ).scalar()
+                or 0
+            )
+        bg1, bg2 = st.columns([3, 1])
+        min_score = bg2.slider(
+            "Min score", min_value=0, max_value=10, value=6, key="bulk_drafts_min"
+        )
+        if bg1.button(
+            f"Wygeneruj drafty ({researched_count} researchowanych w bazie) — {provider}/{model}",
+            disabled=researched_count == 0,
+            type="primary",
+        ):
+            with st.spinner("Generuję drafty po kolei..."):
+                made, failed = generate_all_researched(
+                    provider=provider, model=model, min_score=float(min_score),
+                )
+            st.success(f"Gotowe — {made} draftów wygenerowanych, {failed} błędów.")
+            st.rerun()
+
     with SessionLocal() as session:
         drafts = (
             session.execute(
@@ -700,7 +902,7 @@ def render_drafts() -> None:
         rows = [(d.id, d.lead.company_name, d.subject, d.full_preview) for d in drafts]
 
     if not rows:
-        st.info("Brak draftów do review. Uruchom `agent/generate.py` gdy będzie gotowy.")
+        st.info("Brak draftów do review. Wygeneruj nowe powyżej, lub odpal `agent/generate.py`.")
         return
 
     for draft_id, company, subject, preview in rows:
@@ -777,7 +979,7 @@ with tab_leads:
     render_leads(selected_provider, selected_model)
 
 with tab_drafts:
-    render_drafts()
+    render_drafts(selected_provider, selected_model)
 
 with tab_logs:
     render_logs()

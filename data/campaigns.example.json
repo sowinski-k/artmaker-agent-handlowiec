@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Sklepy plastyczne — cała Polska",
+    "segment": "sklep_plastyczny",
+    "location_mode": "Cała Polska",
+    "city": "",
+    "wojewodztwo": "",
+    "custom_target": "",
+    "max_per_source": 20,
+    "relevance_threshold": 6,
+    "draft_threshold": 7,
+    "sources": ["apify", "google_places"]
+  },
+  {
+    "name": "Paint & sip — top miasta",
+    "segment": "paint_and_sip",
+    "location_mode": "Cała Polska",
+    "city": "",
+    "wojewodztwo": "",
+    "custom_target": "studia paint and sip, malowanie z winem, eventy malarskie",
+    "max_per_source": 20,
+    "relevance_threshold": 6,
+    "draft_threshold": 7,
+    "sources": ["apify", "google_places"]
+  },
+  {
+    "name": "Marki własne / private label",
+    "segment": "marka_wlasna",
+    "location_mode": "Cała Polska",
+    "city": "",
+    "wojewodztwo": "",
+    "custom_target": "marki własne artykułów plastycznych, dystrybutorzy materiałów dla artystów, sklepy hurtowe szukające private label",
+    "max_per_source": 20,
+    "relevance_threshold": 7,
+    "draft_threshold": 7,
+    "sources": ["google_places", "apify_linkedin"]
+  }
+]

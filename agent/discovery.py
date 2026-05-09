@@ -14,13 +14,13 @@ import csv
 import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, Protocol
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
 
 from core.config import settings
 from core.llm import parse_structured
+from core.urls import normalize_url as _normalize_url
 from prompts.brand import BRAND_CONTEXT
 
 
@@ -130,11 +130,23 @@ class LeadSource(Protocol):
     def search(self, *, query: str, max_results: int) -> list[DiscoveredPlace]: ...
 
 
-# ---- Apify Google Maps Scraper ---------------------------------------------
+# ---- Apify base + actor-specific subclasses --------------------------------
+
+def _apify_run_actor(actor_id: str, payload: dict, *, timeout: float = 180.0) -> list[dict]:
+    """Hit Apify run-sync-get-dataset-items for the given actor and payload.
+    Returns the raw dataset items list; caller normalizes per-actor."""
+    token = _resolve_secret(settings.apify_api_token, "APIFY_API_TOKEN")
+    if not token:
+        raise RuntimeError("Brak APIFY_API_TOKEN.")
+    url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items"
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(url, params={"token": token}, json=payload)
+    response.raise_for_status()
+    return response.json() or []
+
 
 class ApifySource:
-    """Wraps Apify's run-sync-get-dataset-items endpoint for the configured
-    Google Maps actor."""
+    """Apify Google Maps Scraper — best for local businesses with phone+website."""
 
     name = "apify"
 
@@ -142,12 +154,6 @@ class ApifySource:
         return has_apify_token()
 
     def search(self, *, query: str, max_results: int) -> list[DiscoveredPlace]:
-        token = _resolve_secret(settings.apify_api_token, "APIFY_API_TOKEN")
-        if not token:
-            raise RuntimeError("Brak APIFY_API_TOKEN.")
-
-        actor = settings.apify_gmaps_actor
-        url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
         payload = {
             "searchStringsArray": [query],
             "maxCrawledPlacesPerSearch": min(max_results, 50),
@@ -155,10 +161,7 @@ class ApifySource:
             "countryCode": "pl",
             "skipClosedPlaces": True,
         }
-        with httpx.Client(timeout=180.0) as client:
-            response = client.post(url, params={"token": token}, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        data = _apify_run_actor(settings.apify_gmaps_actor, payload)
         return [self._normalize(item) for item in data][:max_results]
 
     @staticmethod
@@ -173,6 +176,93 @@ class ApifySource:
             review_count=item.get("reviewsCount"),
             raw_id=item.get("placeId") or item.get("id"),
             notes=item.get("categoryName"),
+        )
+
+
+class ApifyAllegroSource:
+    """Apify Allegro Scraper — finds sellers and offers on Allegro.pl.
+
+    Useful for sourcing competitor sellers in plastic/art categories that we
+    could approach for B2B / private label deals. Default actor configurable
+    via APIFY_ALLEGRO_ACTOR (no widely-adopted "official" Allegro actor on
+    the marketplace; user picks one from apify.com/store).
+    """
+
+    name = "apify_allegro"
+
+    def available(self) -> bool:
+        return has_apify_token() and bool(settings.apify_allegro_actor)
+
+    def search(self, *, query: str, max_results: int) -> list[DiscoveredPlace]:
+        payload = {
+            "searchTerms": [query],
+            "maxItems": min(max_results, 100),
+        }
+        data = _apify_run_actor(settings.apify_allegro_actor, payload)
+        return [self._normalize(item) for item in data][:max_results]
+
+    @staticmethod
+    def _normalize(item: dict) -> DiscoveredPlace:
+        seller = (
+            item.get("sellerName")
+            or item.get("seller", {}).get("login")
+            or item.get("sellerLogin")
+            or item.get("title")
+            or "(sprzedawca Allegro)"
+        )
+        return DiscoveredPlace(
+            source="apify_allegro",
+            name=str(seller),
+            website=item.get("sellerUrl")
+            or item.get("seller", {}).get("url")
+            or item.get("url"),
+            address=item.get("location"),
+            rating=item.get("sellerRating") or item.get("rating"),
+            review_count=item.get("sellerFeedbackCount") or item.get("reviewCount"),
+            raw_id=item.get("offerId") or item.get("id"),
+            notes=item.get("category") or "Allegro listing",
+        )
+
+
+class ApifyLinkedInSource:
+    """Apify LinkedIn Companies Scraper — discovers company profiles by query.
+
+    Configure actor id via APIFY_LINKEDIN_ACTOR. Use cases: find Polish art
+    supply distributors, paint & sip studios, art schools that publish on
+    LinkedIn. Compliance note: ensure your Apify actor + LinkedIn usage
+    follow LinkedIn TOS and your local outreach laws (GDPR).
+    """
+
+    name = "apify_linkedin"
+
+    def available(self) -> bool:
+        return has_apify_token() and bool(settings.apify_linkedin_actor)
+
+    def search(self, *, query: str, max_results: int) -> list[DiscoveredPlace]:
+        # LinkedIn actors usually accept either keyword search or company URL.
+        # We pass the query as a search keyword; payload shape varies per actor
+        # but most accept "queries" or "searchKeywords".
+        payload = {
+            "queries": [query],
+            "searchKeywords": [query],
+            "maxItems": min(max_results, 50),
+        }
+        data = _apify_run_actor(settings.apify_linkedin_actor, payload)
+        return [self._normalize(item) for item in data][:max_results]
+
+    @staticmethod
+    def _normalize(item: dict) -> DiscoveredPlace:
+        return DiscoveredPlace(
+            source="apify_linkedin",
+            name=item.get("name") or item.get("companyName") or item.get("title") or "(LinkedIn)",
+            website=item.get("websiteUrl")
+            or item.get("website")
+            or item.get("url")
+            or item.get("companyUrl"),
+            address=item.get("headquarters") or item.get("location"),
+            phone=item.get("phone"),
+            raw_id=item.get("companyId") or item.get("id"),
+            notes=item.get("industry") or item.get("description"),
         )
 
 
@@ -276,20 +366,6 @@ class CSVSource:
 
 
 # ---- Parallel runner --------------------------------------------------------
-
-def _normalize_url(u: str) -> str:
-    """Loose dedup key for websites: scheme-stripped host + path, trailing
-    slash dropped, lowercased."""
-    if not u:
-        return ""
-    try:
-        parsed = urlparse(u if "://" in u else f"http://{u}")
-        host = (parsed.netloc or parsed.path or "").lower().lstrip("www.")
-        path = parsed.path.rstrip("/") if parsed.netloc else ""
-        return f"{host}{path}"
-    except Exception:
-        return u.strip().lower().rstrip("/")
-
 
 def run_search(
     sources: Iterable[LeadSource],

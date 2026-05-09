@@ -21,6 +21,8 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+from sqlalchemy import select
+
 from agent.enrichment import build_user_message, gather_pages
 from agent.scoring import ResearchResult
 from core.config import PROJECT_ROOT, settings
@@ -28,6 +30,7 @@ from core.db import Lead, LeadStatus, SessionLocal, init_db
 from core.kill_switch import is_stopped
 from core.llm import estimate_cost_usd, parse_structured
 from core.logger import logger, setup_logging
+from core.urls import host_only, normalize_url
 
 SYSTEM_PROMPT_PATH = PROJECT_ROOT / "prompts" / "research_prompt.md"
 MAX_TOKENS = 4096
@@ -98,16 +101,63 @@ def research_url(
     return result
 
 
-def save_lead(url: str, result: ResearchResult, *, source: str = "manual_url") -> int:
-    """Persist a ResearchResult to the leads table. Returns lead id."""
+def find_existing_lead(url: str) -> int | None:
+    """Return the id of an existing Lead whose website normalizes to the same
+    key as `url`, or None. Uses host-prefix ILIKE for fast prefilter, then
+    confirms with full normalize() match."""
+    target = normalize_url(url)
+    if not target:
+        return None
+    host = host_only(url)
+    if not host:
+        return None
     with SessionLocal() as session:
+        rows = session.execute(
+            select(Lead.id, Lead.website).where(Lead.website.ilike(f"%{host}%"))
+        ).all()
+    for lead_id, website in rows:
+        if normalize_url(website) == target:
+            return lead_id
+    return None
+
+
+def save_lead(
+    url: str,
+    result: ResearchResult,
+    *,
+    source: str = "manual_url",
+) -> tuple[int, bool]:
+    """Persist or update a Lead based on URL match. Returns (lead_id, created).
+
+    `created=False` means an existing lead was found and refreshed instead of
+    a new row inserted.
+    """
+    target_url = result.website or url
+    existing_id = find_existing_lead(target_url)
+    with SessionLocal() as session:
+        if existing_id is not None:
+            lead = session.get(Lead, existing_id)
+            lead.segment = result.segment
+            lead.company_name = result.company_name
+            lead.contact_name = result.contact_name
+            lead.email = result.email
+            lead.phone = result.phone
+            lead.website = target_url
+            lead.instagram = result.instagram
+            lead.city = result.city
+            lead.source = source
+            lead.score = result.score.total
+            lead.status = LeadStatus.RESEARCHED.value
+            lead.research_data = result.model_dump()
+            session.commit()
+            return lead.id, False
         lead = Lead(
             segment=result.segment,
             company_name=result.company_name,
             contact_name=result.contact_name,
             email=result.email,
             phone=result.phone,
-            website=result.website or url,
+            website=target_url,
             instagram=result.instagram,
             city=result.city,
             source=source,
@@ -117,7 +167,7 @@ def save_lead(url: str, result: ResearchResult, *, source: str = "manual_url") -
         )
         session.add(lead)
         session.commit()
-        return lead.id
+        return lead.id, True
 
 
 def research_and_save(
@@ -127,8 +177,25 @@ def research_and_save(
     city_hint: str | None = None,
     provider: str | None = None,
     model: str | None = None,
-) -> tuple[int, ResearchResult]:
-    """Research a URL and persist the result. Returns (lead_id, result)."""
+    force_refresh: bool = False,
+) -> tuple[int, ResearchResult | None, bool]:
+    """Research a URL and persist the result.
+
+    Returns ``(lead_id, result, was_researched)``:
+      - ``was_researched=True``  → fresh LLM research happened (new lead OR forced refresh).
+      - ``was_researched=False`` → existing lead found, no LLM tokens spent. ``result`` is None.
+
+    Set ``force_refresh=True`` to re-research and update an existing lead
+    instead of skipping it.
+    """
+    if not force_refresh:
+        existing_id = find_existing_lead(url)
+        if existing_id is not None:
+            logger.bind(source="research").info(
+                f"Skipping research for {url}: lead #{existing_id} already exists."
+            )
+            return existing_id, None, False
+
     result = research_url(
         url,
         segment_hint=segment_hint,
@@ -136,8 +203,8 @@ def research_and_save(
         provider=provider,
         model=model,
     )
-    lead_id = save_lead(url, result)
-    return lead_id, result
+    lead_id, _created = save_lead(url, result)
+    return lead_id, result, True
 
 
 def main() -> None:
@@ -147,6 +214,11 @@ def main() -> None:
     parser.add_argument("--city", default=None, help="Hint miasta (opcjonalny)")
     parser.add_argument("--provider", default=None, help="anthropic | gemini (default: z .env)")
     parser.add_argument("--model", default=None, help="ID modelu (default: z .env)")
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Re-research even if URL already in DB (default: skip duplicates).",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -157,16 +229,22 @@ def main() -> None:
         return
 
     try:
-        lead_id, result = research_and_save(
+        lead_id, result, was_researched = research_and_save(
             args.url,
             segment_hint=args.segment,
             city_hint=args.city,
             provider=args.provider,
             model=args.model,
+            force_refresh=args.force_refresh,
         )
     except Exception as exc:
         logger.bind(source="research").exception(f"Research failed for {args.url}: {exc}")
         sys.exit(1)
+
+    if not was_researched:
+        print(f"Skipped: lead id={lead_id} already exists for {args.url}.")
+        print("Use --force-refresh to re-research and update.")
+        return
 
     print(f"Saved lead id={lead_id}")
     print(f"  company: {result.company_name}")
