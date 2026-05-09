@@ -52,16 +52,23 @@ class SourceResult(BaseModel):
 # Kaufland is NOT a sklep plastyczny even though Google Maps loosely matched.
 SEGMENT_DESCRIPTIONS: dict[str, str] = {
     "sklep_plastyczny": (
-        "Sklep z artykułami plastycznymi i papierniczymi dla artystów, plastyków, "
-        "uczniów i hobbystów: farby, pędzle, płótna, papiery, glina, materiały "
-        "do rękodzieła, scrapbooking. NIE: supermarkety, apteki, sklepy "
-        "medyczne, motoryzacyjne, AGD/RTV, ogólne sklepy przemysłowe, sklepy "
-        "z zabawkami, zoologiczne."
+        "Sklep z artykułami plastycznymi i artystycznymi: farby, pędzle, płótna, "
+        "sztalugi, glina, materiały do rękodzieła, scrapbooking. Stacjonarny lub "
+        "e-commerce. Idealny lead Artmakera. NIE: supermarkety, apteki, sklepy "
+        "medyczne, motoryzacyjne, AGD/RTV, zoologiczne, sklepy spożywcze."
+    ),
+    "sklep_papierniczy": (
+        "Sklep papierniczy / biurowo-papierniczy / hobbystyczny mający w ofercie "
+        "art. szkolne, biurowe, kreatywne, papier, długopisy, zeszyty + często "
+        "też podstawowe artykuły plastyczne dla dzieci. Wartościowy lead dla "
+        "Artmakera (Track B - panel B2B z magazynu, dostawa 24h, stała oferta "
+        "produktów konsumpcyjnych). NIE: supermarkety, apteki, drukarnie "
+        "wielkoformatowe, ksero/punkty xero bez sklepu."
     ),
     "paint_and_sip": (
-        "Studio paint & sip / wieczory ze sztalugą — rozrywka, w której goście "
+        "Studio paint & sip / wieczory ze sztalugą - rozrywka gdzie goście "
         "malują obraz przy lampce wina pod okiem instruktora. NIE: zwykłe "
-        "kawiarnie, restauracje, sklepy z farbami."
+        "kawiarnie, restauracje, sklepy z farbami budowlanymi."
     ),
     "warsztaty_dzieci": (
         "Firma prowadząca regularne warsztaty kreatywne, plastyczne, "
@@ -79,10 +86,12 @@ SEGMENT_DESCRIPTIONS: dict[str, str] = {
         "językowe, podstawowe."
     ),
     "marka_wlasna": (
-        "Producent / marka oferująca produkty plastyczne/artystyczne pod własnym "
-        "logo lub firma poszukująca dostawcy do white-label. NIE: ogólne sklepy."
+        "Producent / marka oferująca produkty plastyczne/artystyczne/papiernicze "
+        "pod własnym logo lub firma poszukująca dostawcy do white-label / OEM. "
+        "Idealny lead dla Track A (private label z Chin). NIE: ogólne sklepy "
+        "bez własnej marki, dystrybutorzy bez aspiracji marki własnej."
     ),
-    "inne": "Inny segment — oceniaj na podstawie nazwy i kategorii.",
+    "inne": "Inny segment - oceniaj na podstawie nazwy i kategorii.",
 }
 
 

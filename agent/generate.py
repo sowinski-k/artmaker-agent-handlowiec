@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -118,24 +118,32 @@ class EmailDraftPayload(BaseModel):
     body paragraphs assembled in order. Keep each snippet 1-3 sentences max.
     """
 
+    offer_track: Literal["b2b_panel", "private_label", "both"] = Field(
+        description=(
+            "Która oferta Artmakera jest dla tego leada: "
+            "'b2b_panel' = panel B2B z magazynu PL + dostawa 24h (Track B, default), "
+            "'private_label' = produkcja w Chinach pod marka własną (Track A), "
+            "'both' = sugerujemy obie, B teraz + A jako rozwoj na pozniej."
+        )
+    )
     subject: str = Field(
-        description="Konkretny, krótki temat maila (max 60 znaków). Bez ogólników."
+        description="Konkretny, krótki temat maila (max 50 znaków). Bez ogólników, bez 'Oferta:'."
     )
     snippet1: str = Field(
         description="Otwarcie. MUSI nawiązać do konkretu z research_data.concrete_hooks."
     )
     snippet2: str = Field(
-        description="Most do oferty Artmakera — co konkretnie możemy im dać."
+        description="Most do wybranej oferty - co konkretnie im dajemy w ramach offer_track."
     )
     snippet3: str = Field(
-        description="Konkretna propozycja wartości (cena producenta / private label / specyfikacja)."
+        description="Konkretna propozycja wartości - liczby, terminy, czym się różnimy."
     )
     snippet4: Optional[str] = Field(
         default=None,
-        description="Opcjonalny social proof / liczba (jeśli pasuje, inaczej null).",
+        description="Opcjonalny social proof / liczba (jeśli pasuje, inaczej null)."
     )
     snippet5: str = Field(
-        description="CTA — propozycja krótkiej rozmowy lub przesłania katalogu/wyceny."
+        description="CTA jako pytanie - niskim wysiłkiem dla odbiorcy."
     )
 
 
@@ -189,6 +197,9 @@ def _build_user_prompt(lead: Lead) -> str:
             "Bez 'Szanowni Państwo', otwórz konkretem."
         )
 
+    # Track recommendation hint based on segment - the LLM has final say.
+    track_hint = _suggest_track_hint(segment, monthly)
+
     return (
         f"## Lead do napisania\n"
         f"Firma: {lead.company_name}\n"
@@ -203,26 +214,62 @@ def _build_user_prompt(lead: Lead) -> str:
         f"{hook_lines}\n\n"
         f"## Co o nich wiemy z researchu\n"
         f"{rationale}\n\n"
-        f"## Co napisać\n"
-        f"Cold mail od Artmakera do {lead.company_name}.\n\n"
+        f"## KROK 1: Wybór ścieżki sprzedaży (offer_track)\n"
+        f"Najpierw zdecyduj którą OFERTĘ Artmakera mailujesz dla tego leada.\n"
+        f"Sugestia (nie musisz się zgadzać): {track_hint}\n"
+        f"- 'b2b_panel' = panel B2B z magazynu PL, dostawa 24h, stała oferta. "
+        f"Default. Najlepsze dla papierniczych, paint&sip, warsztatów dzieci, "
+        f"szkół, mniejszych sklepów plastycznych.\n"
+        f"- 'private_label' = produkcja w Chinach pod marką własną klienta. "
+        f"Tylko gdy widać skalę / istniejącą markę / aspiracje brandingowe.\n"
+        f"- 'both' = w jednym mailu wspomnieć obie. Użyj OSZCZĘDNIE: tylko gdy "
+        f"lead jest pomiędzy. Zwykle lepiej skupić się na jednej.\n\n"
+        f"## KROK 2: Cold mail do {lead.company_name}\n\n"
         f"### Struktura snippetów (każdy = jeden akapit, każdy krótki):\n"
         f"- subject: temat maila. Max 50 znaków. Format: pytanie/liczba/konkret. "
-        f"  Patrz zasady w system prompt. Test: jeśli zobaczyłbyś ten subject "
-        f"  w skrzynce, otworzyłbyś bez wahania? Jak nie - przeformułuj.\n"
+        f"  Test: jeśli zobaczyłbyś ten subject w skrzynce, otworzyłbyś bez "
+        f"  wahania? Jak nie - przeformułuj.\n"
         f"- snippet1: pierwsze zdanie/dwa. MUSI nawiązać do konkretnego haka. "
         f"  Bez 'Dzień dobry'. Zacznij od mięsa - pytania, obserwacji, konkretu.\n"
         f"- snippet2: kim jesteś (krótko, 1 zdanie) i dlaczego piszesz "
         f"  AKURAT do nich (połącz to z hakiem). Max 2 zdania.\n"
-        f"- snippet3: konkretna oferta. Liczby. Co jest taniej, o ile, jak. "
-        f"  Wspomnij Chiny + private label tylko jeśli to ma sens dla ich biznesu.\n"
-        f"- snippet4: opcjonalny social proof / liczba (np. 'Ostatnio zrobiliśmy "
-        f"  5000 sztalug pod marką własną dla sieci sklepów hobbystycznych.'). "
-        f"  Jeśli nie masz NIC autentycznego - zwróć null. Lepsze null niż wymyślone.\n"
+        f"- snippet3: KONKRETNA oferta zgodna z wybraną offer_track:\n"
+        f"  * b2b_panel: panel B2B Artmakera, magazyn w PL, dostawa 24h, "
+        f"    ceny hurtowe od producenta, BEZ minimum zamówienia, BEZ czekania "
+        f"    na produkcję. Konkretne kategorie produktów które ich dotyczą.\n"
+        f"  * private_label: produkcja w naszych chińskich fabrykach pod ich "
+        f"    specyfikację, własna marka, opakowania, 30-50% taniej niż polska "
+        f"    hurtownia. Wspomnij MOQ tylko jeśli pasuje (300-1000 szt).\n"
+        f"  * both: jedno zdanie o b2b_panel + jedno zdanie 'a jeśli kiedyś "
+        f"    chcielibyście rozwinąć własną markę - możemy też...'\n"
+        f"- snippet4: opcjonalny social proof / liczba (np. 'Obsługujemy "
+        f"  ponad 200 sklepów papierniczych w Polsce.'). Tylko jeśli AUTENTYCZNE. "
+        f"  Lepsze null niż wymyślone. NIE WYMYŚLAJ liczb.\n"
         f"- snippet5: CTA-PYTANIE. Niski wysiłek dla odbiorcy. Np. "
-        f"  'Wysłać cennik na 50 sztalug?' albo 'Otworzy Pani 10 minut w czwartek po 14?'.\n\n"
+        f"  'Wysłać dostęp do panelu B2B żeby Pani zerknęła?' albo "
+        f"  'Otworzyłaby się Pani na 10 minut w czwartek po 14?'.\n\n"
         f"### Cały mail (snippet1+2+3+4?+5) MUSI mieć 70-130 słów. KRÓTKO.\n"
-        f"### NIGDY nie używaj — ani – w żadnym snippecie. Tylko zwykły -.\n"
+        f"### NIGDY nie używaj długiego myślnika ani średniego myślnika w żadnym snippecie. Tylko zwykły dywiz -.\n"
     )
+
+
+def _suggest_track_hint(segment: str, monthly_volume: str) -> str:
+    """Heuristic suggestion for which sales track suits this lead. The LLM
+    has the final say in offer_track - this is just a starter hint."""
+    if segment == "marka_wlasna":
+        return "private_label (segment marka_wlasna - default Track A)."
+    if segment in {"sklep_papierniczy", "paint_and_sip", "warsztaty_dzieci",
+                   "animatorzy_eventy", "szkola_artystyczna"}:
+        return f"b2b_panel (segment {segment} - typowo Track B)."
+    if segment == "sklep_plastyczny":
+        # Big shops can go private label, small ones panel B2B.
+        if monthly_volume and any(c in monthly_volume for c in "5+") and "00" in monthly_volume:
+            return (
+                "both (sklep plastyczny z większym wolumenem - można "
+                "zaproponować obie ścieżki)."
+            )
+        return "b2b_panel (sklep plastyczny - default Track B)."
+    return "b2b_panel (default - bezpieczniej zacząć od panelu B2B)."
 
 
 PERSONA_AND_RULES = """\
@@ -363,6 +410,7 @@ def generate_draft_for_lead(
 
     # Scrub AI artifacts (em-dash, smart quotes, clichés) before persisting.
     payload = EmailDraftPayload(
+        offer_track=payload.offer_track,
         subject=_strip_ai_artifacts(payload.subject) or payload.subject,
         snippet1=_strip_ai_artifacts(payload.snippet1) or payload.snippet1,
         snippet2=_strip_ai_artifacts(payload.snippet2) or payload.snippet2,
@@ -375,13 +423,13 @@ def generate_draft_for_lead(
     cost = estimate_cost_usd(provider, model, usage)
     logger.bind(source="generate").info(
         f"Draft generated for lead #{lead_id} via {provider}/{model}; "
-        f"~${cost} usd; subject={payload.subject!r}"
+        f"~${cost} usd; track={payload.offer_track}; subject={payload.subject!r}"
     )
 
     with SessionLocal() as session:
         draft = EmailDraft(
             lead_id=lead_id,
-            template_variant="cold_v1",
+            template_variant=f"cold_v1_{payload.offer_track}",
             subject=payload.subject,
             snippet1=payload.snippet1,
             snippet2=payload.snippet2,

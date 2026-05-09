@@ -28,6 +28,7 @@ def utcnow() -> datetime:
 
 class LeadSegment(str, Enum):
     SKLEP_PLASTYCZNY = "sklep_plastyczny"
+    SKLEP_PAPIERNICZY = "sklep_papierniczy"
     PAINT_AND_SIP = "paint_and_sip"
     WARSZTATY_DZIECI = "warsztaty_dzieci"
     ANIMATORZY_EVENTY = "animatorzy_eventy"

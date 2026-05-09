@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 Segment = Literal[
     "sklep_plastyczny",
+    "sklep_papierniczy",
     "paint_and_sip",
     "warsztaty_dzieci",
     "animatorzy_eventy",
