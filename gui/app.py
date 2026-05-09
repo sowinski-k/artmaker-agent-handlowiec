@@ -514,7 +514,7 @@ def render_discovery(provider: str, model: str) -> None:
         st.session_state["discovery_auto_research_pending"] = bool(
             auto_research and use_relevance_filter and relevance_map
         )
-        st.session_state["discovery_auto_draft_threshold"] = (
+        st.session_state["discovery_auto_draft_threshold_pending"] = (
             int(auto_draft_threshold) if auto_draft else None
         )
 
@@ -624,7 +624,7 @@ def render_discovery(provider: str, model: str) -> None:
     # research on every place above threshold without requiring another click.
     auto_pending = st.session_state.pop("discovery_auto_research_pending", False)
     auto_draft_threshold_pending = st.session_state.pop(
-        "discovery_auto_draft_threshold", None
+        "discovery_auto_draft_threshold_pending", None
     )
     if auto_pending:
         auto_targets = [
