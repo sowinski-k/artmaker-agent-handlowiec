@@ -1,0 +1,43 @@
+[Unit]
+Description=Artmaker Agent - Streamlit GUI + agent skrypty
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=artmaker
+Group=artmaker
+WorkingDirectory=/opt/artmaker/repo
+
+# Sekrety wczytywane z pliku - chmod 600, tylko user artmaker widzi
+EnvironmentFile=/opt/artmaker/secrets.env
+
+# Streamlit nasłuchuje tylko lokalnie - nginx proxy'uje na 80
+ExecStart=/opt/artmaker/venv/bin/streamlit run gui/app.py \
+    --server.address=127.0.0.1 \
+    --server.port=8501 \
+    --server.headless=true \
+    --server.fileWatcherType=none \
+    --browser.gatherUsageStats=false
+
+# Restart on failure (np. crash przy złym sekrecie)
+Restart=on-failure
+RestartSec=10
+
+# Capture stdout/stderr to journalctl
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=artmaker
+
+# Bezpieczeństwo - ograniczamy co proces może
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/artmaker
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
