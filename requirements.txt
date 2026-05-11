@@ -9,3 +9,6 @@ google-genai>=0.8.0
 httpx>=0.28.0
 beautifulsoup4>=4.12.0
 pandas>=2.2.0
+# Postgres driver - aktywuje się gdy DATABASE_URL=postgresql://...
+# Dla SQLite (default lokalnie) nie jest używany.
+psycopg2-binary>=2.9.10

@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     daily_api_budget_usd: float = 10.0
     log_level: str = "INFO"
     db_path: str = "data/leads.db"
+    # Read DATABASE_URL env var (Railway, Heroku-style platforms set this).
+    # If non-empty -> override SQLite default. SQLAlchemy auto-picks driver
+    # by URL prefix (sqlite://..., postgresql://..., mysql://...).
+    database_url: str = ""
 
     @property
     def db_file(self) -> Path:
@@ -48,6 +52,13 @@ class Settings(BaseSettings):
 
     @property
     def db_url(self) -> str:
+        if self.database_url.strip():
+            # Railway Postgres URLs come as 'postgres://' but SQLAlchemy 2.x
+            # wants 'postgresql://'. Normalise.
+            url = self.database_url.strip()
+            if url.startswith("postgres://"):
+                url = "postgresql://" + url[len("postgres://"):]
+            return url
         return f"sqlite:///{self.db_file}"
 
 

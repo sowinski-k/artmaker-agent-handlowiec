@@ -61,17 +61,41 @@ DATABASE_URL=sqlite:////data/leads.db
 
 **Update Variables** → deploy się automatycznie odpali ponownie z nowymi env vars.
 
-## Krok 4: Persistent volume dla SQLite
+## Krok 4: Persystencja danych - PostgreSQL (zalecam) lub Volume
 
-Bez tego baza ginie przy każdym deploy. Krytyczne.
+Bez tego baza ginie przy każdym deploy. Krytyczne. Dwie opcje:
 
-W panelu projektu → service → **Settings → Volumes** → **+ New Volume**:
+### Opcja 4A: Managed PostgreSQL (zalecam) ⭐
+
+Lepsze długoterminowo (multi-user gotowe, backupy, scale). Cena ~$5/mies.
+
+1. **W widoku projektu** kliknij **"+ Create"** na pustym canvasie (nie wewnątrz service'u, tylko na poziomie projektu)
+2. Wybierz **Database → PostgreSQL** (Add PostgreSQL)
+3. Railway tworzy service "Postgres" w ~20s
+4. W service `artmaker-agent-handlowiec` → **Variables**:
+   - Znajdź istniejący `DATABASE_URL` (ten z `sqlite:///...`) i **usuń go** (-)
+   - Kliknij **+ New Variable** → **Add Reference** → wybierz service Postgres → wybierz `DATABASE_URL`
+   - Save
+5. Railway automatycznie:
+   - łączy oba service'y w sieci wewnętrznej
+   - przekazuje connection string do apki przez env var
+   - przy każdym restarcie Postgres'a auto-aktualizuje URL w apce (zero-downtime przy roli rebootów)
+6. Po redeploy apka łączy się z Postgres, tabele tworzą się automatycznie przez `init_db()`
+
+> **Gotowe!** Baza persistent, masz UI w Railway do podglądu tabel + backupy.
+
+### Opcja 4B: Volume + SQLite (taniej, ale wolniej dorastasz)
+
+Tylko jeśli z jakiegoś powodu volumes Ci się nie chce zostawiać Postgresa. ~$0.50/mies.
+
+W widoku projektu → "+ Create" → **Volume** (jeśli widoczne)
 - Mount path: `/data`
-- Volume size: **1 GB** (wystarczy na ~100k leadów; rośniesz później)
+- Size: **1 GB**
+- Attach do `artmaker-agent-handlowiec`
 
-Save. Railway automatycznie restartuje service z volume zamontowanym.
+W Variables: ustaw `DATABASE_URL=sqlite:////data/leads.db` (cztery slashe = absolutna ścieżka).
 
-> **Sprawdź**: po restarcie w **Variables** powinno być `DATABASE_URL=sqlite:////data/leads.db` (cztery slashe, bo absolutna ścieżka w containerze).
+> Jeśli **Volume nie widać w UI** Railway (czasami zachowują tylko dla Pro plan), użyj Opcji 4A.
 
 ## Krok 5: Wygeneruj domenę
 
