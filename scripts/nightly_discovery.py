@@ -281,6 +281,19 @@ def main() -> None:
             f"failed={s.get('failed',0)}"
         )
 
+    # Polling Woodpeckera dla zmian statusów (replied/bounced) wysłanych leadów.
+    # Wpięte w nightly, żeby raz dziennie odświeżać statusy bez osobnego cron'a.
+    try:
+        from scripts.poll_woodpecker import poll_statuses
+        from agent.woodpecker import has_woodpecker_key
+
+        if has_woodpecker_key():
+            logger.bind(source="nightly").info("Polling Woodpecker statuses...")
+            counts = poll_statuses(max_leads=200)
+            logger.bind(source="nightly").info(f"Poll counts: {counts}")
+    except Exception as exc:
+        logger.bind(source="nightly").exception(f"Polling Woodpeckera padł (kontynuuję): {exc}")
+
 
 if __name__ == "__main__":
     main()

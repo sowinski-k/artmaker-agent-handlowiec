@@ -956,9 +956,20 @@ def render_leads(provider: str, model: str) -> None:
         st.caption(f"...i {len(filtered) - 20} więcej (zawęź filtrami).")
 
 
+@st.cache_data(ttl=300)  # 5 min cache - Woodpecker rate-limity są twarde
+def _cached_woodpecker_campaigns() -> list[tuple[int, str, str | None]]:
+    """Cached list_campaigns. Returns (id, name, status) tuples żeby się
+    serializowały dla @cache_data."""
+    from agent.woodpecker import list_campaigns
+    campaigns = list_campaigns()
+    return [(c.id, c.name, c.status) for c in campaigns]
+
+
 def render_drafts(provider: str, model: str) -> None:
     from agent.generate import generate_all_researched
+    from agent.woodpecker import has_woodpecker_key
 
+    # ---- Bulk generate sekcja ----
     with st.expander("⚙️ Bulk-generuj drafty z researchowanych leadów", expanded=False):
         with SessionLocal() as session:
             researched_count = (
@@ -985,6 +996,67 @@ def render_drafts(provider: str, model: str) -> None:
             st.success(f"Gotowe — {made} draftów wygenerowanych, {failed} błędów.")
             st.rerun()
 
+    # ---- Wysyłka: Woodpecker integracja ----
+    wp_ok = has_woodpecker_key()
+    if not wp_ok:
+        st.info(
+            "🔌 **Woodpecker nie skonfigurowany** — dodaj `WOODPECKER_API_KEY` "
+            "w env / Railway Variables, żeby wysyłać drafty automatycznie. "
+            "Bez tego możesz tylko zatwierdzać drafty (skopiujesz ręcznie)."
+        )
+        selected_campaign_id: int | None = None
+    else:
+        wp_col1, wp_col2 = st.columns([3, 1])
+        # Kampanie - cached
+        try:
+            campaigns = _cached_woodpecker_campaigns()
+        except Exception as exc:
+            wp_col1.error(f"Nie udało się pobrać kampanii z Woodpeckera: {exc}")
+            campaigns = []
+
+        if not campaigns:
+            wp_col1.warning(
+                "Brak kampanii w Twoim Woodpeckerze. **Utwórz kampanię w UI Woodpeckera** "
+                "(z sekwencją follow-upów i template'em maila zawierającym placeholdery "
+                "`{{SNIPPET1}}..{{SNIPPET5}}` i `{{SNIPPET6}}` dla subject) i wróć tutaj."
+            )
+            selected_campaign_id = None
+        else:
+            campaign_options = {
+                f"#{cid} — {name}" + (f" [{status}]" if status else ""): cid
+                for cid, name, status in campaigns
+            }
+            selected_label = wp_col1.selectbox(
+                "📤 Kampania docelowa",
+                list(campaign_options.keys()),
+                key="wp_campaign_select",
+                help="Wybierz kampanię Woodpeckera do której będą trafiać zatwierdzone drafty.",
+            )
+            selected_campaign_id = campaign_options[selected_label]
+
+        if wp_col2.button("🔄 Odśwież statusy", help="Pyta Woodpecker o aktualne statusy wysłanych leadów."):
+            try:
+                from scripts.poll_woodpecker import poll_statuses
+                with st.spinner("Polling Woodpeckera..."):
+                    counts = poll_statuses(max_leads=200)
+                st.success(
+                    f"Sprawdzone: {counts['checked']}, "
+                    f"replied: {counts['replied']}, "
+                    f"bounced: {counts['bounced']}, "
+                    f"unchanged: {counts['unchanged']}, "
+                    f"errors: {counts['errors']}"
+                )
+                _cached_woodpecker_campaigns.clear()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Polling padł: {exc}")
+
+        if settings.dry_run:
+            st.warning(
+                "⚠️ **DRY_RUN=true** w env. Wysyłka jest zablokowana - drafty nie wyjdą. "
+                "Ustaw `DRY_RUN=false` w Railway Variables żeby aktywować wysyłkę."
+            )
+
     with SessionLocal() as session:
         drafts = (
             session.execute(
@@ -1005,20 +1077,47 @@ def render_drafts(provider: str, model: str) -> None:
     for draft_id, company, subject, preview in rows:
         with st.expander(f"#{draft_id} — {company} | {subject or '(brak tematu)'}"):
             st.text(preview or "(brak treści)")
-            c1, c2, c3 = st.columns(3)
-            if c1.button("Zatwierdź", key=f"approve-{draft_id}"):
+            c1, c2, c3, c4 = st.columns(4)
+            if c1.button("✅ Zatwierdź", key=f"approve-{draft_id}"):
                 with SessionLocal() as session:
                     obj = session.get(EmailDraft, draft_id)
                     obj.status = DraftStatus.APPROVED.value
                     session.commit()
                 st.rerun()
-            if c2.button("Odrzuć", key=f"reject-{draft_id}"):
+            if c2.button("❌ Odrzuć", key=f"reject-{draft_id}"):
                 with SessionLocal() as session:
                     obj = session.get(EmailDraft, draft_id)
                     obj.status = DraftStatus.REJECTED.value
                     session.commit()
                 st.rerun()
-            c3.button("Edytuj (TODO)", key=f"edit-{draft_id}", disabled=True)
+            send_disabled = (
+                not wp_ok
+                or selected_campaign_id is None
+                or settings.dry_run
+            )
+            if c3.button(
+                "📤 Wyślij",
+                key=f"send-{draft_id}",
+                disabled=send_disabled,
+                help=(
+                    "DRY_RUN=true - wysyłka zablokowana" if settings.dry_run
+                    else "Brak kampanii do wysłania" if selected_campaign_id is None
+                    else "Push do Woodpeckera, start sekwencji follow-upów"
+                ),
+                type="primary",
+            ):
+                try:
+                    from agent.push_to_sender import push_draft
+                    with st.spinner(f"Wysyłam draft #{draft_id} do Woodpecker..."):
+                        prospect_id = push_draft(draft_id, selected_campaign_id)
+                    st.success(
+                        f"✅ Wysłany do Woodpecker (prospect_id={prospect_id or '?'}). "
+                        f"Sekwencja follow-upów aktywna."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Wysyłka padła: {exc}")
+            c4.button("✏️ Edytuj (TODO)", key=f"edit-{draft_id}", disabled=True)
 
 
 def render_logs() -> None:
