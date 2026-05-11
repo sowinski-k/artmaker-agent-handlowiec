@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     dry_run: bool = True
     daily_email_limit: int = 30
+    daily_research_limit: int = 100  # max nowych researchy / dzień (token guard)
     daily_api_budget_usd: float = 10.0
     log_level: str = "INFO"
     db_path: str = "data/leads.db"

@@ -196,6 +196,36 @@ def research_and_save(
             )
             return existing_id, None, False
 
+    # Daily limit guard - prevent runaway costs gdy ktoś zostawi auto-pipeline.
+    # Sprawdzamy ile leadów było researchowanych dzisiaj (UTC).
+    if settings.daily_research_limit > 0:
+        from datetime import datetime, timezone
+        from sqlalchemy import select as _select, func as _func
+
+        start_of_day = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        with SessionLocal() as session:
+            researched_today = session.scalar(
+                _select(_func.count(Lead.id)).where(
+                    Lead.created_at >= start_of_day,
+                    Lead.status != LeadStatus.NEW.value,
+                )
+            ) or 0
+        if researched_today >= settings.daily_research_limit:
+            msg = (
+                f"Dzienny limit researchy osiągnięty: {researched_today}/"
+                f"{settings.daily_research_limit}. Podnieś DAILY_RESEARCH_LIMIT "
+                "albo poczekaj do jutra (limit resetuje się o północy UTC)."
+            )
+            logger.bind(source="research").warning(msg)
+            raise RuntimeError(msg)
+
+    if force_refresh:
+        logger.bind(source="research").info(
+            f"Force refresh dla {url} - re-research mimo że może być w bazie."
+        )
+
     result = research_url(
         url,
         segment_hint=segment_hint,

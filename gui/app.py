@@ -637,21 +637,49 @@ def render_discovery(provider: str, model: str) -> None:
     relevance_warning = st.session_state.get("discovery_relevance_warning")
     threshold = int(st.session_state.get("discovery_threshold_used", 6))
 
-    st.markdown(f"### {len(places_data)} firm znalezionych dla `{st.session_state.get('discovery_query', '')}`")
+    # Liczymy ile z places_data to duble (already_in_db)
+    dups_count = sum(1 for p in places_data if p.get("existing_lead_id"))
+    fresh_count = len(places_data) - dups_count
+
+    title_query = st.session_state.get('discovery_query', '')
+    st.markdown(f"### {len(places_data)} firm znalezionych dla `{title_query}`")
+    if dups_count > 0:
+        st.info(
+            f"💾 **{dups_count} z {len(places_data)} firm jest już w Twojej bazie leadów**. "
+            f"Filtr trafności pominął ich i nie wydał na nich tokenów. "
+            f"Nowych do oceny: **{fresh_count}**."
+        )
+
+    show_duplicates = st.toggle(
+        "Pokaż też duble z bazy",
+        value=False,
+        key="discovery_show_dups",
+        help="Domyślnie chowamy firmy które już masz w bazie. Włącz żeby je zobaczyć.",
+    )
+
     if relevance_warning:
         st.warning(relevance_warning)
 
     if relevance_map:
-        kept = sum(1 for s in relevance_map.values() if s["score"] >= threshold)
-        rejected = len(relevance_map) - kept
+        # Tylko fresh leady liczą się do "kept/rejected" (duble nie idą do researchu)
+        fresh_scores = [
+            s for i, s in relevance_map.items()
+            if not (i < len(places_data) and places_data[i].get("existing_lead_id"))
+        ]
+        kept = sum(1 for s in fresh_scores if s["score"] >= threshold)
+        rejected = len(fresh_scores) - kept
         st.caption(
-            f"Filtr trafności: {kept} pasuje (≥{threshold}), {rejected} odrzucone. "
-            "Sortuję od najtrafniejszych. Możesz przesunąć zaznaczenia ręcznie."
+            f"Filtr trafności na świeżych leadach: {kept} pasuje (≥{threshold}), "
+            f"{rejected} odrzucone. Sortuję od najtrafniejszych."
         )
 
     # Build rows; if scoring is on, sort by relevance desc so the best leads
     # surface first.
     indexed_places = list(enumerate(places_data))
+    # Filtruj duble jeśli toggle wyłączony (domyślnie tak)
+    if not show_duplicates:
+        indexed_places = [(i, p) for i, p in indexed_places if not p.get("existing_lead_id")]
+
     if relevance_map:
         def _key(item: tuple[int, dict]) -> tuple[int, int]:
             i, p = item
@@ -664,8 +692,11 @@ def render_discovery(provider: str, model: str) -> None:
     for original_idx, p in indexed_places:
         rel = relevance_map.get(original_idx)
         score_val = rel["score"] if rel else None
-        # Default selection: only "good enough" leads with a website.
-        if rel:
+        in_db_lead_id = p.get("existing_lead_id")
+        # Default selection: only "good enough" leads with a website AND not dup
+        if in_db_lead_id is not None:
+            default_selected = False  # nigdy nie zaznaczamy dubli (research je i tak skipnie)
+        elif rel:
             default_selected = bool(p.get("website")) and score_val >= threshold
         else:
             default_selected = bool(p.get("website"))
@@ -673,6 +704,7 @@ def render_discovery(provider: str, model: str) -> None:
             {
                 "_orig_idx": original_idx,
                 "Wybierz": default_selected,
+                "W bazie?": f"✓ #{in_db_lead_id}" if in_db_lead_id else "—",
                 "Trafność": score_val if score_val is not None else "—",
                 "Komentarz": (rel["reason"] if rel else ""),
                 "Źródło": SOURCE_LABELS.get(p["source"], p["source"]),

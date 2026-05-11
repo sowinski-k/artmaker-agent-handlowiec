@@ -38,6 +38,12 @@ class DiscoveredPlace(BaseModel):
     raw_id: str | None = None
     notes: str | None = None
 
+    # Wypełniane przez mark_existing_in_db() PO mergu źródeł, PRZED filtrem
+    # trafności LLM. Jeśli set: ten URL/firma jest już w bazie i nie powinniśmy
+    # marnować tokenów na ponowne LLM scoring.
+    existing_lead_id: int | None = None
+    existing_lead_score: float | None = None
+
 
 class SourceResult(BaseModel):
     source: str
@@ -426,7 +432,64 @@ def run_search(
                     seen[key] = place
             else:
                 seen[key] = place
-    return list(seen.values()), results
+
+    merged_places = list(seen.values())
+    # Mark places that are already in our leads DB - so downstream (relevance
+    # filter, GUI) wie czego nie tknąć.
+    mark_existing_in_db(merged_places)
+    return merged_places, results
+
+
+def mark_existing_in_db(places: list[DiscoveredPlace]) -> None:
+    """In-place: ustawia existing_lead_id i existing_lead_score na DiscoveredPlace
+    których URL pasuje do istniejącego Lead w bazie.
+
+    Jedno zapytanie SQL na cały batch (ILIKE po unikalnych hostach), potem
+    weryfikacja przez normalize_url() w Pythonie. Skala: tysiące leadów w
+    bazie = OK, bo ograniczamy zapytanie do hostów z aktualnej listy.
+    """
+    if not places:
+        return
+    # Lokalne importy żeby uniknąć cyrkularnego importu (research -> discovery)
+    from sqlalchemy import select, or_
+
+    from core.db import Lead, SessionLocal
+    from core.urls import host_only, normalize_url
+
+    # Zbierz unikalne hosty z aktualnych places
+    hosts_to_check: dict[str, list[DiscoveredPlace]] = {}
+    for p in places:
+        if not p.website:
+            continue
+        host = host_only(p.website)
+        if host:
+            hosts_to_check.setdefault(host, []).append(p)
+
+    if not hosts_to_check:
+        return
+
+    # Jedno zapytanie SQL: tylko leady których website zawiera jeden z hostów
+    # z naszej batch listy
+    with SessionLocal() as session:
+        conditions = [Lead.website.ilike(f"%{h}%") for h in hosts_to_check]
+        rows = session.execute(
+            select(Lead.id, Lead.website, Lead.score).where(
+                Lead.website.isnot(None),
+                or_(*conditions),
+            )
+        ).all()
+
+    # Mapuj DB rows -> DiscoveredPlace przez exact normalize_url match
+    by_norm: dict[str, tuple[int, float | None]] = {
+        normalize_url(website): (lead_id, score)
+        for lead_id, website, score in rows
+    }
+    for p in places:
+        if not p.website:
+            continue
+        norm = normalize_url(p.website)
+        if norm in by_norm:
+            p.existing_lead_id, p.existing_lead_score = by_norm[norm]
 
 
 # ---- Relevance filter (cheap LLM batch scoring) -----------------------------
@@ -455,6 +518,31 @@ def score_relevance_batch(
     if not places:
         return [], {}
 
+    # PRE-FILTER: nie scoruj dubli. Dla każdego place z existing_lead_id
+    # syntetyzujemy RelevanceItem (score=existing_score lub 5 jeśli nieznany)
+    # zamiast wysyłać do LLM. Reszta idzie do prawdziwego scoringu.
+    duplicate_items: list[RelevanceItem] = []
+    fresh_indices: list[int] = []  # indeksy w `places` które idą do LLM
+    for idx, p in enumerate(places):
+        if p.existing_lead_id is not None:
+            # Zachowaj score który Lead już ma w bazie (jeśli był researchowany),
+            # albo dej 5 jako "neutralne" - user widzi że to dubel i decyduje sam.
+            score_int = (
+                int(round(p.existing_lead_score))
+                if p.existing_lead_score is not None else 5
+            )
+            duplicate_items.append(RelevanceItem(
+                idx=idx,
+                score=max(0, min(10, score_int)),
+                reason=f"Duplikat - już w bazie jako lead #{p.existing_lead_id}",
+            ))
+        else:
+            fresh_indices.append(idx)
+
+    # Jeśli wszystkie to duble - nic nie wysyłamy do LLM
+    if not fresh_indices:
+        return duplicate_items, {}
+
     if custom_description and custom_description.strip():
         target_label = "(własny target)"
         target_description = custom_description.strip()
@@ -464,11 +552,16 @@ def score_relevance_batch(
             segment, SEGMENT_DESCRIPTIONS["inne"]
         )
 
+    # Catalog tylko dla "fresh" - ale indeksy w prompcie muszą się mapować
+    # z powrotem na oryginalne `places`, więc renumeruję i mapuję back.
+    fresh_to_orig: dict[int, int] = {}  # local_idx -> orig_idx
     catalog_lines = []
-    for i, p in enumerate(places):
+    for local_idx, orig_idx in enumerate(fresh_indices):
+        fresh_to_orig[local_idx] = orig_idx
+        p = places[orig_idx]
         category = p.notes or "?"
         addr = p.address or "?"
-        catalog_lines.append(f"[{i}] {p.name} | kategoria: {category} | adres: {addr}")
+        catalog_lines.append(f"[{local_idx}] {p.name} | kategoria: {category} | adres: {addr}")
     catalog = "\n".join(catalog_lines)
 
     system = (
@@ -502,4 +595,15 @@ def score_relevance_batch(
         model=model,
         max_tokens=4096,
     )
-    return parsed.items, usage
+
+    # Remap indeksy z lokalnych (LLM widział tylko fresh) na oryginalne
+    remapped = [
+        RelevanceItem(
+            idx=fresh_to_orig.get(item.idx, item.idx),
+            score=item.score,
+            reason=item.reason,
+        )
+        for item in parsed.items
+        if item.idx in fresh_to_orig
+    ]
+    return remapped + duplicate_items, usage
