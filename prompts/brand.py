@@ -27,11 +27,11 @@ Idealni klienci dla TRACK A:
 - Dystrybutorzy szukający kontraktu produkcyjnego pod ich brand
 - Hurtownie z wolumenem co najmniej kilkaset sztuk SKU/miesiąc
 
-## ŚCIEŻKA B: Panel B2B Artmaker (magazyn PL, dostawa 24h)
+## ŚCIEŻKA B: Panel B2B SOWINS (magazyn PL, dostawa 24h)
 
 Dla klientów którzy potrzebują towaru OD RĘKI bez czekania na produkcję.
 
-- Stała oferta produktów plastycznych, kreatywnych i papierniczych dostępna
+- Stała oferta produktów plastycznych, kreatywnych i papierniczych, i nie tylko dostępna
   na magazynie w Polsce - towar wysyłamy w 24h od złożenia zamówienia.
 - Ceny hurtowe od producenta (omijamy pośredników, więc taniej niż polska
   hurtownia).
