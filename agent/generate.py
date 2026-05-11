@@ -367,6 +367,48 @@ def _build_system_prompt() -> str:
     )
 
 
+def _call_with_retry(
+    *,
+    provider: str,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens_attempts: tuple[int, ...] = (4096, 6144),
+) -> "EmailDraftPayload":
+    """Wywołaj LLM z eskalacją max_tokens przy parse failure.
+
+    Gemini 3.x preview z thinking budget czasem dochodzi do limitu max_tokens
+    i ucina JSON w środku stringa (Pydantic validation error: Invalid JSON EOF).
+    Retry'ujemy z większym max_tokens zanim podniesiemy wyjątek.
+    """
+    last_exc: Exception | None = None
+    for attempt_idx, mt in enumerate(max_tokens_attempts):
+        try:
+            payload, _usage = parse_structured(
+                provider=provider, model=model,
+                system=system, user=user,
+                output_schema=EmailDraftPayload,
+                max_tokens=mt,
+                temperature=DRAFT_TEMPERATURE,
+            )
+            return payload
+        except Exception as exc:
+            last_exc = exc
+            # Retry tylko dla parse / json errors. Inne (np. brak klucza) niech idą.
+            msg = str(exc).lower()
+            if "json" not in msg and "validation" not in msg and "parse" not in msg:
+                raise
+            logger.bind(source="generate").warning(
+                f"Draft parse failure z max_tokens={mt} (attempt {attempt_idx+1}/"
+                f"{len(max_tokens_attempts)}): {exc}. Retry z większym budżetem..."
+            )
+    # Wszystkie próby spasowały
+    raise RuntimeError(
+        f"Draft generation padł po {len(max_tokens_attempts)} próbach. "
+        f"Ostatni błąd: {last_exc}"
+    )
+
+
 def generate_draft_for_lead(
     lead_id: int,
     *,
@@ -403,14 +445,13 @@ def generate_draft_for_lead(
         system = _build_system_prompt()
         user = _build_user_prompt(lead)
 
-    payload, usage = parse_structured(
-        provider=provider,
-        model=model,
-        system=system,
-        user=user,
-        output_schema=EmailDraftPayload,
-        max_tokens=2000,
-        temperature=DRAFT_TEMPERATURE,
+    # 2000 tokens to dla Gemini 3.x preview za mało - thinking budget zjada
+    # część puli i JSON się ucina w środku stringa (validation error EOF).
+    # 4096 daje komfortowy zapas dla 70-130 słów body + sub + offer_track.
+    # Retry z 6144 jeśli i tak się posypie.
+    payload = _call_with_retry(
+        provider=provider, model=model, system=system, user=user,
+        max_tokens_attempts=(4096, 6144),
     )
 
     # Scrub AI artifacts (em-dash, smart quotes, clichés) before persisting.
