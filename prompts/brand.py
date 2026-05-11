@@ -32,11 +32,15 @@ Idealni klienci dla TRACK A:
 Dla klientów którzy potrzebują towaru OD RĘKI bez czekania na produkcję.
 
 - Stała oferta produktów plastycznych, kreatywnych i papierniczych dostępna
-  na magazynie w Polsce - można zamówić od 1 sztuki / kartonu, ze stocku.
-- Dostawa 24h, ceny hurtowe od producenta (i tak taniej niż polska
-  hurtownia bo my omijamy pośredników).
-- Dedykowany panel B2B z aktualnym stanem magazynowym i historią zamówień.
-- Bez minimum zamówienia w wartości premium / bez czekania na produkcję.
+  na magazynie w Polsce - towar wysyłamy w 24h od złożenia zamówienia.
+- Ceny hurtowe od producenta (omijamy pośredników, więc taniej niż polska
+  hurtownia).
+- Dedykowany panel B2B online: **https://b2b.sowins.pl** - aktualny stan
+  magazynowy, ceny po zalogowaniu, historia zamówień, e-faktury.
+- **Minimum logistyczne: 1000 zł netto** na zamówienie.
+- **Dostawa GRATIS** przy zamówieniach od minimum (1000 zł netto) - my
+  pokrywamy koszt transportu kurierskim na terenie PL.
+- Bez czekania na produkcję (vs Track A gdzie jest 4-8 tygodni lead time).
 
 Idealni klienci dla TRACK B:
 - Sklepy plastyczne, papiernicze, biurowe z szybką rotacją asortymentu
