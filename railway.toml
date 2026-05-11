@@ -1,0 +1,18 @@
+# Railway deployment config dla Artmaker Agent.
+# Docs: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# CMD w Dockerfile używa $PORT - Railway go ustawia automatycznie.
+# Tu nie nadpisujemy startCommand, polegamy na Dockerfile CMD.
+
+# Streamlit ma natywny health endpoint.
+healthcheckPath = "/_stcore/health"
+healthcheckTimeout = 30
+
+# Restart przy crashu (np. zły klucz API, OOM przy dużym researchu).
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

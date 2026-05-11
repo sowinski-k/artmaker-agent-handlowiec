@@ -114,6 +114,44 @@ def _render_llm_selector() -> tuple[str, str]:
 
 st.set_page_config(page_title="Artmaker — Agent Handlowiec", layout="wide")
 
+
+def _gate_password() -> bool:
+    """Optional password gate. Activated by APP_PASSWORD env var.
+
+    Used on platforms without native auth (Railway, Render, Fly.io). On
+    Hetzner / VPS this is duplicated by nginx basic auth - both can coexist
+    (defense in depth) but neither alone is bullet-proof. Switch to OAuth /
+    SSO before going public.
+    """
+    import os
+
+    expected = os.getenv("APP_PASSWORD", "").strip()
+    if not expected:
+        return True  # Bez gate'u jeśli env var nie ustawiony
+
+    if st.session_state.get("_pw_ok"):
+        return True
+
+    # Wycentruj prosty form
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        st.markdown("### 🔒 Artmaker — Agent Handlowiec")
+        st.caption("Podaj hasło dostępu (kontakt z administratorem aplikacji).")
+        with st.form("password_gate"):
+            pw = st.text_input("Hasło", type="password", label_visibility="collapsed")
+            ok = st.form_submit_button("Wejdź", type="primary", use_container_width=True)
+            if ok:
+                if pw == expected:
+                    st.session_state["_pw_ok"] = True
+                    st.rerun()
+                else:
+                    st.error("Złe hasło.")
+    return False
+
+
+if not _gate_password():
+    st.stop()
+
 init_db()
 
 
