@@ -1,13 +1,17 @@
-/* Ecombinat API client - direct fetches do backendu przez NEXT_PUBLIC_BACKEND_URL.
+/* Ecombinat API client - same-origin fetches.
  *
- * Wszystkie auth tokeny są w localStorage. Każdy fetch dodaje Authorization
- * Bearer header. To eliminuje całą skomplikowaną kwestię cross-origin cookies.
+ * Wszystkie /api/* przechodza przez Next.js catch-all proxy
+ * (app/api/[...path]/route.ts), ktory server-side robi forward do
+ * backendu uzywajac process.env.BACKEND_URL (runtime).
  *
- * UWAGA: NEXT_PUBLIC_* zmienne są wbudowywane do bundle przy build-time.
- * Po zmianie wartości w Railway -> rebuild frontendu wymagany.
+ * Korzysci:
+ *  - zero CORS (same domena dla frontu i /api)
+ *  - cookies dzialaja natywnie (same-origin)
+ *  - zmiana BACKEND_URL w Railway = dziala po RESTART frontu
+ *
+ * Auth token w localStorage jako fallback - przekazywany przez
+ * Authorization: Bearer header. Cookies tez sa wysylane (zero overhead).
  */
-
-const BACKEND = (process.env.NEXT_PUBLIC_BACKEND_URL || '').replace(/\/$/, '');
 
 const TOKEN_KEY = 'ecombinat_token';
 
@@ -34,7 +38,8 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
   const { noAuth, headers, ...rest } = opts;
   const token = noAuth ? null : getToken();
 
-  const url = `${BACKEND}${path.startsWith('/') ? path : '/' + path}`;
+  // Same-origin URL - Next.js api proxy obsluguje
+  const url = path.startsWith('/') ? path : '/' + path;
 
   const res = await fetch(url, {
     ...rest,
@@ -43,7 +48,7 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...headers,
     },
-    credentials: 'include',  // wysyła też cookie jako fallback
+    credentials: 'include',
   });
 
   if (res.status === 401) {
@@ -57,7 +62,9 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
     let detail = text;
     try {
       detail = JSON.parse(text).detail || text;
-    } catch {}
+    } catch {
+      // body nie jest JSON-em (np. HTML 404 z proxy) - zostaw raw
+    }
     throw new Error(detail || `HTTP ${res.status}`);
   }
 
