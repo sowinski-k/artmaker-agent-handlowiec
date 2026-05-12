@@ -44,57 +44,62 @@ from core.llm import (
     has_gemini_key,
 )
 from gui.components import (
+    activity_feed,
     badge,
-    brand_header,
-    breadcrumb,
-    page_header,
-    section_title,
-    sidebar_nav_item,
-    sidebar_nav_section,
-    sidebar_nav_subitem,
-    stat_card,
+    card_close,
+    card_head,
+    data_table,
+    funnel,
+    page_head,
+    sb_foot,
+    sb_item,
+    sb_logo,
+    sb_section,
+    stat,
+    system_status,
+    time_range_html,
+    topbar,
 )
+from gui.landing import render_landing
 from gui.theme import APP_NAME, inject_global_css
 
 SEGMENT_VALUES: list[str] = [s.value for s in LeadSegment]
 
 
 def _render_sidebar_nav() -> None:
-    """Render branded sidebar navigation (MODUŁY → Agenci AI → Handlowiec)."""
-    with st.sidebar:
-        # Logo w dark sidebar
-        st.markdown(
-            f"""
-            <div style="display:flex;align-items:center;gap:10px;padding:0 0 14px;
-                        border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:14px;">
-                <div style="width:28px;height:28px;background:#D4212C;border-radius:6px;
-                            display:flex;align-items:center;justify-content:center;
-                            color:white;font-weight:700;font-family:'Space Grotesk',sans-serif;font-size:13px;">
-                    E
-                </div>
-                <div style="font-weight:600;font-size:14px;letter-spacing:-0.2px;color:white;">
-                    {APP_NAME.lower()}
-                </div>
-                <div style="margin-left:auto;font-family:'JetBrains Mono',monospace;
-                            font-size:10px;color:rgba(255,255,255,0.5);
-                            background:rgba(255,255,255,0.06);padding:1px 6px;border-radius:3px;">
-                    v0.1
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    """Render branded sidebar w stylu ecombinat-dashboard.html: logo + grouped nav.
 
-        # Nav: MODUŁY
-        sidebar_nav_section("Moduły")
-        sidebar_nav_item("Agenci AI", icon="robot", count=1, active=True)
-        sidebar_nav_subitem("Handlowiec cold-email", active=True)
+    Nawigacja jest dekoracyjna (HTML divs) - na razie tylko wskazuje
+    strukturę. Faktyczna kontrola modułu jest przez tabs w content area.
+    """
+    with st.sidebar:
+        sb_logo()
+
+        # HALA - core navigation
+        sb_section("Hala")
+        sb_item("Pulpit", icon="layout-dashboard", active=True)
+        sb_item("Projekty", icon="folder", disabled=True)
+        sb_item("Biblioteka", icon="photo", disabled=True)
+
+        # KUŹNIA - moduły
+        sb_section("Kuźnia")
+        sb_item("Agenci AI", icon="robot", count=1, active=True)
+        sb_item("Zdjęcia produktowe", icon="camera", disabled=True)
+        sb_item("Wideo", icon="video", disabled=True)
+        sb_item("Opisy AI", icon="wand", disabled=True)
+        sb_item("Usuń tło", icon="eraser", disabled=True)
+
+        # INTEGRACJE
+        sb_section("Integracje")
+        sb_item("Woodpecker", icon="api")
+        sb_item("Apify", icon="package")
+        sb_item("Google Places", icon="map-pin")
 
 
 def _render_llm_selector() -> tuple[str, str]:
     """Sidebar: pick provider + model. Returns (provider, model)."""
     with st.sidebar:
-        sidebar_nav_section("Model AI")
+        sb_section("Model AI")
 
         provider = st.selectbox(
             "Provider",
@@ -165,41 +170,8 @@ st.set_page_config(
 inject_global_css()
 
 
-def _gate_password() -> bool:
-    """Optional password gate. Activated by APP_PASSWORD env var.
-
-    Used on platforms without native auth (Railway, Render, Fly.io). On
-    Hetzner / VPS this is duplicated by nginx basic auth - both can coexist
-    (defense in depth) but neither alone is bullet-proof. Switch to OAuth /
-    SSO before going public.
-    """
-    import os
-
-    expected = os.getenv("APP_PASSWORD", "").strip()
-    if not expected:
-        return True  # Bez gate'u jeśli env var nie ustawiony
-
-    if st.session_state.get("_pw_ok"):
-        return True
-
-    # Wycentruj prosty form
-    _, mid, _ = st.columns([1, 2, 1])
-    with mid:
-        st.markdown("### 🔒 Artmaker — Agent Handlowiec")
-        st.caption("Podaj hasło dostępu (kontakt z administratorem aplikacji).")
-        with st.form("password_gate"):
-            pw = st.text_input("Hasło", type="password", label_visibility="collapsed")
-            ok = st.form_submit_button("Wejdź", type="primary", use_container_width=True)
-            if ok:
-                if pw == expected:
-                    st.session_state["_pw_ok"] = True
-                    st.rerun()
-                else:
-                    st.error("Złe hasło.")
-    return False
-
-
-if not _gate_password():
+# ─── Auth flow: landing page → password gate → dashboard ───
+if not render_landing(password_required=True):
     st.stop()
 
 init_db()
@@ -211,126 +183,196 @@ def _start_of_day_utc() -> datetime:
 
 
 def render_dashboard() -> None:
-    # ---- Top metrics ----
+    """Pulpit Ecombinat — pełny widok w stylu ecombinat-dashboard.html."""
+    # ─── Stats ───────────────────────────────────────────────────────────
     with SessionLocal() as session:
         total_leads = session.scalar(select(func.count(Lead.id))) or 0
-        researched = (
-            session.scalar(
-                select(func.count(Lead.id)).where(
-                    Lead.status == LeadStatus.RESEARCHED.value
-                )
+        researched = session.scalar(
+            select(func.count(Lead.id)).where(Lead.status == LeadStatus.RESEARCHED.value)
+        ) or 0
+        drafted = session.scalar(
+            select(func.count(Lead.id)).where(Lead.status == LeadStatus.DRAFTED.value)
+        ) or 0
+        drafts_pending = session.scalar(
+            select(func.count(EmailDraft.id)).where(EmailDraft.status == DraftStatus.DRAFT.value)
+        ) or 0
+        sent_today = session.scalar(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.status == DraftStatus.SENT.value,
+                EmailDraft.sent_at >= _start_of_day_utc(),
             )
-            or 0
-        )
-        drafts_pending = (
-            session.scalar(
-                select(func.count(EmailDraft.id)).where(
-                    EmailDraft.status == DraftStatus.DRAFT.value
-                )
-            )
-            or 0
-        )
-        sent_today = (
-            session.scalar(
-                select(func.count(EmailDraft.id)).where(
-                    EmailDraft.status == DraftStatus.SENT.value,
-                    EmailDraft.sent_at >= _start_of_day_utc(),
-                )
-            )
-            or 0
-        )
-        replied = (
-            session.scalar(
-                select(func.count(Lead.id)).where(Lead.status == LeadStatus.REPLIED.value)
-            )
-            or 0
-        )
+        ) or 0
+        sent_total = session.scalar(
+            select(func.count(EmailDraft.id)).where(EmailDraft.status == DraftStatus.SENT.value)
+        ) or 0
+        replied = session.scalar(
+            select(func.count(Lead.id)).where(Lead.status == LeadStatus.REPLIED.value)
+        ) or 0
+        bounced = session.scalar(
+            select(func.count(Lead.id)).where(Lead.status == LeadStatus.BOUNCED.value)
+        ) or 0
         avg_score = session.scalar(select(func.avg(Lead.score))) or 0.0
-        hot_leads = (
-            session.scalar(
-                select(func.count(Lead.id)).where(Lead.score >= 7.0)
-            )
-            or 0
-        )
+        hot_leads = session.scalar(
+            select(func.count(Lead.id)).where(Lead.score >= 7.0)
+        ) or 0
 
-    reply_rate_str = (
-        f"{(replied / total_leads) * 100:.1f}" if total_leads > 0 else "—"
-    )
+    reply_rate_str = f"{(replied / max(sent_total, 1)) * 100:.1f}" if sent_total > 0 else "—"
     avg_score_str = f"{avg_score:.1f}" if avg_score else "—"
 
+    # Sparkline mock data (TODO: prawdziwe trendy z DB po dat)
+    spark_up = [3, 5, 4, 6, 8, 9, 12, 14, 18, 22, 28, hot_leads or 30]
+    spark_flat = [10, 11, 10, 12, 13, 12, 14, 14, 15, 16, 16, 17]
+    spark_drafts = [0, 0, 2, 3, 5, 7, 8, 10, 12, 14, 14, drafts_pending or 16]
+
+    # ROW 1
     c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(stat_card(
+    c1.markdown(stat(
         "Leady w bazie", total_leads, icon="database",
+        delta=f"{researched} researched" if researched else None,
+        sparkline=spark_up, spark_color="#D4212C",
     ), unsafe_allow_html=True)
-    c2.markdown(stat_card(
+    c2.markdown(stat(
         "Hot leady", hot_leads, unit="≥ 7/10", icon="flame",
-        delta=f"{hot_leads}/{total_leads} ogółem" if total_leads else None,
+        delta=f"{hot_leads}/{total_leads} ogółem" if total_leads else "0 ogółem",
         delta_dir="up" if hot_leads > 0 else "flat",
+        sparkline=spark_up, spark_color="#D4212C",
     ), unsafe_allow_html=True)
-    c3.markdown(stat_card(
+    c3.markdown(stat(
         "Drafty do review", drafts_pending, icon="mail-forward",
+        delta=f"{drafted} oczekuje na draft" if drafted else None,
+        sparkline=spark_drafts, spark_color="#1C1C1C",
     ), unsafe_allow_html=True)
-    c4.markdown(stat_card(
+    c4.markdown(stat(
         "Średni score", avg_score_str, unit="/ 10", icon="chart-bar",
+        delta="vs poprzedni okres" if avg_score else None,
+        sparkline=spark_flat, spark_color="#6B7280",
     ), unsafe_allow_html=True)
 
     st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
+    # ROW 2
     c5, c6, c7, c8 = st.columns(4)
-    c5.markdown(stat_card(
+    c5.markdown(stat(
         "Researchowane", researched, icon="search",
+        sparkline=spark_up, spark_color="#1C1C1C",
     ), unsafe_allow_html=True)
-    c6.markdown(stat_card(
+    c6.markdown(stat(
         "Wysłane dziś", sent_today, icon="send",
+        delta=f"{sent_total} łącznie" if sent_total else None,
+        sparkline=spark_drafts, spark_color="#D4212C",
     ), unsafe_allow_html=True)
-    c7.markdown(stat_card(
+    c7.markdown(stat(
         "Odpowiedzi", replied, icon="message-circle",
+        delta=f"{bounced} bounce" if bounced else None,
+        delta_dir="up" if replied > 0 else "flat",
+        sparkline=spark_up, spark_color="#8F1018",
     ), unsafe_allow_html=True)
-    c8.markdown(stat_card(
+    c8.markdown(stat(
         "Reply rate", reply_rate_str, unit="%", icon="trending-up",
+        delta="vs ostatnie 30d" if sent_total > 0 else None,
+        delta_dir="up" if replied > 0 else "flat",
+        sparkline=spark_flat, spark_color="#D4212C",
     ), unsafe_allow_html=True)
 
-    st.divider()
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
-    # ---- Quick actions ----
-    qa1, qa2 = st.columns([3, 2])
-    with qa1:
-        st.subheader("Co dalej?")
-        if total_leads == 0:
-            st.info("👉 Zacznij od zakładki **Pozyskiwanie** żeby znaleźć pierwsze leady.")
-        elif drafts_pending > 0:
-            st.success(
-                f"✉️ Masz **{drafts_pending}** draftów do review w zakładce **Drafty**."
-            )
-        elif researched > 0:
-            st.info(
-                f"📝 **{researched}** leadów czeka na drafty maili. "
-                "Wygeneruj je w zakładce **Drafty** (przycisk 'Bulk-generuj drafty')."
-            )
+    # ─── ROW 3: Funnel pipeline + Activity feed ──────────────────────────
+    fcol, acol = st.columns([1, 1])
+    with fcol:
+        st.markdown(
+            card_head("Pipeline cold-mail", icon="funnel",
+                      right_html='<span style="font-size:11.5px;">30 dni</span>'),
+            unsafe_allow_html=True,
+        )
+        # Realne pipeline counts
+        new_leads = total_leads
+        researched_pct = (researched / new_leads * 100) if new_leads else 0
+        drafted_pct = (drafted / new_leads * 100) if new_leads else 0
+        sent_pct = (sent_total / new_leads * 100) if new_leads else 0
+        replied_pct = (replied / new_leads * 100) if new_leads else 0
+        funnel(
+            [
+                {"label": "Pozyskane", "value": new_leads, "percent": 100.0, "icon": "upload"},
+                {"label": "Researched", "value": researched + drafted + sent_total + replied,
+                 "percent": researched_pct + drafted_pct + sent_pct + replied_pct, "icon": "search"},
+                {"label": "Z draftem", "value": drafted + sent_total + replied,
+                 "percent": drafted_pct + sent_pct + replied_pct, "icon": "check"},
+                {"label": "Wysłane", "value": sent_total + replied,
+                 "percent": sent_pct + replied_pct, "icon": "send"},
+                {"label": "Odpowiedzieli", "value": replied,
+                 "percent": replied_pct, "icon": "message-circle"},
+            ],
+            accent_first=True,
+            footer_label="Reply rate vs sent",
+            footer_value=f"{reply_rate_str}%" if reply_rate_str != "—" else "—",
+        )
+        st.markdown(card_close(), unsafe_allow_html=True)
+
+    with acol:
+        st.markdown(
+            card_head("Ostatnia aktywność", icon="activity",
+                      right_html='<a href="#" style="font-size:11.5px;color:#6B7280;text-decoration:none;">Wszystkie →</a>'),
+            unsafe_allow_html=True,
+        )
+        with SessionLocal() as session:
+            events = session.execute(
+                select(Event).order_by(Event.created_at.desc()).limit(8)
+            ).scalars().all()
+
+        if events:
+            # Map Event level + source → ikona + accent
+            def _icon_for(src: str, ev_type: str) -> tuple[str, bool]:
+                src = (src or "").lower()
+                ev_type = (ev_type or "").lower()
+                if "research" in src: return ("search", True)
+                if "discover" in src: return ("upload", True)
+                if "generate" in src or "draft" in ev_type: return ("wand", True)
+                if "push" in src or "send" in ev_type: return ("send", False)
+                if "poll" in src: return ("refresh", False)
+                if "error" in (src + ev_type): return ("x", False)
+                return ("circle-dot", False)
+
+            items = []
+            now = datetime.now(timezone.utc)
+            for e in events:
+                ic, acc = _icon_for(e.source or "", e.type or "")
+                # Bezpieczne escapowanie - DB messages mogą zawierać HTML
+                safe_msg = (e.message or "")
+                if len(safe_msg) > 90:
+                    safe_msg = safe_msg[:87] + "..."
+                # Escape HTML w wiadomościach
+                import html as _h
+                safe_msg = _h.escape(safe_msg)
+                # Format time relative
+                delta = now - e.created_at if e.created_at.tzinfo else now.replace(tzinfo=None) - e.created_at
+                mins = int(delta.total_seconds() / 60)
+                if mins < 1: time_str = "teraz"
+                elif mins < 60: time_str = f"{mins}m"
+                elif mins < 1440: time_str = f"{mins // 60}h"
+                else: time_str = e.created_at.strftime("%m-%d")
+                items.append({
+                    "icon": ic, "accent": acc,
+                    "text": f"<strong>{e.source or '—'}</strong> · {safe_msg}",
+                    "time": time_str,
+                })
+            activity_feed(items)
         else:
-            st.caption("Wszystko ogarnięte. Możesz odpalić nową rundę pozyskiwania.")
-    with qa2:
-        st.subheader("Status agenta")
-        stopped = is_stopped()
-        if stopped:
-            st.error("⛔ ZATRZYMANY")
-            if st.button("Wznów", type="primary", use_container_width=True):
-                resume()
-                st.rerun()
-        else:
-            st.success("✅ Aktywny")
-            if st.button("⛔ Zatrzymaj", use_container_width=True):
-                stop("stopped from GUI")
-                st.rerun()
-        if settings.dry_run:
-            st.warning("DRY_RUN=true (nic nie wyjdzie na zewnątrz)")
+            st.markdown(
+                '<div style="padding:24px;color:#6B7280;font-size:13px;text-align:center;">'
+                'Brak zdarzeń. Odpal pozyskiwanie żeby zobaczyć aktywność.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(card_close(), unsafe_allow_html=True)
 
-    st.divider()
+    # ─── ROW 4: Segment breakdown + System status + Skróty ──────────────
+    s1, s2, s3 = st.columns(3)
 
-    # ---- Segment breakdown + recent events side-by-side ----
-    bd_col, ev_col = st.columns([2, 3])
-    with bd_col:
-        st.subheader("Leady wg segmentu")
+    with s1:
+        st.markdown(
+            card_head("Leady wg segmentu", icon="layers-subtract"),
+            unsafe_allow_html=True,
+        )
         with SessionLocal() as session:
             seg_rows = session.execute(
                 select(Lead.segment, func.count(Lead.id))
@@ -338,32 +380,109 @@ def render_dashboard() -> None:
                 .order_by(func.count(Lead.id).desc())
             ).all()
         if seg_rows:
-            seg_df = pd.DataFrame(seg_rows, columns=["Segment", "Liczba"])
-            st.dataframe(seg_df, hide_index=True, use_container_width=True)
-        else:
-            st.caption("Brak leadów.")
-    with ev_col:
-        st.subheader("Ostatnie zdarzenia")
-        with SessionLocal() as session:
-            events = (
-                session.execute(select(Event).order_by(Event.created_at.desc()).limit(8))
-                .scalars()
-                .all()
+            data_table(
+                [{"label": "Segment"}, {"label": "Liczba", "num": True}],
+                [[r[0] or "—", str(r[1])] for r in seg_rows],
             )
-        if not events:
-            st.caption("Brak zdarzeń.")
-            return
-        df = pd.DataFrame(
-            [
-                {
-                    "kiedy": e.created_at.strftime("%m-%d %H:%M"),
-                    "źródło": e.source or "",
-                    "wiadomość": (e.message[:80] + "...") if len(e.message) > 80 else e.message,
-                }
-                for e in events
-            ]
+        else:
+            st.markdown(
+                '<div style="padding:24px;color:#6B7280;font-size:13px;text-align:center;">'
+                'Brak leadów. Zacznij od Pozyskiwania.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(card_close(), unsafe_allow_html=True)
+
+    with s2:
+        stopped = is_stopped()
+        status_label = "stopped" if stopped else "operational"
+        right_html = (
+            f'<span style="font-family:JetBrains Mono,monospace;font-size:11px;">'
+            f'<span class="status-dot {"err" if stopped else "ok"}"></span>{status_label}</span>'
         )
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.markdown(
+            card_head("Stan systemu", icon="server", right_html=right_html),
+            unsafe_allow_html=True,
+        )
+        rows = [
+            {"label": "Agent (STOP.txt)",
+             "value": "stopped" if stopped else "running",
+             "status": "err" if stopped else "ok"},
+            {"label": "DRY_RUN",
+             "value": "true · blokuje wysyłkę" if settings.dry_run else "false",
+             "status": "warn" if settings.dry_run else "ok"},
+            {"label": "Anthropic key",
+             "value": "OK" if has_anthropic_key() else "brak",
+             "status": "ok" if has_anthropic_key() else "warn"},
+            {"label": "Gemini key",
+             "value": "OK" if has_gemini_key() else "brak",
+             "status": "ok" if has_gemini_key() else "warn"},
+            {"label": "Apify token",
+             "value": "OK" if has_apify_token() else "brak",
+             "status": "ok" if has_apify_token() else "warn"},
+            {"label": "Google Places",
+             "value": "OK" if has_places_key() else "brak",
+             "status": "ok" if has_places_key() else "warn"},
+            {"label": "Dzienny limit researchu",
+             "value": f"{int(_credits_used)}/{settings.daily_research_limit}",
+             "status": "ok"},
+        ]
+        system_status(rows)
+        st.markdown(card_close(), unsafe_allow_html=True)
+
+    with s3:
+        st.markdown(
+            card_head("Co dalej", icon="bookmark",
+                      right_html='<span style="font-size:11.5px;">sugestie</span>'),
+            unsafe_allow_html=True,
+        )
+        suggestions = []
+        if total_leads == 0:
+            suggestions.append(("Zacznij Pozyskiwanie", "search"))
+        if researched > 0 and drafts_pending == 0:
+            suggestions.append((f"{researched} leadów czeka na drafty", "wand"))
+        if drafts_pending > 0:
+            suggestions.append((f"{drafts_pending} draftów do review", "mail-forward"))
+        if not has_anthropic_key() and not has_gemini_key():
+            suggestions.append(("Dodaj klucz API LLM", "key"))
+        if settings.dry_run:
+            suggestions.append(("Wyłącz DRY_RUN żeby wysyłać", "send"))
+        if not suggestions:
+            suggestions.append(("Wszystko ogarnięte", "check"))
+
+        rows_html = "".join(
+            f"""
+            <div class="sys-row">
+                <span class="sys-label" style="display:flex;align-items:center;gap:8px;">
+                    <div class="tool-ico"><i class="ti ti-{ic}"></i></div>
+                    {text}
+                </span>
+                <i class="ti ti-arrow-right" style="color:#9CA3AF;font-size:14px;"></i>
+            </div>
+            """
+            for text, ic in suggestions
+        )
+        st.markdown(rows_html, unsafe_allow_html=True)
+        st.markdown(card_close(), unsafe_allow_html=True)
+
+    # ─── ROW 5: Agent kontrola (Stop/Start) ──────────────────────────────
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    stopped = is_stopped()
+    cs1, cs2 = st.columns([1, 5])
+    with cs1:
+        if stopped:
+            if st.button("▶️ Wznów agenta", type="primary", use_container_width=True):
+                resume()
+                st.rerun()
+        else:
+            if st.button("⏸ Zatrzymaj agenta", use_container_width=True):
+                stop("stopped from GUI")
+                st.rerun()
+    with cs2:
+        if stopped:
+            st.error("Agent zatrzymany - STOP.txt obecny. Skrypty discovery/research/push się nie wykonują.")
+        else:
+            st.success("Agent aktywny - skrypty mogą wykonywać akcje.")
 
 
 def _render_manual_entry_form(provider: str, model: str) -> None:
@@ -1426,20 +1545,41 @@ def render_logs() -> None:
 _render_sidebar_nav()
 selected_provider, selected_model = _render_llm_selector()
 
-# Top of page: brand header + breadcrumb + page title
-brand_header()
-breadcrumb("Ecombinat", "Agenci AI", "Handlowiec cold-email")
-page_header(
+# Sidebar foot: cost meter używając daily_research_limit jako "kredytów"
+# (każdy researched lead = ~1 kredyt na potrzeby UX). Lokalny resetuje się
+# o północy UTC.
+from sqlalchemy import select as _select_for_dashboard
+with SessionLocal() as _s:
+    _today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    _credits_used = _s.scalar(
+        _select_for_dashboard(func.count(Lead.id)).where(
+            Lead.created_at >= _today_start,
+            Lead.status != LeadStatus.NEW.value,
+        )
+    ) or 0
+sb_foot(
+    credits_used=int(_credits_used),
+    credits_total=int(settings.daily_research_limit) or 100,
+    renews_label="jutro 02:00 PL",
+)
+
+# ─── Topbar: breadcrumbs + search + buttons + avatar ─────────────────────
+owner_initials = "".join([p[0].upper() for p in (settings.owner_name or "MK").split()[:2]]) or "EC"
+topbar(
+    crumbs=["Workspace", settings.company_name or "Artmaker", "Agenci AI", "Handlowiec"],
+    user_initials=owner_initials,
+)
+
+# ─── Page head: tytuł + time range picker po prawej ──────────────────────
+page_head(
     "Handlowiec cold-email",
-    subtitle=(
-        f"{settings.company_name} • "
-        f"{settings.owner_name or 'uzupełnij OWNER_NAME w env'} • "
-        f"model: {selected_provider}/{selected_model}"
-    ),
+    subtitle=f"model {selected_provider}/{selected_model}",
+    last_update="właśnie",
+    right_widget=time_range_html(["24h", "7d", "30d", "90d", "YTD"], active="30d"),
 )
 
 tab_dashboard, tab_discovery, tab_leads, tab_drafts, tab_logs = st.tabs(
-    ["Dashboard", "Pozyskiwanie", "Leady", "Drafty", "Logi"]
+    ["Pulpit", "Pozyskiwanie", "Leady", "Drafty", "Logi"]
 )
 
 with tab_dashboard:
