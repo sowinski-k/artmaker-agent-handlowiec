@@ -48,6 +48,7 @@ from core.db import (
     JobType,
     Lead,
     LeadStatus,
+    PatrolSchedule,
     SessionLocal,
     User,
     Workspace,
@@ -1160,6 +1161,147 @@ def cancel_job(job_id: int, cur: CurrentUser = Depends(get_current_user)) -> dic
         job.completed_at = datetime.now(timezone.utc)
         session.commit()
         return {"ok": True}
+
+
+# ─── Patrol (autonomiczny agent) ─────────────────────────────────────────
+
+class PatrolIn(BaseModel):
+    """Config patrola - user-facing. Worker odpala wedlug schedule."""
+    name: str
+    enabled: bool = True
+    segments: list[str] = []
+    locations: list[str] = []
+    sources: list[str] = ["google_places"]
+    custom_target: str | None = None
+    max_per_run: int = 10
+    cap_per_day: int = 30
+    frequency_hours: int = 12
+    relevance_threshold: int = 6
+    auto_draft_threshold: int | None = None
+
+
+def _serialize_patrol(p: PatrolSchedule) -> dict[str, Any]:
+    return {
+        "id": p.id, "name": p.name, "enabled": bool(p.enabled),
+        "segments": p.segments or [], "locations": p.locations or [],
+        "sources": p.sources or [], "custom_target": p.custom_target,
+        "max_per_run": p.max_per_run, "cap_per_day": p.cap_per_day,
+        "frequency_hours": p.frequency_hours,
+        "relevance_threshold": p.relevance_threshold,
+        "auto_draft_threshold": p.auto_draft_threshold,
+        "runs_today": p.runs_today, "total_runs": p.total_runs,
+        "total_leads_found": p.total_leads_found,
+        "last_run_at": p.last_run_at.isoformat() if p.last_run_at else None,
+        "next_run_at": p.next_run_at.isoformat() if p.next_run_at else None,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@app.get("/api/patrol")
+def list_patrols(cur: CurrentUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+    """Lista patroli workspace'u. Default sort: enabled first, potem name."""
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(PatrolSchedule)
+            .where(PatrolSchedule.workspace_id == cur.workspace_id)
+            .order_by(desc(PatrolSchedule.enabled), PatrolSchedule.name)
+        ).scalars().all()
+        return [_serialize_patrol(p) for p in rows]
+
+
+@app.post("/api/patrol")
+def create_patrol(payload: PatrolIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Utworz nowy patrol. next_run_at = now (uruchomi sie przy nastepnym ticku)."""
+    name = (payload.name or "").strip()[:255]
+    if not name:
+        raise HTTPException(status_code=400, detail="Nazwa patrola wymagana.")
+    if not payload.segments and not payload.custom_target:
+        raise HTTPException(
+            status_code=400,
+            detail="Wybierz segment lub podaj custom_target."
+        )
+    with SessionLocal() as session:
+        p = PatrolSchedule(
+            workspace_id=cur.workspace_id, user_id=cur.user_id,
+            name=name, enabled=payload.enabled,
+            segments=payload.segments, locations=payload.locations,
+            sources=payload.sources, custom_target=payload.custom_target,
+            max_per_run=max(1, min(payload.max_per_run, 100)),
+            cap_per_day=max(1, min(payload.cap_per_day, 500)),
+            frequency_hours=max(1, min(payload.frequency_hours, 168)),
+            relevance_threshold=max(0, min(payload.relevance_threshold, 10)),
+            auto_draft_threshold=payload.auto_draft_threshold,
+            next_run_at=datetime.now(timezone.utc),
+        )
+        session.add(p)
+        session.commit()
+        session.refresh(p)
+        return _serialize_patrol(p)
+
+
+@app.patch("/api/patrol/{patrol_id}")
+def update_patrol(
+    patrol_id: int, payload: PatrolIn,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    with SessionLocal() as session:
+        p = session.execute(
+            select(PatrolSchedule).where(
+                PatrolSchedule.id == patrol_id,
+                PatrolSchedule.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if p is None:
+            raise HTTPException(status_code=404, detail="Patrol nie istnieje.")
+        p.name = (payload.name or p.name).strip()[:255]
+        p.enabled = payload.enabled
+        p.segments = payload.segments
+        p.locations = payload.locations
+        p.sources = payload.sources
+        p.custom_target = payload.custom_target
+        p.max_per_run = max(1, min(payload.max_per_run, 100))
+        p.cap_per_day = max(1, min(payload.cap_per_day, 500))
+        p.frequency_hours = max(1, min(payload.frequency_hours, 168))
+        p.relevance_threshold = max(0, min(payload.relevance_threshold, 10))
+        p.auto_draft_threshold = payload.auto_draft_threshold
+        session.commit()
+        return _serialize_patrol(p)
+
+
+@app.delete("/api/patrol/{patrol_id}")
+def delete_patrol(patrol_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    with SessionLocal() as session:
+        p = session.execute(
+            select(PatrolSchedule).where(
+                PatrolSchedule.id == patrol_id,
+                PatrolSchedule.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if p is None:
+            raise HTTPException(status_code=404, detail="Patrol nie istnieje.")
+        session.delete(p)
+        session.commit()
+        return {"ok": True}
+
+
+@app.post("/api/patrol/{patrol_id}/run-now")
+def run_patrol_now(patrol_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Force-run: ustaw next_run_at = now, patrol odpali sie przy najblizszym
+    ticku workera (max 60s). Cap_per_day nadal pilnowany."""
+    with SessionLocal() as session:
+        p = session.execute(
+            select(PatrolSchedule).where(
+                PatrolSchedule.id == patrol_id,
+                PatrolSchedule.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if p is None:
+            raise HTTPException(status_code=404, detail="Patrol nie istnieje.")
+        if not p.enabled:
+            raise HTTPException(status_code=400, detail="Patrol jest wyłączony - włącz go najpierw.")
+        p.next_run_at = datetime.now(timezone.utc)
+        session.commit()
+        return {"ok": True, "msg": "Patrol uruchomi się w ciągu max 60s."}
 
 
 # ─── Woodpecker ──────────────────────────────────────────────────────────

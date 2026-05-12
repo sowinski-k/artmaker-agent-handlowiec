@@ -263,6 +263,55 @@ class Job(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class PatrolSchedule(Base):
+    """Autonomiczny agent: co frequency_hours sam pozyskuje + researchuje + draftuje.
+
+    User konfiguruje raz (segment, lokalizacje, cap dzienny), agent leci w tle
+    24/7 dopoki enabled=True. Worker w petli loop_forever co 60s sprawdza:
+        - dla kazdego enabled PatrolSchedule gdzie next_run_at <= now()
+        - tworzy DISCOVERY_PIPELINE job z config patrola
+        - aktualizuje last_run_at + next_run_at = now + frequency_hours
+
+    runs_today + day_anchor pilnuja zeby nie przekraczac cap_per_day -
+    np. agent 4h frequency = 6 startow/dobe, ale cap moze ograniczyc do 3.
+    """
+    __tablename__ = "patrol_schedules"
+    __table_args__ = (
+        Index("ix_patrol_workspace_enabled", "workspace_id", "enabled"),
+        Index("ix_patrol_next_run", "next_run_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    name: Mapped[str] = mapped_column(String(255))  # "Sklepy plastyczne Krakow"
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    # Config - co i jak szukac
+    segments: Mapped[list] = mapped_column(JSON, default=list)       # ["sklep_plastyczny"]
+    locations: Mapped[list] = mapped_column(JSON, default=list)      # ["Krakow", "Warszawa"]
+    sources: Mapped[list] = mapped_column(JSON, default=list)        # ["google_places", "apify"]
+    custom_target: Mapped[str | None] = mapped_column(Text)          # opcjonalny opis
+
+    max_per_run: Mapped[int] = mapped_column(Integer, default=10)    # ile leadow / 1 tick
+    cap_per_day: Mapped[int] = mapped_column(Integer, default=30)    # twardy limit dzienny
+    frequency_hours: Mapped[int] = mapped_column(Integer, default=12)# co ile godzin tick
+    relevance_threshold: Mapped[int] = mapped_column(Integer, default=6)
+    auto_draft_threshold: Mapped[int | None] = mapped_column(Integer)  # >=N -> generuj draft
+
+    # Bookkeeping
+    runs_today: Mapped[int] = mapped_column(Integer, default=0)
+    day_anchor: Mapped[datetime | None] = mapped_column(DateTime)   # data ostatniego reset cap
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    total_runs: Mapped[int] = mapped_column(Integer, default=0)
+    total_leads_found: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 # ─── Engine + session ────────────────────────────────────────────────────
 
 # Engine config: dla Postgres - skalowalne defaulty.

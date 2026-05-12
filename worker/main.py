@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.orm import Session
 
 from core.db import (
@@ -29,6 +29,7 @@ from core.db import (
     Job,
     JobStatus,
     JobType,
+    PatrolSchedule,
     SessionLocal,
     init_db,
 )
@@ -36,6 +37,7 @@ from core.db import (
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL", "5"))
 JOB_TIMEOUT_S = float(os.getenv("JOB_TIMEOUT", "1800"))  # 30 min hard limit
 MAX_RETRIES = int(os.getenv("JOB_MAX_RETRIES", "3"))
+PATROL_TICK_S = float(os.getenv("PATROL_TICK_INTERVAL", "60"))  # check patrols co 60s
 
 logging.basicConfig(
     level=logging.INFO,
@@ -494,6 +496,21 @@ def execute_job(job_id: int) -> None:
 
         try:
             result = handler(session, job)
+            # Patrol bookkeeping: jak job byl odpalony przez patrol (payload
+            # ma _patrol_id), inkrementuj stats. Idempotentne - blad nie blokuje
+            # zakonczenia joba.
+            patrol_id = (job.payload or {}).get("_patrol_id") if job.payload else None
+            if patrol_id and isinstance(result, dict):
+                try:
+                    leads_found = int(result.get("researched", 0))
+                    if leads_found > 0:
+                        session.execute(
+                            sa_update(PatrolSchedule)
+                            .where(PatrolSchedule.id == patrol_id)
+                            .values(total_leads_found=PatrolSchedule.total_leads_found + leads_found)
+                        )
+                except Exception as exc:
+                    log.warning(f"Patrol #{patrol_id} stats update failed: {exc}")
             # Cancel check - re-fetch zamiast session.refresh (defensive: handler
             # mogl rollbackowac sesje, mogla byc rozłączona po długim runtime).
             current_status = session.execute(
@@ -532,12 +549,114 @@ def execute_job(job_id: int) -> None:
             session.commit()
 
 
+def _patrol_tick() -> int:
+    """Sprawdza wszystkie aktywne PatrolSchedule i triggeruje DISCOVERY_PIPELINE
+    job dla tych ktorych nadszedl next_run_at.
+
+    Zwraca liczbe utworzonych jobow. Wrap-uje wszystko w try/except - failure
+    tutaj NIE moze przerwac worker loop'a (lepiej dzialac bez patroli niz
+    wcale).
+    """
+    from web.jobs_dispatcher import create_job, find_active_job
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    triggered = 0
+    try:
+        with SessionLocal() as session:
+            due = session.execute(
+                select(PatrolSchedule).where(
+                    PatrolSchedule.enabled == True,  # noqa: E712
+                    PatrolSchedule.next_run_at <= now,
+                )
+            ).scalars().all()
+
+            for patrol in due:
+                # Daily cap reset (UTC midnight)
+                today_anchor = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                if patrol.day_anchor is None or patrol.day_anchor < today_anchor:
+                    patrol.runs_today = 0
+                    patrol.day_anchor = today_anchor
+
+                # Cap dzienny: jak juz zrobiono cap_per_day uruchomien, czekaj do jutra
+                if patrol.runs_today >= patrol.cap_per_day:
+                    patrol.next_run_at = today_anchor + timedelta(days=1)
+                    log.info(
+                        f"Patrol #{patrol.id} ({patrol.name}): daily cap reached "
+                        f"({patrol.runs_today}/{patrol.cap_per_day}), sleeping until tomorrow"
+                    )
+                    continue
+
+                # Skip jak juz chodzi job tego workspace'u (nie duplikujemy)
+                active = find_active_job(
+                    session, patrol.workspace_id,
+                    job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
+                )
+                if active is not None:
+                    # Przesun next_run_at o pol godziny - sproboj pozniej
+                    patrol.next_run_at = now + timedelta(minutes=30)
+                    log.info(
+                        f"Patrol #{patrol.id}: workspace ma juz aktywny job #{active.id}, "
+                        f"reschedule na +30min"
+                    )
+                    continue
+
+                # Buduj query (z pierwszego segment + pierwszej location, plus custom)
+                segments = patrol.segments or ["inne"]
+                locations = patrol.locations or [""]
+                segment = segments[(patrol.total_runs or 0) % len(segments)]
+                location = locations[(patrol.total_runs or 0) % len(locations)]
+                phrase = patrol.custom_target or segment.replace("_", " ")
+                query = f"{phrase} {location}".strip()
+
+                payload = {
+                    "query": query,
+                    "sources": patrol.sources or ["google_places"],
+                    "max_per_source": patrol.max_per_run,
+                    "segment": segment,
+                    "location": location or None,
+                    "custom_description": patrol.custom_target,
+                    "use_relevance_filter": True,
+                    "relevance_threshold": patrol.relevance_threshold,
+                    "auto_research": True,
+                    "auto_draft_threshold": patrol.auto_draft_threshold,
+                    "apply_city_filter": bool(location),
+                    "_patrol_id": patrol.id,
+                }
+                create_job(
+                    session, job_type=JobType.DISCOVERY_PIPELINE,
+                    workspace_id=patrol.workspace_id, user_id=patrol.user_id,
+                    payload=payload,
+                )
+                patrol.last_run_at = now
+                patrol.next_run_at = now + timedelta(hours=patrol.frequency_hours)
+                patrol.runs_today = (patrol.runs_today or 0) + 1
+                patrol.total_runs = (patrol.total_runs or 0) + 1
+                triggered += 1
+                log.info(
+                    f"Patrol #{patrol.id} ({patrol.name}) TRIGGERED: query={query!r} "
+                    f"next={patrol.next_run_at} runs_today={patrol.runs_today}/{patrol.cap_per_day}"
+                )
+            session.commit()
+    except Exception as exc:
+        log.exception(f"Patrol tick failed (non-fatal): {exc}")
+    return triggered
+
+
 def loop_forever() -> None:
     log.info(f"Worker starting (poll interval {POLL_INTERVAL_S}s, max retries {MAX_RETRIES})")
     init_db()
     _recover_zombie_jobs()
+    last_patrol_tick = 0.0
     while not _shutdown:
         try:
+            # Patrol tick co PATROL_TICK_S - tworzy nowe DISCOVERY_PIPELINE
+            # jobs jak nadszedl czas. Sam tick jest tani (1 SELECT enabled patrols).
+            now_ts = time.time()
+            if now_ts - last_patrol_tick >= PATROL_TICK_S:
+                last_patrol_tick = now_ts
+                _patrol_tick()
+
             # Wyciagamy tylko pola ktorych potrzebujemy POZA scope sesji,
             # zeby nie miec DetachedInstanceError gdy session.close() rozlaczy obiekt.
             job_meta: tuple[int, str, int] | None = None

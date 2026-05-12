@@ -9,6 +9,7 @@ import { api, clearToken, getToken, logout } from '@/lib/api';
 const HANDLOWIEC_PAGES = [
   { href: '/handlowiec/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
   { href: '/pozyskiwanie', icon: 'search', label: 'Pozyskiwanie' },
+  { href: '/handlowiec/patrol', icon: 'radar-2', label: 'Patrol AI' },
   { href: '/leady', icon: 'users', label: 'Leady' },
   { href: '/drafty', icon: 'mail', label: 'Drafty' },
 ];
