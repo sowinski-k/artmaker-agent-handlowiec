@@ -484,13 +484,19 @@ def loop_forever() -> None:
     _recover_zombie_jobs()
     while not _shutdown:
         try:
+            # Wyciagamy tylko pola ktorych potrzebujemy POZA scope sesji,
+            # zeby nie miec DetachedInstanceError gdy session.close() rozlaczy obiekt.
+            job_meta: tuple[int, str, int] | None = None
             with SessionLocal() as session:
                 job = claim_next_job(session)
-            if job is None:
+                if job is not None:
+                    job_meta = (job.id, job.type, job.workspace_id)
+            if job_meta is None:
                 time.sleep(POLL_INTERVAL_S)
                 continue
-            log.info(f"Job #{job.id} CLAIMED type={job.type} ws={job.workspace_id}")
-            execute_job(job.id)
+            job_id, job_type, job_ws = job_meta
+            log.info(f"Job #{job_id} CLAIMED type={job_type} ws={job_ws}")
+            execute_job(job_id)
         except Exception as exc:
             log.exception(f"Worker loop error: {exc}")
             time.sleep(POLL_INTERVAL_S)
