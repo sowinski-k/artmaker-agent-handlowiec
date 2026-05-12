@@ -63,15 +63,15 @@ interface ActiveJob {
 }
 
 const JOB_LABELS: Record<string, string> = {
-  discovery_pipeline: 'Pozyskiwanie + research',
+  discovery_pipeline: 'Agent w terenie (pozyskiwanie + research)',
   research_lead: 'Research leada',
-  bulk_research_leads: 'Bulk research',
-  enrich_lead: 'Uzupełnij kontakt',
-  bulk_enrich_leads: 'Bulk enrichment',
+  bulk_research_leads: 'Researchowanie wybranych URL (praca ręczna)',
+  enrich_lead: 'Uzupełnianie kontaktu',
+  bulk_enrich_leads: 'Uzupełnianie kontaktów (batch)',
   generate_draft: 'Generowanie draftu',
-  bulk_generate_drafts: 'Bulk drafty',
-  send_draft: 'Wysyłka',
-  poll_woodpecker: 'Synchronizacja statusów',
+  bulk_generate_drafts: 'Generowanie draftów (batch)',
+  send_draft: 'Wysyłka draftu',
+  poll_woodpecker: 'Sync statusów Woodpecker',
 };
 
 export default function HalaPulpit() {

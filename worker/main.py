@@ -371,19 +371,27 @@ def _recover_zombie_jobs() -> None:
     Worker pickuje tylko PENDING - jak crashne / Railway zredeploya w trakcie
     joba, status RUNNING zostaje w DB i nikt go nie podejmie. Frontend pokazuje
     "Praca w tle 1" mimo ze nic nie chodzi. Przy starcie czyscimy te zombie.
+
+    Wrapped w try/except - failure tutaj NIE moze zabic workera (lepiej dzialac
+    z paroma zombie niz w ogole nie startowac).
     """
-    with SessionLocal() as session:
-        stale = session.execute(
-            select(Job).where(Job.status == JobStatus.RUNNING.value)
-        ).scalars().all()
-        if not stale:
-            return
-        for j in stale:
-            j.status = JobStatus.FAILED.value
-            j.last_error = "Worker restarted before job completed - re-trigger manually"
-            j.completed_at = datetime.now(timezone.utc)
-            log.warning(f"Zombie job #{j.id} ({j.type}) -> FAILED (worker restart)")
-        session.commit()
+    try:
+        with SessionLocal() as session:
+            stale = session.execute(
+                select(Job).where(Job.status == JobStatus.RUNNING.value)
+            ).scalars().all()
+            if not stale:
+                log.info("Zombie recovery: no orphaned RUNNING jobs found")
+                return
+            for j in stale:
+                j.status = JobStatus.FAILED.value
+                j.last_error = "Worker restarted before job completed - re-trigger manually"
+                j.completed_at = datetime.now(timezone.utc)
+                log.warning(f"Zombie job #{j.id} ({j.type}) -> FAILED (worker restart)")
+            session.commit()
+            log.info(f"Zombie recovery: cleaned {len(stale)} orphaned jobs")
+    except Exception as exc:
+        log.exception(f"Zombie recovery failed (non-fatal, continuing): {exc}")
 
 
 def _is_cancelled(session: Session, job: Job) -> bool:

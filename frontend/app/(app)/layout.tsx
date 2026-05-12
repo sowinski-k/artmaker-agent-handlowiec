@@ -222,10 +222,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 function labelForJob(type: string): string {
   switch (type) {
     case 'discovery_pipeline': return 'Agent w terenie';
-    case 'bulk_research_leads': return 'Bulk research';
+    case 'bulk_research_leads': return 'Research wybranych';
     case 'research_lead': return 'Research';
+    case 'enrich_lead': return 'Uzupełnij kontakt';
+    case 'bulk_enrich_leads': return 'Uzupełnianie kontaktów';
     case 'generate_draft': return 'Draft';
-    case 'bulk_generate_drafts': return 'Bulk drafty';
+    case 'bulk_generate_drafts': return 'Drafty (batch)';
     case 'send_draft': return 'Wysyłka';
     case 'poll_woodpecker': return 'Sync Woodpecker';
     default: return type;

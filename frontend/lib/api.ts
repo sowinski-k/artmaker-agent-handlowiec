@@ -90,11 +90,23 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    let detail = text;
+    let detail: unknown = text;
     try {
-      detail = JSON.parse(text).detail || text;
+      const parsed = JSON.parse(text);
+      detail = parsed.detail ?? text;
     } catch {}
-    throw new Error(detail || `HTTP ${res.status}`);
+    // Backend moze zwrocic structured detail (obiekt) np. dla 409 z active_job_id.
+    // Rzucamy Error z message = JSON.stringify(detail) jak obiekt, plain string jak string.
+    // Cause umozliwia odzyskanie obiektu przez err.cause.
+    const msg = typeof detail === 'string'
+      ? detail
+      : (typeof detail === 'object' && detail && 'msg' in detail
+          ? String((detail as { msg: unknown }).msg)
+          : JSON.stringify(detail));
+    const err = new Error(msg || `HTTP ${res.status}`);
+    (err as Error & { detail: unknown; status: number }).detail = detail;
+    (err as Error & { detail: unknown; status: number }).status = res.status;
+    throw err;
   }
   if (res.status === 204) return undefined as T;
   return res.json();

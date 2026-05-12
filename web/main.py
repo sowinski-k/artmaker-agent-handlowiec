@@ -63,7 +63,7 @@ from web.auth import (
     validate_email,
     verify_password,
 )
-from web.jobs_dispatcher import create_job, serialize_job
+from web.jobs_dispatcher import create_job, find_active_job, serialize_job
 
 
 # ─── Config ──────────────────────────────────────────────────────────────
@@ -952,6 +952,20 @@ def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current
                    f"wyczerpany. Spróbuj jutro.",
         )
     with SessionLocal() as session:
+        active = find_active_job(
+            session, cur.workspace_id,
+            job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
+        )
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "msg": "Już chodzi job pozyskiwania - poczekaj albo anuluj.",
+                    "active_job_id": active.id,
+                    "active_job_type": active.type,
+                    "active_job_status": active.status,
+                },
+            )
         job = create_job(
             session, job_type=JobType.DISCOVERY_PIPELINE,
             workspace_id=cur.workspace_id, user_id=cur.user_id,
@@ -1003,6 +1017,20 @@ def bulk_research(payload: BulkResearchIn, cur: CurrentUser = Depends(get_curren
             detail=f"Za dużo URLi w jednej partii (max {DISCOVERY_DAILY_CAP_FREE}).",
         )
     with SessionLocal() as session:
+        active = find_active_job(
+            session, cur.workspace_id,
+            job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
+        )
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "msg": "Już chodzi job researchowania - poczekaj albo anuluj.",
+                    "active_job_id": active.id,
+                    "active_job_type": active.type,
+                    "active_job_status": active.status,
+                },
+            )
         job = create_job(
             session, job_type=JobType.BULK_RESEARCH_LEADS,
             workspace_id=cur.workspace_id, user_id=cur.user_id,

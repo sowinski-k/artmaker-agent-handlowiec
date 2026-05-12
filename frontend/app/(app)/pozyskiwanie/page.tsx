@@ -99,7 +99,32 @@ export default function PozyskiwaniePage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!getToken()) router.push('/login');
+    if (!getToken()) {
+      router.push('/login');
+      return;
+    }
+    // Hydrate activeJob na load - jak user wraca/refreshuje strone, a backend
+    // ma juz aktywny job discovery/bulk research, odzyskujemy go zeby nie
+    // pozwolic na drugi rownolegly job.
+    (async () => {
+      try {
+        const running = await api<JobInfo[]>(
+          '/api/jobs?status=running&limit=5'
+        ).catch(() => [] as JobInfo[]);
+        const pending = await api<JobInfo[]>(
+          '/api/jobs?status=pending&limit=5'
+        ).catch(() => [] as JobInfo[]);
+        const found = [...running, ...pending].find(
+          (j) => j.type === 'discovery_pipeline' || j.type === 'bulk_research_leads'
+        );
+        if (found) {
+          setActiveJob(found);
+          startJobPolling(found.id);
+        }
+      } catch {
+        /* nieaktywny user - olej */
+      }
+    })();
   }, [router]);
 
   useEffect(() => () => {
@@ -206,10 +231,27 @@ export default function PozyskiwaniePage() {
       });
       startJobPolling(res.job_id);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd uruchomienia researchu');
+      await handleJobConflict(err, 'Błąd uruchomienia researchu');
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleJobConflict(err: unknown, fallbackMsg: string) {
+    const e = err as Error & { status?: number; detail?: { active_job_id?: number; msg?: string } };
+    if (e.status === 409 && e.detail?.active_job_id) {
+      const msg = e.detail.msg || fallbackMsg;
+      alert(`${msg}\n\nPokażę aktualnie pracującego agenta.`);
+      try {
+        const job = await api<JobInfo>(`/api/jobs/${e.detail.active_job_id}`);
+        setActiveJob(job);
+        if (job.status === 'pending' || job.status === 'running') {
+          startJobPolling(job.id);
+        }
+      } catch {/* ignore */}
+      return;
+    }
+    alert(e.message || fallbackMsg);
   }
 
   async function handleSendAgent(e: React.FormEvent) {
@@ -245,7 +287,7 @@ export default function PozyskiwaniePage() {
       });
       startJobPolling(res.job_id);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd uruchomienia agenta');
+      await handleJobConflict(err, 'Błąd uruchomienia agenta');
     } finally {
       setSubmitting(false);
     }

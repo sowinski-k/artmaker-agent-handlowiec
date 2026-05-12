@@ -38,6 +38,27 @@ def create_job(
     return job
 
 
+def find_active_job(
+    session: Session,
+    workspace_id: int,
+    *,
+    job_types: list[str] | None = None,
+) -> Job | None:
+    """Zwraca pierwszy aktywny (pending lub running) job w workspace dla
+    danego typu (lub wszystkich gdy job_types=None). Uzywane do guarda
+    przeciw double-job tego samego typu.
+    """
+    from sqlalchemy import select as _sel
+    q = _sel(Job).where(
+        Job.workspace_id == workspace_id,
+        Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+    )
+    if job_types:
+        q = q.where(Job.type.in_(job_types))
+    q = q.order_by(Job.created_at.desc()).limit(1)
+    return session.execute(q).scalar_one_or_none()
+
+
 def serialize_job(job: Job, *, lite: bool = False) -> dict[str, Any]:
     """JSON-safe reprezentacja joba dla frontu.
 
