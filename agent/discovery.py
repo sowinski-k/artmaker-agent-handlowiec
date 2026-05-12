@@ -485,17 +485,23 @@ def mark_existing_in_db(places: list[DiscoveredPlace], workspace_id: int | None 
     if not hosts_to_check:
         return
 
-    # Jedno zapytanie SQL: tylko leady których website zawiera jeden z hostów
-    # z naszej batch listy
+    # Chunking po hostach - duzy OR(*ILIKE) ma poor query plan w Postgres,
+    # dzielimy na chunki po 20 hostow. Total queries = ceil(n_hosts/20) ale
+    # kazda jest szybka (B-tree z OR=ILIKE wciaz seq-scan, ale na mniejszej batch).
+    CHUNK = 20
+    all_hosts = list(hosts_to_check.keys())
+    rows: list[tuple[int, str | None, float | None]] = []
     with SessionLocal() as session:
-        conditions = [Lead.website.ilike(f"%{h}%") for h in hosts_to_check]
-        q = select(Lead.id, Lead.website, Lead.score).where(
-            Lead.website.isnot(None),
-            or_(*conditions),
-        )
-        if workspace_id is not None:
-            q = q.where(Lead.workspace_id == workspace_id)
-        rows = session.execute(q).all()
+        for i in range(0, len(all_hosts), CHUNK):
+            chunk = all_hosts[i:i + CHUNK]
+            conditions = [Lead.website.ilike(f"%{h}%") for h in chunk]
+            q = select(Lead.id, Lead.website, Lead.score).where(
+                Lead.website.isnot(None),
+                or_(*conditions),
+            )
+            if workspace_id is not None:
+                q = q.where(Lead.workspace_id == workspace_id)
+            rows.extend(session.execute(q).all())
 
     # Mapuj DB rows -> DiscoveredPlace przez exact normalize_url match
     by_norm: dict[str, tuple[int, float | None]] = {

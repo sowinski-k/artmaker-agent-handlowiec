@@ -145,7 +145,7 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
 
     for i, place in enumerate(targets, start=1):
         if _shutdown: break
-        if _is_cancelled(session, job):
+        if _is_cancelled(session, job.id):
             log.info(f"Job #{job.id} cancelled by user at {i}/{len(targets)}")
             break
         try:
@@ -221,7 +221,7 @@ def handle_bulk_research_leads(session: Session, job: Job) -> dict:
 
     for i, url in enumerate(urls, start=1):
         if _shutdown: break
-        if _is_cancelled(session, job):
+        if _is_cancelled(session, job.id):
             log.info(f"Job #{job.id} cancelled by user at {i}/{len(urls)}")
             break
         try:
@@ -294,7 +294,7 @@ def handle_bulk_enrich_leads(session: Session, job: Job) -> dict:
     enriched, dead_ends, failed = 0, 0, 0
     for i, lid in enumerate(lead_ids, start=1):
         if _shutdown: break
-        if _is_cancelled(session, job):
+        if _is_cancelled(session, job.id):
             log.info(f"Job #{job.id} cancelled by user at {i}/{len(lead_ids)}")
             break
         try:
@@ -377,30 +377,39 @@ def _recover_zombie_jobs() -> None:
     """
     try:
         with SessionLocal() as session:
-            stale = session.execute(
-                select(Job).where(Job.status == JobStatus.RUNNING.value)
-            ).scalars().all()
-            if not stale:
-                log.info("Zombie recovery: no orphaned RUNNING jobs found")
-                return
-            for j in stale:
-                j.status = JobStatus.FAILED.value
-                j.last_error = "Worker restarted before job completed - re-trigger manually"
-                j.completed_at = datetime.now(timezone.utc)
-                log.warning(f"Zombie job #{j.id} ({j.type}) -> FAILED (worker restart)")
-            session.commit()
-            log.info(f"Zombie recovery: cleaned {len(stale)} orphaned jobs")
+            try:
+                stale = session.execute(
+                    select(Job).where(Job.status == JobStatus.RUNNING.value)
+                ).scalars().all()
+                if not stale:
+                    log.info("Zombie recovery: no orphaned RUNNING jobs found")
+                    return
+                for j in stale:
+                    j.status = JobStatus.FAILED.value
+                    j.last_error = "Worker restarted before job completed - re-trigger manually"
+                    j.completed_at = datetime.now(timezone.utc)
+                    log.warning(f"Zombie job #{j.id} ({j.type}) -> FAILED (worker restart)")
+                session.commit()
+                log.info(f"Zombie recovery: cleaned {len(stale)} orphaned jobs")
+            except Exception:
+                session.rollback()
+                raise
     except Exception as exc:
         log.exception(f"Zombie recovery failed (non-fatal, continuing): {exc}")
 
 
-def _is_cancelled(session: Session, job: Job) -> bool:
-    """Refresh job z DB i sprawdz czy user anulowal. Wolane w petlach
-    bulk handlerow zeby przerwac szybko."""
+def _is_cancelled(session: Session, job_id: int) -> bool:
+    """Sprawdza w DB czy user anulowal joba. Defensywne - bierze tylko
+    status osobnym SELECT zamiast refreshowac ORM obiekt (eliminuje
+    DetachedInstanceError gdy handler robi commitsy w petli).
+    """
     try:
-        session.refresh(job, attribute_names=["status"])
-        return job.status == JobStatus.CANCELLED.value
-    except Exception:
+        status = session.execute(
+            select(Job.status).where(Job.id == job_id)
+        ).scalar_one_or_none()
+        return status == JobStatus.CANCELLED.value
+    except Exception as exc:
+        log.warning(f"_is_cancelled check failed for job #{job_id}: {exc}")
         return False
 
 
@@ -443,9 +452,12 @@ def execute_job(job_id: int) -> None:
 
         try:
             result = handler(session, job)
-            # Cancel check - jak user anulowal mid-run nie nadpisuj statusu na DONE
-            session.refresh(job, attribute_names=["status"])
-            if job.status == JobStatus.CANCELLED.value:
+            # Cancel check - re-fetch zamiast session.refresh (defensive: handler
+            # mogl rollbackowac sesje, mogla byc rozłączona po długim runtime).
+            current_status = session.execute(
+                select(Job.status).where(Job.id == job_id)
+            ).scalar_one_or_none()
+            if current_status == JobStatus.CANCELLED.value:
                 job.result = result
                 job.completed_at = datetime.now(timezone.utc)
                 _log_event(session, job.workspace_id, "INFO", "job_cancelled",

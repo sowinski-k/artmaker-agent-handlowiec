@@ -31,7 +31,30 @@ from core.db import (
 
 # ─── Config ──────────────────────────────────────────────────────────────
 
-SESSION_SECRET = os.getenv("SESSION_SECRET") or "ecombinat-dev-secret-change-in-prod"
+def _resolve_session_secret() -> str:
+    """SESSION_SECRET z env. Dev fallback ma jasny warning - prod NIE moze
+    dzialac z fallbackiem (signed tokens latwo crackowac). W prod (DATABASE_URL
+    is postgres) wymuszamy ENV var.
+    """
+    secret = os.getenv("SESSION_SECRET")
+    if secret:
+        return secret
+    db_url = os.getenv("DATABASE_URL") or ""
+    if db_url.startswith("postgres"):
+        # Production environment - fail loud
+        raise RuntimeError(
+            "SESSION_SECRET env var not set in production. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\" "
+            "and set in Railway Variables for BOTH backend and worker services."
+        )
+    import logging
+    logging.getLogger("ecombinat.auth").warning(
+        "SESSION_SECRET not set - using DEV fallback. DO NOT use in production!"
+    )
+    return "ecombinat-dev-secret-change-in-prod"
+
+
+SESSION_SECRET = _resolve_session_secret()
 TOKEN_SALT = "ecombinat-auth-v2"
 COOKIE_NAME = "ecombinat_session"
 COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 dni
@@ -117,7 +140,11 @@ def _extract_token(request: Request) -> str | None:
 
 
 def get_current_user(request: Request) -> CurrentUser:
-    """FastAPI dependency. Rzuca 401 jeśli brak tokenu / niepoprawny."""
+    """FastAPI dependency. Rzuca 401 jeśli brak tokenu / niepoprawny.
+
+    Performance: 1 query (LEFT JOIN user + workspace + membership) zamiast 3.
+    Kazdy uwierzytelniony endpoint to wykonuje - oszczednosc N×3 -> N×1 query/req.
+    """
     token = _extract_token(request)
     data = verify_token(token)
     if not data:
@@ -125,20 +152,24 @@ def get_current_user(request: Request) -> CurrentUser:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Brak autoryzacji - zaloguj się.",
         )
+    user_id = data["user_id"]
+    ws_id = data["workspace_id"]
     with SessionLocal() as session:
-        user = session.get(User, data["user_id"])
-        if user is None or not user.is_active:
+        # Single JOIN query - all needed data in one round-trip
+        row = session.execute(
+            select(User, Workspace, WorkspaceMember)
+            .join(Workspace, Workspace.id == ws_id, isouter=True)
+            .join(WorkspaceMember, (WorkspaceMember.user_id == User.id)
+                  & (WorkspaceMember.workspace_id == ws_id), isouter=True)
+            .where(User.id == user_id)
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=401, detail="Konto nie istnieje.")
+        user, ws, member = row
+        if not user.is_active:
             raise HTTPException(status_code=401, detail="Konto nieaktywne.")
-        ws = session.get(Workspace, data["workspace_id"])
         if ws is None:
             raise HTTPException(status_code=401, detail="Workspace nie istnieje.")
-        # Verify membership (defensywnie - nawet jeśli token dobry, sprawdź żywą relację)
-        member = session.execute(
-            select(WorkspaceMember).where(
-                WorkspaceMember.user_id == user.id,
-                WorkspaceMember.workspace_id == ws.id,
-            )
-        ).scalar_one_or_none()
         if member is None and not user.is_admin:
             raise HTTPException(status_code=403, detail="Brak dostępu do workspace.")
         return CurrentUser(

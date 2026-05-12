@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -163,13 +164,19 @@ class Lead(Base):
     research_data: Mapped[dict | None] = mapped_column(JSON)
     notes: Mapped[str | None] = mapped_column(Text)
     # Enrichment tracking: kiedy ostatnio probowalismy znalezc email/phone.
+    # (uwaga: created_at index ponizej, dla sparkline range queries)
     # Dead-end leady recheckujemy po 90 dniach (firmy aktualizuja wizytowki).
     last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     drafts: Mapped[list["EmailDraft"]] = relationship(
         back_populates="lead", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        # Compound idx: lead lists + sparklines (WHERE workspace_id = ? ORDER BY created_at DESC)
+        Index("ix_leads_workspace_created", "workspace_id", "created_at"),
     )
 
 
@@ -193,10 +200,15 @@ class EmailDraft(Base):
     generated_by_model: Mapped[str | None] = mapped_column(String(100))
     edited_by_user: Mapped[bool] = mapped_column(Boolean, default=False)
     woodpecker_prospect_id: Mapped[str | None] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     lead: Mapped["Lead"] = relationship(back_populates="drafts")
+
+    __table_args__ = (
+        # list_drafts: WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC
+        Index("ix_drafts_workspace_status_created", "workspace_id", "status", "created_at"),
+    )
 
 
 class Event(Base):
@@ -222,6 +234,13 @@ class Job(Base):
     Pozwala na 'fire and forget' z UI - user może wylogować się, job leci dalej.
     """
     __tablename__ = "jobs"
+    __table_args__ = (
+        # Compound index dla claim_next_job: WHERE status=pending ORDER BY created_at LIMIT 1
+        # Eliminuje seq scan na rosnacej tabeli Job (tysiace jobow przy skali).
+        Index("ix_jobs_status_created", "status", "created_at"),
+        # Compound index dla list_jobs (status + workspace filter)
+        Index("ix_jobs_workspace_status", "workspace_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
@@ -246,8 +265,31 @@ class Job(Base):
 
 # ─── Engine + session ────────────────────────────────────────────────────
 
-_engine = create_engine(settings.db_url, echo=False, future=True)
-SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
+# Engine config: dla Postgres - skalowalne defaulty.
+# pool_size=5: per-proces base pool (5 conn ready)
+# max_overflow=10: dodatkowe conn pod load (max 15 total per proces)
+# pool_pre_ping=True: testuje conn przed uzyciem - eliminuje "stale connection"
+#   errory gdy Postgres zerwie idle conn (Railway/Heroku robi to co ~5min)
+# pool_recycle=1800: forsuje recycle co 30min - prevents pg_terminate_backend
+# Dla SQLite (lokalnie) te opcje sa ignorowane (single-file DB).
+_engine_kwargs: dict[str, object] = {"echo": False, "future": True}
+if str(settings.db_url).startswith("postgres"):
+    _engine_kwargs.update({
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    })
+_engine = create_engine(settings.db_url, **_engine_kwargs)
+
+# expire_on_commit=False: po session.commit() obiekty NIE sa expired - atrybuty
+# pozostaja dostepne bez extra SELECT. Eliminuje DetachedInstanceError gdy ORM
+# obiekt jest uzywany po commitcie. Worker handlery robia commit co iteracje -
+# bez tego kazdy job.workspace_id po commit = nowy round trip do DB.
+SessionLocal = sessionmaker(
+    bind=_engine, autoflush=False, autocommit=False, future=True,
+    expire_on_commit=False,
+)
 
 
 def init_db() -> None:
@@ -309,6 +351,33 @@ def _migrate_workspace_columns() -> None:
                 log.warning(f"ALTER TABLE {table} ADD COLUMN {column} skipped: {exc}")
     if added:
         log.info(f"Schema migration: added {added} columns")
+
+    # Dorzuc brakujace indeksy na istniejacych tabelach. create_all() ich
+    # nie tworzy bo tabele juz istnieja. Pojedynczy CREATE INDEX IF NOT EXISTS
+    # jest idempotentny i szybki (no-op gdy juz jest).
+    indexes_to_create = [
+        # Worker queue claim_next_job
+        ("ix_jobs_status_created", "jobs", "(status, created_at)"),
+        ("ix_jobs_workspace_status", "jobs", "(workspace_id, status)"),
+        # Lead lists + sparklines
+        ("ix_leads_workspace_created", "leads", "(workspace_id, created_at)"),
+        ("ix_leads_created_at", "leads", "(created_at)"),
+        # Draft lists
+        ("ix_drafts_workspace_status_created", "email_drafts", "(workspace_id, status, created_at)"),
+        ("ix_email_drafts_created_at", "email_drafts", "(created_at)"),
+    ]
+    idx_added = 0
+    for idx_name, table, cols in indexes_to_create:
+        try:
+            with _engine.begin() as conn:
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} {cols}"
+                ))
+                idx_added += 1
+        except Exception as exc:
+            log.warning(f"CREATE INDEX {idx_name} skipped: {exc}")
+    if idx_added:
+        log.info(f"Schema migration: ensured {idx_added} indexes")
 
 
 def _ensure_default_workspace() -> None:

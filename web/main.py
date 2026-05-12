@@ -37,6 +37,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import desc, func, select
+from sqlalchemy.orm import joinedload
 
 from core.db import (
     DraftStatus,
@@ -191,7 +192,7 @@ def diagnostics() -> dict[str, Any]:
     admin_pw = (os.getenv("APP_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
     out = {
         "admin_email_env_set": bool(admin_email),
-        "admin_email_preview": (admin_email[:3] + "...") if admin_email else None,
+        # Preview usuniety - leakowal pierwsze znaki emaila (brute-forceable).
         "admin_password_env_set": bool(admin_pw),
         "admin_password_length": len(admin_pw) if admin_pw else 0,
         "admin_user_in_db": False,
@@ -344,19 +345,32 @@ def _start_of_day_utc() -> datetime:
 
 
 def _sparkline_for_ws(workspace_id: int, status: str | None = None, days: int = 12) -> list[int]:
+    """Sparkline z `days` ostatnich dni - 1 SQL query z GROUP BY zamiast 12 osobnych.
+
+    Wczesniej: 12 SELECT'ow w petli = 12 round-trip do DB per sparkline.
+    Dashboard wola _sparkline_for_ws 3x = 36 query. Teraz: 3 query total.
+    """
     from datetime import timedelta
     end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    points = []
+    start = end - timedelta(days=days - 1)
+    date_col = func.date(Lead.created_at).label("day")
+    q = select(date_col, func.count(Lead.id)).where(
+        Lead.workspace_id == workspace_id,
+        Lead.created_at >= start,
+    ).group_by(date_col)
+    if status:
+        q = q.where(Lead.status == status)
     with SessionLocal() as session:
-        for i in range(days - 1, -1, -1):
-            day_start = end - timedelta(days=i)
-            day_end = day_start + timedelta(days=1)
-            q = select(func.count(Lead.id)).where(
-                Lead.workspace_id == workspace_id,
-                Lead.created_at >= day_start, Lead.created_at < day_end,
-            )
-            if status: q = q.where(Lead.status == status)
-            points.append(int(session.scalar(q) or 0))
+        rows = session.execute(q).all()
+    # Mapa: data -> count
+    counts: dict[str, int] = {}
+    for day, cnt in rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        counts[key] = int(cnt or 0)
+    points: list[int] = []
+    for i in range(days - 1, -1, -1):
+        day_iso = (end - timedelta(days=i)).date().isoformat()
+        points.append(counts.get(day_iso, 0))
     return points
 
 
@@ -664,10 +678,11 @@ def list_drafts(
 ) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 200))
     with SessionLocal() as session:
-        q = select(EmailDraft).where(EmailDraft.workspace_id == cur.workspace_id) \
+        q = select(EmailDraft).options(joinedload(EmailDraft.lead)) \
+            .where(EmailDraft.workspace_id == cur.workspace_id) \
             .order_by(desc(EmailDraft.created_at)).limit(limit)
         if status_filter: q = q.where(EmailDraft.status == status_filter)
-        drafts = session.execute(q).scalars().all()
+        drafts = session.execute(q).unique().scalars().all()
         return [{
             "id": d.id, "lead_id": d.lead_id,
             "company": d.lead.company_name if d.lead else "(unknown)",
