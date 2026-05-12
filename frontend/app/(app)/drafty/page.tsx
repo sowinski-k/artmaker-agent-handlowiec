@@ -187,7 +187,7 @@ export default function DraftyPage() {
               <label>Kampania Woodpecker do wysyłki</label>
               <select value={selectedCampaign || ''} onChange={(e) => setSelectedCampaign(Number(e.target.value))}>
                 {campaigns.map((c) => (
-                  <option key={c.id} value={c.id}>#{c.id} — {c.name} {c.status ? `[${c.status}]` : ''}</option>
+                  <option key={c.id} value={c.id}>#{c.id} - {c.name} {c.status ? `[${c.status}]` : ''}</option>
                 ))}
               </select>
             </div>

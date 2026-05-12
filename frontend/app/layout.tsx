@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'eCombinat — narzędziownik dla e-commerce',
+  title: 'eCombinat - narzędziownik dla e-commerce',
   description: 'Polski narzędziownik AI dla e-commerce. Generuj zdjęcia, wideo i opisy w 60 sekund.',
 };
 

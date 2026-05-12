@@ -43,7 +43,7 @@ export default function LandingPage() {
               </h1>
               <p className="lead">
                 Higgsfield dla sklepów. Zamiast 14 subskrypcji i sesji fotograficznej za 8 000 zł
-                — jeden kombinat, który robi wszystko.
+                - jeden kombinat, który robi wszystko.
               </p>
 
               <div className="hero-actions">
@@ -145,21 +145,21 @@ export default function LandingPage() {
               <span className="feature-tag" style={{ background: '#E5E7EB', color: '#6B7280' }}>Wkrótce</span>
               <div className="feature-icon"><i className="ti ti-photo"></i></div>
               <h3>Generator zdjęć</h3>
-              <p className="feature-desc">Twój produkt w każdej scenie — od hali fabrycznej po loftowe wnętrza. 4 warianty na raz.</p>
+              <p className="feature-desc">Twój produkt w każdej scenie - od hali fabrycznej po loftowe wnętrza. 4 warianty na raz.</p>
             </div>
 
             <div className="feature">
               <span className="feature-tag" style={{ background: '#E5E7EB', color: '#6B7280' }}>Wkrótce</span>
               <div className="feature-icon"><i className="ti ti-video"></i></div>
               <h3>Wideo produktowe</h3>
-              <p className="feature-desc">Klip 6–10 s z ruchem kamery i światłem premium. Pod TikTok, Reels i karty produktu.</p>
+              <p className="feature-desc">Klip 6-10 s z ruchem kamery i światłem premium. Pod TikTok, Reels i karty produktu.</p>
             </div>
 
             <div className="feature">
               <span className="feature-tag" style={{ background: '#E5E7EB', color: '#6B7280' }}>Wkrótce</span>
               <div className="feature-icon"><i className="ti ti-wand"></i></div>
               <h3>Opisy AI</h3>
-              <p className="feature-desc">SEO-friendly opisy w tonie marki. Polski, angielski, niemiecki — wszystko w jednym kliknięciu.</p>
+              <p className="feature-desc">SEO-friendly opisy w tonie marki. Polski, angielski, niemiecki - wszystko w jednym kliknięciu.</p>
             </div>
 
             <div className="feature">
@@ -183,7 +183,7 @@ export default function LandingPage() {
         <div className="container">
           <div className="cta-box">
             <h2 className="display">Rozpal piec już dziś.</h2>
-            <p>Zacznij od jedynego dostępnego agenta — Handlowca cold-email. Reszta narzędzi wjeżdża wkrótce.</p>
+            <p>Zacznij od jedynego dostępnego agenta - Handlowca cold-email. Reszta narzędzi wjeżdża wkrótce.</p>
             <div className="cta-actions">
               <Link href="/login" className="btn btn-primary btn-lg">
                 Zacznij za darmo <i className="ti ti-arrow-right"></i>

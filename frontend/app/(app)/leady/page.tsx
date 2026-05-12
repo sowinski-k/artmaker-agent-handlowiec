@@ -98,7 +98,7 @@ export default function LeadyPage() {
   }
 
   const scoreBadge = (s: number | null) => {
-    if (s == null) return <span style={{ color: '#9CA3AF' }}>—</span>;
+    if (s == null) return <span style={{ color: '#9CA3AF' }}>-</span>;
     const cls = s >= 7 ? 'hot' : s >= 5 ? 'warm' : 'cold';
     return <span className={`score-badge ${cls}`}>{s.toFixed(1)}</span>;
   };
@@ -131,13 +131,13 @@ export default function LeadyPage() {
             <div className="field">
               <label>Segment</label>
               <select value={segment} onChange={(e) => setSegment(e.target.value)}>
-                {SEGMENTS.map((s) => <option key={s} value={s}>{s || '— wszystkie —'}</option>)}
+                {SEGMENTS.map((s) => <option key={s} value={s}>{s || '- wszystkie -'}</option>)}
               </select>
             </div>
             <div className="field">
               <label>Status</label>
               <select value={status} onChange={(e) => setStatus(e.target.value)}>
-                {STATUSES.map((s) => <option key={s} value={s}>{s || '— wszystkie —'}</option>)}
+                {STATUSES.map((s) => <option key={s} value={s}>{s || '- wszystkie -'}</option>)}
               </select>
             </div>
             <div className="field" style={{ maxWidth: 200 }}>
@@ -179,8 +179,8 @@ export default function LeadyPage() {
                     <td className="num">{scoreBadge(l.score)}</td>
                     <td><strong>{l.company_name}</strong>{l.contact_name && <div style={{ fontSize: 11, color: '#6B7280' }}>{l.contact_name}</div>}</td>
                     <td><span className="seg-badge">{l.segment}</span></td>
-                    <td style={{ color: '#6B7280' }}>{l.city || '—'}</td>
-                    <td style={{ color: '#6B7280', fontSize: 12 }}>{l.email || '—'}</td>
+                    <td style={{ color: '#6B7280' }}>{l.city || '-'}</td>
+                    <td style={{ color: '#6B7280', fontSize: 12 }}>{l.email || '-'}</td>
                     <td><span className={`status-badge status-${l.status}`}>{l.status}</span></td>
                     <td><i className="ti ti-chevron-right" style={{ color: '#9CA3AF' }} /></td>
                   </tr>
@@ -209,11 +209,11 @@ export default function LeadyPage() {
                   <div className="k">Segment</div><div className="v"><span className="seg-badge">{detail.segment}</span></div>
                   <div className="k">Score</div><div className="v">{scoreBadge(detail.score)}</div>
                   <div className="k">Status</div><div className="v"><span className={`status-badge status-${detail.status}`}>{detail.status}</span></div>
-                  <div className="k">Email</div><div className="v">{detail.email || '—'}</div>
-                  <div className="k">Telefon</div><div className="v">{detail.phone || '—'}</div>
-                  <div className="k">Strona</div><div className="v">{detail.website ? <a href={detail.website} target="_blank" rel="noopener" style={{ color: '#D4212C' }}>{detail.website}</a> : '—'}</div>
-                  <div className="k">Miasto</div><div className="v">{detail.city || '—'}</div>
-                  <div className="k">Kontakt</div><div className="v">{detail.contact_name || '—'}</div>
+                  <div className="k">Email</div><div className="v">{detail.email || '-'}</div>
+                  <div className="k">Telefon</div><div className="v">{detail.phone || '-'}</div>
+                  <div className="k">Strona</div><div className="v">{detail.website ? <a href={detail.website} target="_blank" rel="noopener" style={{ color: '#D4212C' }}>{detail.website}</a> : '-'}</div>
+                  <div className="k">Miasto</div><div className="v">{detail.city || '-'}</div>
+                  <div className="k">Kontakt</div><div className="v">{detail.contact_name || '-'}</div>
                 </div>
 
                 {detail.research_data && (
@@ -245,7 +245,7 @@ export default function LeadyPage() {
                   )}
                   {!detail.email && (
                     <span style={{ fontSize: 13, color: '#8F1018' }}>
-                      Brak emaila — nie można wysłać maila do tego leada.
+                      Brak emaila - nie można wysłać maila do tego leada.
                     </span>
                   )}
                 </div>

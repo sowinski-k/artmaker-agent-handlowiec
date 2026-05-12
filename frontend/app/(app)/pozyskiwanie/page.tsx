@@ -322,14 +322,14 @@ export default function PozyskiwaniePage() {
                           }} />
                       </td>
                       <td><strong>{p.name}</strong>{dup && <span style={{ color: '#6B7280', fontSize: 11 }}> · w bazie #{p.existing_lead_id}</span>}</td>
-                      <td style={{ color: '#6B7280' }}>{p.address || '—'}</td>
-                      <td className="num">{p.rating?.toFixed(1) || '—'}</td>
-                      <td className="num">{rel ? rel.score : '—'}</td>
+                      <td style={{ color: '#6B7280' }}>{p.address || '-'}</td>
+                      <td className="num">{p.rating?.toFixed(1) || '-'}</td>
+                      <td className="num">{rel ? rel.score : '-'}</td>
                       <td><span style={{ color: '#6B7280', fontSize: 12 }}>{rel?.reason || ''}</span></td>
                       <td>
                         {p.website ? (
                           <a href={p.website} target="_blank" rel="noopener" style={{ color: '#D4212C', fontSize: 12 }}>{p.website.slice(0, 30)}…</a>
-                        ) : '—'}
+                        ) : '-'}
                       </td>
                     </tr>
                   );
