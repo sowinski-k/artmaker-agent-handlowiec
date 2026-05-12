@@ -43,14 +43,58 @@ from core.llm import (
     has_anthropic_key,
     has_gemini_key,
 )
+from gui.components import (
+    badge,
+    brand_header,
+    breadcrumb,
+    page_header,
+    section_title,
+    sidebar_nav_item,
+    sidebar_nav_section,
+    sidebar_nav_subitem,
+    stat_card,
+)
+from gui.theme import APP_NAME, inject_global_css
 
 SEGMENT_VALUES: list[str] = [s.value for s in LeadSegment]
+
+
+def _render_sidebar_nav() -> None:
+    """Render branded sidebar navigation (MODUŁY → Agenci AI → Handlowiec)."""
+    with st.sidebar:
+        # Logo w dark sidebar
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:center;gap:10px;padding:0 0 14px;
+                        border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:14px;">
+                <div style="width:28px;height:28px;background:#D4212C;border-radius:6px;
+                            display:flex;align-items:center;justify-content:center;
+                            color:white;font-weight:700;font-family:'Space Grotesk',sans-serif;font-size:13px;">
+                    E
+                </div>
+                <div style="font-weight:600;font-size:14px;letter-spacing:-0.2px;color:white;">
+                    {APP_NAME.lower()}
+                </div>
+                <div style="margin-left:auto;font-family:'JetBrains Mono',monospace;
+                            font-size:10px;color:rgba(255,255,255,0.5);
+                            background:rgba(255,255,255,0.06);padding:1px 6px;border-radius:3px;">
+                    v0.1
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Nav: MODUŁY
+        sidebar_nav_section("Moduły")
+        sidebar_nav_item("Agenci AI", icon="robot", count=1, active=True)
+        sidebar_nav_subitem("Handlowiec cold-email", active=True)
 
 
 def _render_llm_selector() -> tuple[str, str]:
     """Sidebar: pick provider + model. Returns (provider, model)."""
     with st.sidebar:
-        st.header("Model AI")
+        sidebar_nav_section("Model AI")
 
         provider = st.selectbox(
             "Provider",
@@ -112,7 +156,13 @@ def _render_llm_selector() -> tuple[str, str]:
 
         return provider, model
 
-st.set_page_config(page_title="Artmaker — Agent Handlowiec", layout="wide")
+st.set_page_config(
+    page_title=f"{APP_NAME} — Agenci AI",
+    page_icon="🔧",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+inject_global_css()
 
 
 def _gate_password() -> bool:
@@ -203,24 +253,42 @@ def render_dashboard() -> None:
             or 0
         )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Leady (total)", total_leads, help="Wszystkie firmy w bazie.")
-    c2.metric(
-        "🔥 Hot leady", hot_leads,
-        help="Leady ze score ≥ 7 - priorytet do wysyłki.",
+    reply_rate_str = (
+        f"{(replied / total_leads) * 100:.1f}" if total_leads > 0 else "—"
     )
-    c3.metric("Drafty do review", drafts_pending)
-    c4.metric("Średni score", f"{avg_score:.1f}/10" if avg_score else "—")
+    avg_score_str = f"{avg_score:.1f}" if avg_score else "—"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(stat_card(
+        "Leady w bazie", total_leads, icon="database",
+    ), unsafe_allow_html=True)
+    c2.markdown(stat_card(
+        "Hot leady", hot_leads, unit="≥ 7/10", icon="flame",
+        delta=f"{hot_leads}/{total_leads} ogółem" if total_leads else None,
+        delta_dir="up" if hot_leads > 0 else "flat",
+    ), unsafe_allow_html=True)
+    c3.markdown(stat_card(
+        "Drafty do review", drafts_pending, icon="mail-forward",
+    ), unsafe_allow_html=True)
+    c4.markdown(stat_card(
+        "Średni score", avg_score_str, unit="/ 10", icon="chart-bar",
+    ), unsafe_allow_html=True)
+
+    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Researchowane", researched)
-    c6.metric("Wysłane dziś", sent_today)
-    c7.metric("Odpowiedzi", replied)
-    if total_leads > 0:
-        reply_rate = (replied / total_leads) * 100
-        c8.metric("Reply rate", f"{reply_rate:.1f}%")
-    else:
-        c8.metric("Reply rate", "—")
+    c5.markdown(stat_card(
+        "Researchowane", researched, icon="search",
+    ), unsafe_allow_html=True)
+    c6.markdown(stat_card(
+        "Wysłane dziś", sent_today, icon="send",
+    ), unsafe_allow_html=True)
+    c7.markdown(stat_card(
+        "Odpowiedzi", replied, icon="message-circle",
+    ), unsafe_allow_html=True)
+    c8.markdown(stat_card(
+        "Reply rate", reply_rate_str, unit="%", icon="trending-up",
+    ), unsafe_allow_html=True)
 
     st.divider()
 
@@ -1354,12 +1422,20 @@ def render_logs() -> None:
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
+# Sidebar: branding + nav + model picker
+_render_sidebar_nav()
 selected_provider, selected_model = _render_llm_selector()
 
-st.title("Artmaker — Agent Handlowiec")
-st.caption(
-    f"Firma: {settings.company_name} • "
-    f"Właściciel: {settings.owner_name or '(uzupełnij OWNER_NAME w .env)'}"
+# Top of page: brand header + breadcrumb + page title
+brand_header()
+breadcrumb("Ecombinat", "Agenci AI", "Handlowiec cold-email")
+page_header(
+    "Handlowiec cold-email",
+    subtitle=(
+        f"{settings.company_name} • "
+        f"{settings.owner_name or 'uzupełnij OWNER_NAME w env'} • "
+        f"model: {selected_provider}/{selected_model}"
+    ),
 )
 
 tab_dashboard, tab_discovery, tab_leads, tab_drafts, tab_logs = st.tabs(
