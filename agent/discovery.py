@@ -389,8 +389,15 @@ def run_search(
     max_results_per_source: int = 20,
     progress_callback: Callable[[str, str], None] | None = None,
     workspace_id: int | None = None,
+    city_filter: str | None = None,
 ) -> tuple[list[DiscoveredPlace], list[SourceResult]]:
-    """Run all enabled sources in parallel; return deduplicated places + per-source diagnostics."""
+    """Run all enabled sources in parallel; return deduplicated places + per-source diagnostics.
+
+    city_filter: jezeli podane - dropuje places ktorych address nie pasuje do
+    miasta (substring match po normalizacji, fallback na postal code prefix).
+    Aplikuje sie PO mergu z roznych zrodel, PRZED mark_existing_in_db (oszczednosc
+    SQL) i PRZED relevance scoring (oszczednosc LLM).
+    """
     import time
 
     sources = [s for s in sources if s.available()]
@@ -435,6 +442,12 @@ def run_search(
                 seen[key] = place
 
     merged_places = list(seen.values())
+
+    # Geo filter: dropuj wszystko z innego miasta zanim wydamy tokeny LLM.
+    if city_filter:
+        from agent.geo_filter import filter_places_by_city
+        merged_places, _rejected = filter_places_by_city(merged_places, city_filter)
+
     # Mark places that are already in our leads DB - so downstream (relevance
     # filter, GUI) wie czego nie tknąć.
     mark_existing_in_db(merged_places, workspace_id=workspace_id)

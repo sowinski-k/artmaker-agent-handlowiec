@@ -107,6 +107,7 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
         query=p["query"],
         max_results_per_source=int(p.get("max_per_source", 50)),
         workspace_id=job.workspace_id,
+        city_filter=p.get("location") if p.get("apply_city_filter", True) else None,
     )
 
     threshold = int(p.get("relevance_threshold", 6))
@@ -246,6 +247,65 @@ def handle_bulk_research_leads(session: Session, job: Job) -> dict:
     }
 
 
+def handle_enrich_lead(session: Session, job: Job) -> dict:
+    """Enrich pojedynczego leada - scrape homepage po email/phone.
+
+    Payload:
+        lead_id: int
+    """
+    from agent.contact_finder import enrich_lead_in_db
+    p = job.payload
+    result = enrich_lead_in_db(int(p["lead_id"]), workspace_id=job.workspace_id)
+    return {
+        "lead_id": int(p["lead_id"]),
+        "email": result.email,
+        "phone": result.phone,
+        "source": result.source,
+        "pages_checked": result.pages_checked,
+        "duration_s": result.duration_s,
+    }
+
+
+def handle_bulk_enrich_leads(session: Session, job: Job) -> dict:
+    """Bulk enrich - znajdz wszystkie leady ws bez kontaktu i probuj scrape.
+
+    Payload:
+        limit: int (default 100, max 1000)
+        include_dead_end: bool (default False - pomijaj juz oznaczone)
+    """
+    from agent.contact_finder import enrich_lead_in_db, find_leads_to_enrich
+    p = job.payload or {}
+    lead_ids = find_leads_to_enrich(
+        job.workspace_id,
+        limit=int(p.get("limit", 100)),
+        include_dead_end=bool(p.get("include_dead_end", False)),
+    )
+    job.total = len(lead_ids)
+    job.progress = 0
+    session.commit()
+    log.info(f"Job #{job.id} bulk_enrich: {len(lead_ids)} leadow do sprawdzenia")
+
+    enriched, dead_ends, failed = 0, 0, 0
+    for i, lid in enumerate(lead_ids, start=1):
+        if _shutdown: break
+        try:
+            res = enrich_lead_in_db(lid, workspace_id=job.workspace_id)
+            if res.email or res.phone:
+                enriched += 1
+            else:
+                dead_ends += 1
+        except Exception as exc:
+            failed += 1
+            log.warning(f"Job #{job.id} enrich lead #{lid} failed: {exc}")
+        job.progress = i
+        session.commit()
+
+    return {
+        "checked": len(lead_ids), "enriched": enriched,
+        "dead_ends": dead_ends, "failed": failed,
+    }
+
+
 def handle_generate_draft(session: Session, job: Job) -> dict:
     from agent.generate import generate_draft_for_lead
     p = job.payload
@@ -285,6 +345,8 @@ JOB_HANDLERS = {
     JobType.DISCOVERY_PIPELINE.value: handle_discovery_pipeline,
     JobType.RESEARCH_LEAD.value: handle_research_lead,
     JobType.BULK_RESEARCH_LEADS.value: handle_bulk_research_leads,
+    JobType.ENRICH_LEAD.value: handle_enrich_lead,
+    JobType.BULK_ENRICH_LEADS.value: handle_bulk_enrich_leads,
     JobType.GENERATE_DRAFT.value: handle_generate_draft,
     JobType.BULK_GENERATE_DRAFTS.value: handle_bulk_generate_drafts,
     JobType.SEND_DRAFT.value: handle_send_draft,

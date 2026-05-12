@@ -237,6 +237,24 @@ def research_and_save(
         model=model,
     )
     lead_id, _created = save_lead(url, result, workspace_id=workspace_id)
+
+    # Auto-enrich jesli LLM nie wyciagnal email/phone (czeste przy stronach z
+    # kontaktem na osobnej podstronie). Tani fallback - regex po homepage +
+    # /kontakt. Jak dalej puste -> DEAD_END (contact_finder sam tak ustawia).
+    if not result.email and not result.phone:
+        try:
+            from agent.contact_finder import enrich_lead_in_db
+            enrich_result = enrich_lead_in_db(lead_id, workspace_id=workspace_id)
+            if enrich_result.email or enrich_result.phone:
+                logger.bind(source="research").info(
+                    f"Lead #{lead_id} auto-enriched: email={enrich_result.email} "
+                    f"phone={enrich_result.phone} (src={enrich_result.source})"
+                )
+        except Exception as exc:
+            logger.bind(source="research").warning(
+                f"Auto-enrich for lead #{lead_id} failed (non-critical): {exc}"
+            )
+
     return lead_id, result, True
 
 

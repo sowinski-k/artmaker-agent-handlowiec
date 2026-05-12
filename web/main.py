@@ -1016,6 +1016,66 @@ def bulk_research(payload: BulkResearchIn, cur: CurrentUser = Depends(get_curren
     return {"ok": True, "job_id": job.id, "total": len(urls)}
 
 
+# ─── Enrichment ──────────────────────────────────────────────────────────
+
+class EnrichOneIn(BaseModel):
+    lead_id: int
+
+
+@app.post("/api/leads/enrich")
+def enrich_one(payload: EnrichOneIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Enrich pojedynczego leada (regex po homepage + /kontakt). Tani fallback
+    jezeli LLM research nie wyciagnal email/phone. Bez kosztu LLM."""
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == payload.lead_id,
+                Lead.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+        job = create_job(
+            session, job_type=JobType.ENRICH_LEAD,
+            workspace_id=cur.workspace_id, user_id=cur.user_id,
+            payload={"lead_id": payload.lead_id},
+        )
+    return {"ok": True, "job_id": job.id}
+
+
+class EnrichEmptyIn(BaseModel):
+    limit: int = 100
+    include_dead_end: bool = False
+
+
+@app.post("/api/leads/enrich-empty")
+def enrich_empty(payload: EnrichEmptyIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Batch enrichment - przeleci wszystkie leady ws bez email+phone, scrape
+    homepage + /kontakt, dorzuci kontakty albo oznaczy DEAD_END.
+
+    Pominie leady oznaczone juz DEAD_END (chyba ze include_dead_end=True),
+    pominie tez te enrichowane w ostatnich 90 dniach (RECHECK_DAYS w contact_finder).
+    """
+    from agent.contact_finder import find_leads_to_enrich
+    candidates = find_leads_to_enrich(
+        cur.workspace_id,
+        limit=max(1, min(payload.limit, 1000)),
+        include_dead_end=payload.include_dead_end,
+    )
+    if not candidates:
+        return {"ok": True, "job_id": None, "candidates": 0, "msg": "Brak leadow do enrichmentu."}
+    with SessionLocal() as session:
+        job = create_job(
+            session, job_type=JobType.BULK_ENRICH_LEADS,
+            workspace_id=cur.workspace_id, user_id=cur.user_id,
+            payload={
+                "limit": payload.limit,
+                "include_dead_end": payload.include_dead_end,
+            },
+        )
+    return {"ok": True, "job_id": job.id, "candidates": len(candidates)}
+
+
 # ─── Jobs polling ────────────────────────────────────────────────────────
 
 @app.get("/api/jobs")
