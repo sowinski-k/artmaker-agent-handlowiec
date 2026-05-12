@@ -637,11 +637,15 @@ def list_leads(
     limit = max(1, min(limit, 200)); offset = max(0, offset)
     with SessionLocal() as session:
         # Sort: leady z kontaktem najpierw (po score DESC), potem leady bez
-        # email+phone na samym dole (rowniez po score DESC dla porzadku).
-        # DEAD_END status z auto-enrichmentu to silny sygnal "puste" - leci na dol.
+        # email+phone na samym dole. DEAD_END status z auto-enrichmentu to
+        # silny sygnal "puste" - leci na dol.
+        # NULL OR '' bo stare leady moga miec puste stringi zamiast NULL
+        # (przed normalizacja w save_lead).
+        empty_email = (Lead.email.is_(None)) | (Lead.email == "")
+        empty_phone = (Lead.phone.is_(None)) | (Lead.phone == "")
         empty_flag = case(
             (Lead.status == LeadStatus.DEAD_END.value, 2),
-            (((Lead.email.is_(None)) & (Lead.phone.is_(None))), 1),
+            ((empty_email & empty_phone), 1),
             else_=0,
         )
         q = select(Lead).where(Lead.workspace_id == cur.workspace_id) \

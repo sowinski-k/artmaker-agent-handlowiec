@@ -134,18 +134,33 @@ def save_lead(
     a new row inserted.
     """
     target_url = result.website or url
+    # Normalizacja pustych stringow do None. LLM czasem zwraca "" / " " /
+    # "-" zamiast None dla brakujacych pol; SQL ORDER BY (email IS NULL)
+    # nie lapie wtedy pustych = chaos w sortowaniu/filtrach.
+    def _clean(v: str | None) -> str | None:
+        if v is None: return None
+        s = v.strip()
+        if not s or s in ("-", "n/a", "N/A", "brak", "Brak"): return None
+        return s
+
+    email = _clean(result.email)
+    phone = _clean(result.phone)
+    instagram = _clean(result.instagram)
+    contact_name = _clean(result.contact_name)
+    city = _clean(result.city)
+
     existing_id = find_existing_lead(target_url)
     with SessionLocal() as session:
         if existing_id is not None:
             lead = session.get(Lead, existing_id)
             lead.segment = result.segment
             lead.company_name = result.company_name
-            lead.contact_name = result.contact_name
-            lead.email = result.email
-            lead.phone = result.phone
+            lead.contact_name = contact_name
+            lead.email = email
+            lead.phone = phone
             lead.website = target_url
-            lead.instagram = result.instagram
-            lead.city = result.city
+            lead.instagram = instagram
+            lead.city = city
             lead.source = source
             lead.score = result.score.total
             lead.status = LeadStatus.RESEARCHED.value
@@ -156,12 +171,12 @@ def save_lead(
             workspace_id=workspace_id,
             segment=result.segment,
             company_name=result.company_name,
-            contact_name=result.contact_name,
-            email=result.email,
-            phone=result.phone,
+            contact_name=contact_name,
+            email=email,
+            phone=phone,
             website=target_url,
-            instagram=result.instagram,
-            city=result.city,
+            instagram=instagram,
+            city=city,
             source=source,
             score=result.score.total,
             status=LeadStatus.RESEARCHED.value,
@@ -238,10 +253,13 @@ def research_and_save(
     )
     lead_id, _created = save_lead(url, result, workspace_id=workspace_id)
 
-    # Auto-enrich jesli LLM nie wyciagnal email/phone (czeste przy stronach z
-    # kontaktem na osobnej podstronie). Tani fallback - regex po homepage +
-    # /kontakt. Jak dalej puste -> DEAD_END (contact_finder sam tak ustawia).
-    if not result.email and not result.phone:
+    # Auto-enrich jesli LLM przegapil email LUB phone (czeste przy stronach z
+    # kontaktem na osobnej podstronie - LLM dostaje subset HTML i czesto bierze
+    # tylko jeden z dwoch kanalow kontaktu). Tani fallback - regex po homepage
+    # + /kontakt. Jak dalej puste oba -> DEAD_END.
+    # OR zamiast AND: nawet jak mamy phone, sprobujmy dorzucic email - to
+    # najwiekszy single signal w cold-email outreach.
+    if not result.email or not result.phone:
         try:
             from agent.contact_finder import enrich_lead_in_db
             enrich_result = enrich_lead_in_db(lead_id, workspace_id=workspace_id)
