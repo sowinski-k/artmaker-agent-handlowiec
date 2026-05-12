@@ -312,10 +312,10 @@ def _migrate_workspace_columns() -> None:
 
 
 def _ensure_default_workspace() -> None:
-    """Idempotent: tworzy 'default' workspace + admin user jeśli jeszcze nie ma.
+    """Idempotent: tworzy admin user + jego workspace + member.
 
-    Wszystkie stare dane (Lead, EmailDraft, Event bez workspace_id) są
-    przypisane do tego workspace'u.
+    Każdy krok w OSOBNEJ transakcji - jeśli np. workspace ma slug conflict
+    (ktoś z testowych userów zajął "default"), admin i tak zostaje w bazie.
 
     Hasło admina: jeśli ADMIN_PASSWORD/APP_PASSWORD jest ustawione w env i
     różni się od bieżącego hasha - UPDATE'ujemy. Pozwala na zmianę hasła
@@ -334,79 +334,134 @@ def _ensure_default_workspace() -> None:
 
     admin_pw = (os.getenv("APP_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
 
-    with SessionLocal() as session:
-        admin = session.execute(select(User).where(User.email == admin_email)).scalar_one_or_none()
-        if admin is None:
-            # Stwórz admina
-            from web.auth import hash_password  # lazy import żeby uniknąć cyklicznych
-            pw_to_use = admin_pw or "ecombinat-admin"
-            admin = User(
-                email=admin_email,
-                password_hash=hash_password(pw_to_use),
-                name="Admin",
-                is_admin=True,
-            )
-            session.add(admin)
-            session.flush()
-            log.info(f"Admin user CREATED: {admin_email}")
-        elif admin_pw:
-            # Admin istnieje. Sprawdz czy env password pasuje do bieżącego hash.
-            # Jesli nie - reset (defensywnie: bcrypt z różnych wersji może mieć
-            # kompatybilne hashe ale czasem trafia się dramat z encodingiem).
-            from web.auth import hash_password, verify_password
-            try:
-                matches = verify_password(admin_pw, admin.password_hash)
-            except Exception:
-                matches = False
-            if not matches:
-                admin.password_hash = hash_password(admin_pw)
-                session.flush()
-                log.warning(
-                    f"Admin password RESET from env for {admin_email} "
-                    f"(was: hash didn't verify env password)"
+    # KROK 1: Admin user (osobna transakcja - jak workspace failuje admin zostaje)
+    admin_id: int | None = None
+    try:
+        with SessionLocal() as session:
+            admin = session.execute(
+                select(User).where(User.email == admin_email)
+            ).scalar_one_or_none()
+            if admin is None:
+                from web.auth import hash_password
+                pw_to_use = admin_pw or "ecombinat-admin"
+                admin = User(
+                    email=admin_email,
+                    password_hash=hash_password(pw_to_use),
+                    name="Admin",
+                    is_admin=True,
                 )
+                session.add(admin)
+                session.commit()
+                log.info(f"Admin user CREATED: {admin_email}")
+            elif admin_pw:
+                # Admin istnieje - sync hasla z env jesli mismatch.
+                from web.auth import hash_password, verify_password
+                try:
+                    matches = verify_password(admin_pw, admin.password_hash)
+                except Exception:
+                    matches = False
+                if not matches:
+                    admin.password_hash = hash_password(admin_pw)
+                    session.commit()
+                    log.warning(f"Admin password RESET from env for {admin_email}")
+                else:
+                    log.info(f"Admin password OK for {admin_email}")
             else:
-                log.info(f"Admin password OK for {admin_email}")
-        else:
-            log.warning(
-                f"Admin user {admin_email} exists but ADMIN_PASSWORD env NOT SET - "
-                f"login impossible until you set ADMIN_PASSWORD env var"
-            )
+                log.warning(
+                    f"Admin user {admin_email} exists but ADMIN_PASSWORD env NOT SET - "
+                    f"login impossible until you set ADMIN_PASSWORD env var"
+                )
+            admin_id = admin.id
+    except Exception as exc:
+        log.error(f"Admin user setup FAILED: {exc}", exc_info=True)
+        return
 
-        # Default workspace dla admina
-        ws = session.execute(
-            select(Workspace).where(Workspace.owner_user_id == admin.id, Workspace.slug == "default")
-        ).scalar_one_or_none()
-        if ws is None:
-            ws = Workspace(
-                name="Default Workspace",
-                slug="default",
-                owner_user_id=admin.id,
-                plan="enterprise",
-                monthly_credits=99999,
-            )
-            session.add(ws)
-            session.flush()
+    if admin_id is None:
+        return
 
-        # Upewnij się że admin jest członkiem swojego workspace'u
-        member = session.execute(
-            select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == ws.id,
-                WorkspaceMember.user_id == admin.id,
-            )
-        ).scalar_one_or_none()
-        if member is None:
-            session.add(WorkspaceMember(
-                workspace_id=ws.id,
-                user_id=admin.id,
-                role=WorkspaceRole.OWNER.value,
-            ))
+    # KROK 2: Workspace dla admina (z unique-slug fallback)
+    ws_id: int | None = None
+    try:
+        with SessionLocal() as session:
+            # Sprawdz czy admin ma juz JAKIKOLWIEK workspace
+            ws = session.execute(
+                select(Workspace).where(Workspace.owner_user_id == admin_id)
+                .order_by(Workspace.created_at).limit(1)
+            ).scalar_one_or_none()
+            if ws is None:
+                # Znajdz unikalny slug. Preferowany: "default", fallback "ecombinat-admin-N"
+                base_slugs = ["default", "ecombinat-admin", "admin-workspace"]
+                slug = None
+                for candidate in base_slugs:
+                    existing = session.execute(
+                        select(Workspace).where(Workspace.slug == candidate)
+                    ).scalar_one_or_none()
+                    if existing is None:
+                        slug = candidate
+                        break
+                if slug is None:
+                    # All taken - generuj z licznikiem
+                    n = 2
+                    while True:
+                        slug_try = f"ecombinat-admin-{n}"
+                        existing = session.execute(
+                            select(Workspace).where(Workspace.slug == slug_try)
+                        ).scalar_one_or_none()
+                        if existing is None:
+                            slug = slug_try
+                            break
+                        n += 1
+                        if n > 999:
+                            log.error("Cannot find unique slug for admin workspace")
+                            return
+                ws = Workspace(
+                    name="Default Workspace",
+                    slug=slug,
+                    owner_user_id=admin_id,
+                    plan="enterprise",
+                    monthly_credits=99999,
+                )
+                session.add(ws)
+                session.commit()
+                log.info(f"Admin workspace CREATED slug={slug}")
+            ws_id = ws.id
+    except Exception as exc:
+        log.error(f"Admin workspace setup FAILED: {exc}", exc_info=True)
+        return
 
-        # Migracja starych danych: przypisz wszystkie NULL workspace_id do default
-        session.execute(update(Lead).where(Lead.workspace_id.is_(None)).values(workspace_id=ws.id))
-        session.execute(update(EmailDraft).where(EmailDraft.workspace_id.is_(None)).values(workspace_id=ws.id))
-        session.execute(update(Event).where(Event.workspace_id.is_(None)).values(workspace_id=ws.id))
-        session.commit()
+    if ws_id is None:
+        return
+
+    # KROK 3: WorkspaceMember (idempotent)
+    try:
+        with SessionLocal() as session:
+            member = session.execute(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == ws_id,
+                    WorkspaceMember.user_id == admin_id,
+                )
+            ).scalar_one_or_none()
+            if member is None:
+                session.add(WorkspaceMember(
+                    workspace_id=ws_id,
+                    user_id=admin_id,
+                    role=WorkspaceRole.OWNER.value,
+                ))
+                session.commit()
+                log.info(f"Admin WorkspaceMember CREATED for ws #{ws_id}")
+    except Exception as exc:
+        log.error(f"Admin WorkspaceMember setup FAILED: {exc}", exc_info=True)
+        return
+
+    # KROK 4: Migracja starych danych (osobna transakcja, niekrytyczna)
+    try:
+        with SessionLocal() as session:
+            session.execute(update(Lead).where(Lead.workspace_id.is_(None)).values(workspace_id=ws_id))
+            session.execute(update(EmailDraft).where(EmailDraft.workspace_id.is_(None)).values(workspace_id=ws_id))
+            session.execute(update(Event).where(Event.workspace_id.is_(None)).values(workspace_id=ws_id))
+            session.commit()
+    except Exception as exc:
+        log.warning(f"Legacy data migration to admin workspace failed (non-critical): {exc}")
 
 
 def get_session():
