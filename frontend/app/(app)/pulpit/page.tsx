@@ -50,12 +50,63 @@ interface ActivityItem {
   time: string;
 }
 
+interface ActiveJob {
+  id: number;
+  type: string;
+  status: string;
+  progress: number;
+  total: number;
+  created_at: string;
+  started_at: string | null;
+  retries: number;
+  last_error: string | null;
+}
+
+const JOB_LABELS: Record<string, string> = {
+  discovery_pipeline: 'Pozyskiwanie + research',
+  research_lead: 'Research leada',
+  bulk_research_leads: 'Bulk research',
+  enrich_lead: 'Uzupełnij kontakt',
+  bulk_enrich_leads: 'Bulk enrichment',
+  generate_draft: 'Generowanie draftu',
+  bulk_generate_drafts: 'Bulk drafty',
+  send_draft: 'Wysyłka',
+  poll_woodpecker: 'Synchronizacja statusów',
+};
+
 export default function HalaPulpit() {
   const router = useRouter();
   const [data, setData] = useState<Overview | null>(null);
   const [events, setEvents] = useState<ActivityItem[]>([]);
+  const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<number | null>(null);
+
+  const fetchActiveJobs = async () => {
+    try {
+      const [running, pending] = await Promise.all([
+        api<ActiveJob[]>('/api/jobs?status=running&limit=20').catch(() => []),
+        api<ActiveJob[]>('/api/jobs?status=pending&limit=20').catch(() => []),
+      ]);
+      setActiveJobs([...running, ...pending]);
+    } catch {
+      setActiveJobs([]);
+    }
+  };
+
+  const cancelJob = async (id: number) => {
+    if (!confirm(`Anulować job #${id}? Już zrobione leady zostaną w bazie.`)) return;
+    setCancellingId(id);
+    try {
+      await api(`/api/jobs/${id}/cancel`, { method: 'POST' });
+      await fetchActiveJobs();
+    } catch (err) {
+      alert('Nie udało się anulować: ' + (err instanceof Error ? err.message : 'błąd'));
+    } finally {
+      setCancellingId(null);
+    }
+  };
 
   useEffect(() => {
     if (!getToken()) {
@@ -65,6 +116,7 @@ export default function HalaPulpit() {
     Promise.all([
       api<Overview>('/api/workspace/overview'),
       api<ActivityItem[]>('/api/events?limit=8').catch(() => []),
+      fetchActiveJobs(),
     ])
       .then(([d, e]) => {
         setData(d);
@@ -75,6 +127,9 @@ export default function HalaPulpit() {
         setError(err instanceof Error ? err.message : 'Błąd pobierania danych');
         setLoading(false);
       });
+    // Auto-refresh aktywnych jobów co 5s
+    const iv = setInterval(fetchActiveJobs, 5000);
+    return () => clearInterval(iv);
   }, [router]);
 
   if (loading) {
@@ -161,6 +216,55 @@ export default function HalaPulpit() {
             </div>
           </div>
         </div>
+
+        {/* AKTYWNE ZADANIA - tylko gdy jakies sa */}
+        {activeJobs.length > 0 && (
+          <div className="active-jobs-section">
+            <div className="section-head">
+              <h2><i className="ti ti-loader-2 spin"></i> Aktywne zadania</h2>
+              <span className="section-sub">worker pracuje w tle ({activeJobs.length})</span>
+            </div>
+            <div className="active-jobs">
+              {activeJobs.map((j) => {
+                const pct = j.total > 0 ? Math.round((j.progress / j.total) * 100) : 0;
+                const isRunning = j.status === 'running';
+                return (
+                  <div className={`aj-row ${j.status}`} key={j.id}>
+                    <div className="aj-meta">
+                      <div className="aj-type">
+                        {JOB_LABELS[j.type] || j.type}
+                        <span className="aj-id mono">#{j.id}</span>
+                        {!isRunning && <span className="aj-status">w kolejce</span>}
+                        {j.retries > 0 && <span className="aj-retry">retry {j.retries}</span>}
+                      </div>
+                      <div className="aj-prog-line">
+                        {j.total > 0 ? (
+                          <>
+                            <div className="aj-bar"><div style={{ width: `${pct}%` }}></div></div>
+                            <span className="aj-prog mono">{j.progress}/{j.total} ({pct}%)</span>
+                          </>
+                        ) : (
+                          <span className="aj-prog mono">{isRunning ? 'pracuje…' : 'czeka na start'}</span>
+                        )}
+                      </div>
+                      {j.last_error && (
+                        <div className="aj-error">Ostatni błąd: {j.last_error}</div>
+                      )}
+                    </div>
+                    <button
+                      className="aj-cancel"
+                      onClick={() => cancelJob(j.id)}
+                      disabled={cancellingId === j.id}
+                    >
+                      <i className="ti ti-x"></i>
+                      {cancellingId === j.id ? 'Anulowanie…' : 'Anuluj'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="hala-grid">
           {/* MODUŁY */}
@@ -355,6 +459,103 @@ const HALA_CSS = `
 }
 .kpi-link:hover { text-decoration: underline; }
 .kpi-link i { font-size: 13px; }
+
+.active-jobs-section { margin-bottom: 28px; }
+.active-jobs {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.aj-row {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.aj-row:last-child { border-bottom: none; }
+.aj-row.pending { opacity: 0.75; background: var(--bg); }
+.aj-meta { flex: 1; min-width: 0; }
+.aj-type {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 8px;
+}
+.aj-id {
+  font-size: 11px;
+  color: var(--muted-2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+.aj-status {
+  font-size: 10.5px;
+  color: var(--muted-2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.aj-retry {
+  font-size: 10.5px;
+  color: var(--red-dark);
+  background: rgba(212,33,44,0.1);
+  border: 1px solid rgba(212,33,44,0.25);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.aj-prog-line {
+  display: flex; align-items: center; gap: 10px;
+}
+.aj-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  max-width: 360px;
+}
+.aj-bar > div { height: 100%; background: var(--red); transition: width 0.3s; }
+.aj-prog {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+.aj-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--red-dark);
+  font-family: 'JetBrains Mono', monospace;
+}
+.aj-cancel {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+.aj-cancel:hover:not(:disabled) {
+  background: rgba(212,33,44,0.1);
+  border-color: rgba(212,33,44,0.4);
+  color: var(--red-dark);
+}
+.aj-cancel:disabled { opacity: 0.6; cursor: not-allowed; }
+.aj-cancel i { font-size: 13px; }
+.spin { animation: spin 1.4s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .hala-grid {
   display: grid;

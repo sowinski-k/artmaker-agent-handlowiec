@@ -39,3 +39,10 @@ logs/
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Next.js / Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+**/tsconfig.tsbuildinfo
