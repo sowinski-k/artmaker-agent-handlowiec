@@ -155,14 +155,22 @@ def get_current_user(request: Request) -> CurrentUser:
     user_id = data["user_id"]
     ws_id = data["workspace_id"]
     with SessionLocal() as session:
-        # Single JOIN query - all needed data in one round-trip
-        row = session.execute(
+        # Single round-trip query: explicit select_from(User) eliminuje
+        # ambiguity SQLAlchemy gdy mamy 3 entity w select(). LEFT JOIN do
+        # Workspace + LEFT JOIN do WorkspaceMember (oba moga byc None gdy
+        # token wskazuje nieistniejacy ws, ale my potem walidujemy).
+        stmt = (
             select(User, Workspace, WorkspaceMember)
-            .join(Workspace, Workspace.id == ws_id, isouter=True)
-            .join(WorkspaceMember, (WorkspaceMember.user_id == User.id)
-                  & (WorkspaceMember.workspace_id == ws_id), isouter=True)
+            .select_from(User)
+            .outerjoin(Workspace, Workspace.id == ws_id)
+            .outerjoin(
+                WorkspaceMember,
+                (WorkspaceMember.user_id == User.id)
+                & (WorkspaceMember.workspace_id == ws_id),
+            )
             .where(User.id == user_id)
-        ).first()
+        )
+        row = session.execute(stmt).first()
         if row is None:
             raise HTTPException(status_code=401, detail="Konto nie istnieje.")
         user, ws, member = row
