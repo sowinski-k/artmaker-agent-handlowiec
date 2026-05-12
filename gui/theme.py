@@ -77,6 +77,8 @@ code, pre, kbd {{
 }}
 
 [data-testid="stStatusWidget"] {{ display: none; }}
+[data-testid="stDecoration"] {{ display: none; }}
+[data-testid="stToolbar"] {{ display: none; }}
 
 /* Tighten content padding */
 .main .block-container {{
@@ -86,6 +88,31 @@ code, pre, kbd {{
     padding-bottom: 4rem !important;
     max-width: 100% !important;
 }}
+
+/* Remove default vertical gaps between Streamlit blocks - keeps cards visually
+   contiguous in dashboards */
+.element-container, [data-testid="element-container"] {{
+    margin-bottom: 0 !important;
+}}
+
+[data-testid="stVerticalBlock"] {{
+    gap: 0.5rem !important;
+}}
+
+[data-testid="stHorizontalBlock"] {{
+    gap: 12px !important;
+}}
+
+[data-testid="column"] {{
+    padding: 0 !important;
+}}
+
+/* Markdown blocks - no extra wrapping margin */
+[data-testid="stMarkdown"], [data-testid="stMarkdownContainer"] {{
+    margin: 0 !important;
+}}
+
+[data-testid="stMarkdown"] p {{ margin-bottom: 0 !important; }}
 
 /* Default Streamlit headings */
 h1 {{
