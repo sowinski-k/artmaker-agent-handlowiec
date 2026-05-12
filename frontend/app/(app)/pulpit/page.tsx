@@ -127,8 +127,9 @@ export default function HalaPulpit() {
         setError(err instanceof Error ? err.message : 'Błąd pobierania danych');
         setLoading(false);
       });
-    // Auto-refresh aktywnych jobów co 5s
-    const iv = setInterval(fetchActiveJobs, 5000);
+    // Auto-refresh aktywnych jobów co 8s - lite payload, ale i tak nie chcemy
+    // hammerowac backendu jak nic sie nie dzieje.
+    const iv = setInterval(fetchActiveJobs, 8000);
     return () => clearInterval(iv);
   }, [router]);
 

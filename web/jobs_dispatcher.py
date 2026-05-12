@@ -38,19 +38,25 @@ def create_job(
     return job
 
 
-def serialize_job(job: Job) -> dict[str, Any]:
-    """JSON-safe reprezentacja joba dla frontu."""
-    return {
+def serialize_job(job: Job, *, lite: bool = False) -> dict[str, Any]:
+    """JSON-safe reprezentacja joba dla frontu.
+
+    lite=True: pomija payload + result (moga byc duze - 100 URLi, JSON z research).
+    Uzywane przez listingi (auto-refresh co 5s, nie potrzebujemy detalu).
+    """
+    out: dict[str, Any] = {
         "id": job.id,
         "type": job.type,
         "status": job.status,
         "progress": int(job.progress or 0),
         "total": int(job.total or 0),
-        "payload": job.payload,
-        "result": job.result,
         "retries": int(job.retries or 0),
         "last_error": job.last_error,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
+    if not lite:
+        out["payload"] = job.payload
+        out["result"] = job.result
+    return out

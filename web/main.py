@@ -1080,16 +1080,18 @@ def enrich_empty(payload: EnrichEmptyIn, cur: CurrentUser = Depends(get_current_
 
 @app.get("/api/jobs")
 def list_jobs(
-    status: str | None = None, limit: int = 30,
+    status: str | None = None, limit: int = 30, lite: bool = True,
     cur: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
+    """Lista jobow workspace'u. Default lite=True - bez payload/result, lekkie
+    dla auto-refresh polling. Detail przez /api/jobs/{id} albo lite=false."""
     limit = max(1, min(limit, 100))
     with SessionLocal() as session:
         q = select(Job).where(Job.workspace_id == cur.workspace_id) \
             .order_by(desc(Job.created_at)).limit(limit)
         if status: q = q.where(Job.status == status)
         jobs = session.execute(q).scalars().all()
-        return [serialize_job(j) for j in jobs]
+        return [serialize_job(j, lite=lite) for j in jobs]
 
 
 @app.get("/api/jobs/{job_id}")

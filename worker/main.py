@@ -145,6 +145,9 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
 
     for i, place in enumerate(targets, start=1):
         if _shutdown: break
+        if _is_cancelled(session, job):
+            log.info(f"Job #{job.id} cancelled by user at {i}/{len(targets)}")
+            break
         try:
             lead_id, result, was_researched = research_and_save(
                 place.website,
@@ -218,6 +221,9 @@ def handle_bulk_research_leads(session: Session, job: Job) -> dict:
 
     for i, url in enumerate(urls, start=1):
         if _shutdown: break
+        if _is_cancelled(session, job):
+            log.info(f"Job #{job.id} cancelled by user at {i}/{len(urls)}")
+            break
         try:
             lead_id, result, was = research_and_save(
                 url,
@@ -288,6 +294,9 @@ def handle_bulk_enrich_leads(session: Session, job: Job) -> dict:
     enriched, dead_ends, failed = 0, 0, 0
     for i, lid in enumerate(lead_ids, start=1):
         if _shutdown: break
+        if _is_cancelled(session, job):
+            log.info(f"Job #{job.id} cancelled by user at {i}/{len(lead_ids)}")
+            break
         try:
             res = enrich_lead_in_db(lid, workspace_id=job.workspace_id)
             if res.email or res.phone:
@@ -356,6 +365,37 @@ JOB_HANDLERS = {
 
 # ─── Worker loop ────────────────────────────────────────────────────────
 
+def _recover_zombie_jobs() -> None:
+    """Startup recovery: marker RUNNING jobow z poprzedniego procesu jako FAILED.
+
+    Worker pickuje tylko PENDING - jak crashne / Railway zredeploya w trakcie
+    joba, status RUNNING zostaje w DB i nikt go nie podejmie. Frontend pokazuje
+    "Praca w tle 1" mimo ze nic nie chodzi. Przy starcie czyscimy te zombie.
+    """
+    with SessionLocal() as session:
+        stale = session.execute(
+            select(Job).where(Job.status == JobStatus.RUNNING.value)
+        ).scalars().all()
+        if not stale:
+            return
+        for j in stale:
+            j.status = JobStatus.FAILED.value
+            j.last_error = "Worker restarted before job completed - re-trigger manually"
+            j.completed_at = datetime.now(timezone.utc)
+            log.warning(f"Zombie job #{j.id} ({j.type}) -> FAILED (worker restart)")
+        session.commit()
+
+
+def _is_cancelled(session: Session, job: Job) -> bool:
+    """Refresh job z DB i sprawdz czy user anulowal. Wolane w petlach
+    bulk handlerow zeby przerwac szybko."""
+    try:
+        session.refresh(job, attribute_names=["status"])
+        return job.status == JobStatus.CANCELLED.value
+    except Exception:
+        return False
+
+
 def claim_next_job(session: Session) -> Job | None:
     """Wybiera najstarsze pending job i flaguje running. Atomically.
 
@@ -395,6 +435,16 @@ def execute_job(job_id: int) -> None:
 
         try:
             result = handler(session, job)
+            # Cancel check - jak user anulowal mid-run nie nadpisuj statusu na DONE
+            session.refresh(job, attribute_names=["status"])
+            if job.status == JobStatus.CANCELLED.value:
+                job.result = result
+                job.completed_at = datetime.now(timezone.utc)
+                _log_event(session, job.workspace_id, "INFO", "job_cancelled",
+                           f"Job #{job.id} ({job.type}) cancelled by user (partial result saved)")
+                session.commit()
+                log.info(f"Job #{job.id} CANCELLED mid-run - partial {result}")
+                return
             job.result = result
             job.status = JobStatus.DONE.value
             job.completed_at = datetime.now(timezone.utc)
@@ -423,6 +473,7 @@ def execute_job(job_id: int) -> None:
 def loop_forever() -> None:
     log.info(f"Worker starting (poll interval {POLL_INTERVAL_S}s, max retries {MAX_RETRIES})")
     init_db()
+    _recover_zombie_jobs()
     while not _shutdown:
         try:
             with SessionLocal() as session:
