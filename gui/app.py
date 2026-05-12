@@ -1099,57 +1099,226 @@ def render_drafts(provider: str, model: str) -> None:
             .scalars()
             .all()
         )
-        # Eagerly resolve lead names to avoid lazy-loading after session close.
-        rows = [(d.id, d.lead.company_name, d.subject, d.full_preview) for d in drafts]
+        # Eagerly load wszystkie pola przed close session
+        rows = [
+            {
+                "id": d.id,
+                "company": d.lead.company_name,
+                "subject": d.subject,
+                "preview": d.full_preview,
+                "snippet1": d.snippet1,
+                "snippet2": d.snippet2,
+                "snippet3": d.snippet3,
+                "snippet4": d.snippet4,
+                "snippet5": d.snippet5,
+                "edited_by_user": d.edited_by_user,
+                "template_variant": d.template_variant,
+            }
+            for d in drafts
+        ]
 
     if not rows:
         st.info("Brak draftów do review. Wygeneruj nowe powyżej, lub odpal `agent/generate.py`.")
         return
 
-    for draft_id, company, subject, preview in rows:
-        with st.expander(f"#{draft_id} — {company} | {subject or '(brak tematu)'}"):
-            st.text(preview or "(brak treści)")
-            c1, c2, c3, c4 = st.columns(4)
-            if c1.button("✅ Zatwierdź", key=f"approve-{draft_id}"):
-                with SessionLocal() as session:
-                    obj = session.get(EmailDraft, draft_id)
-                    obj.status = DraftStatus.APPROVED.value
-                    session.commit()
-                st.rerun()
-            if c2.button("❌ Odrzuć", key=f"reject-{draft_id}"):
-                with SessionLocal() as session:
-                    obj = session.get(EmailDraft, draft_id)
-                    obj.status = DraftStatus.REJECTED.value
-                    session.commit()
-                st.rerun()
-            send_disabled = (
-                not wp_ok
-                or selected_campaign_id is None
-                or settings.dry_run
+    for d in rows:
+        draft_id = d["id"]
+        edit_mode_key = f"edit_mode_{draft_id}"
+        in_edit_mode = st.session_state.get(edit_mode_key, False)
+
+        title_parts = [f"#{draft_id} — {d['company']} | {d['subject'] or '(brak tematu)'}"]
+        if d["edited_by_user"]:
+            title_parts.append("✏️ edytowany")
+        if d["template_variant"]:
+            track = d["template_variant"].replace("cold_v1_", "")
+            track_label = {
+                "b2b_panel": "🏪 Panel B2B",
+                "private_label": "🏭 Private Label",
+                "both": "🔀 Obie ścieżki",
+            }.get(track, track)
+            title_parts.append(track_label)
+        title = " | ".join(title_parts)
+
+        with st.expander(title):
+            if in_edit_mode:
+                _render_draft_editor(d, provider, model)
+            else:
+                _render_draft_view(d, selected_campaign_id, wp_ok)
+
+
+def _render_draft_view(d: dict, selected_campaign_id: int | None, wp_ok: bool) -> None:
+    """Standardowy widok draftu: preview + 4 buttons (Zatwierdź/Odrzuć/Wyślij/Edytuj)."""
+    draft_id = d["id"]
+    st.text(d["preview"] or "(brak treści)")
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("✅ Zatwierdź", key=f"approve-{draft_id}"):
+        with SessionLocal() as session:
+            obj = session.get(EmailDraft, draft_id)
+            obj.status = DraftStatus.APPROVED.value
+            session.commit()
+        st.rerun()
+    if c2.button("❌ Odrzuć", key=f"reject-{draft_id}"):
+        with SessionLocal() as session:
+            obj = session.get(EmailDraft, draft_id)
+            obj.status = DraftStatus.REJECTED.value
+            session.commit()
+        st.rerun()
+    send_disabled = (
+        not wp_ok or selected_campaign_id is None or settings.dry_run
+    )
+    if c3.button(
+        "📤 Wyślij",
+        key=f"send-{draft_id}",
+        disabled=send_disabled,
+        help=(
+            "DRY_RUN=true - wysyłka zablokowana" if settings.dry_run
+            else "Brak kampanii do wysłania" if selected_campaign_id is None
+            else "Push do Woodpeckera, start sekwencji follow-upów"
+        ),
+        type="primary",
+    ):
+        try:
+            from agent.push_to_sender import push_draft
+            with st.spinner(f"Wysyłam draft #{draft_id} do Woodpecker..."):
+                prospect_id = push_draft(draft_id, selected_campaign_id)
+            st.success(
+                f"✅ Wysłany do Woodpecker (prospect_id={prospect_id or '?'}). "
+                f"Sekwencja follow-upów aktywna."
             )
-            if c3.button(
-                "📤 Wyślij",
-                key=f"send-{draft_id}",
-                disabled=send_disabled,
-                help=(
-                    "DRY_RUN=true - wysyłka zablokowana" if settings.dry_run
-                    else "Brak kampanii do wysłania" if selected_campaign_id is None
-                    else "Push do Woodpeckera, start sekwencji follow-upów"
-                ),
-                type="primary",
-            ):
-                try:
-                    from agent.push_to_sender import push_draft
-                    with st.spinner(f"Wysyłam draft #{draft_id} do Woodpecker..."):
-                        prospect_id = push_draft(draft_id, selected_campaign_id)
-                    st.success(
-                        f"✅ Wysłany do Woodpecker (prospect_id={prospect_id or '?'}). "
-                        f"Sekwencja follow-upów aktywna."
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Wysyłka padła: {exc}")
+    if c4.button("✏️ Edytuj", key=f"edit-{draft_id}"):
+        st.session_state[f"edit_mode_{draft_id}"] = True
+        # Pre-seed edit field values z aktualnym stanem DB
+        for field in ("subject", "snippet1", "snippet2", "snippet3", "snippet4", "snippet5"):
+            st.session_state[f"edit_{field}_{draft_id}"] = d[field] or ""
+        st.rerun()
+
+
+def _assemble_draft_text(
+    subject: str, s1: str, s2: str, s3: str, s4: str | None, s5: str
+) -> str:
+    """Compose body text dla podglądu/zapisu. None i pusty snippet4 dopuszczalny."""
+    parts = [f"Subject: {subject}", "", s1, "", s2, "", s3]
+    if s4 and s4.strip():
+        parts.extend(["", s4])
+    parts.extend(["", s5])
+    return "\n".join(parts)
+
+
+def _render_draft_editor(d: dict, provider: str, model: str) -> None:
+    """Tryb edycji: text inputs per pole + regenerate buttons + Save/Cancel."""
+    draft_id = d["id"]
+
+    st.caption(
+        "💡 Edytujesz draft ręcznie. Po zapisie zostanie oznaczony jako 'edytowany'. "
+        "Możesz też wygenerować alternatywną wersję każdego pola przyciskiem 🎲."
+    )
+
+    def _field_row(label: str, field_name: str, height: int | None = None) -> str:
+        col_input, col_regen = st.columns([5, 1])
+        key = f"edit_{field_name}_{draft_id}"
+        if height is None:
+            value = col_input.text_input(label, key=key)
+        else:
+            value = col_input.text_area(label, key=key, height=height)
+        if col_regen.button(
+            "🎲 Inna",
+            key=f"regen_{field_name}_{draft_id}",
+            help=f"Wygeneruj alternatywną wersję dla {field_name} (LLM call ~$0.001)",
+        ):
+            try:
+                from agent.generate import regenerate_snippet
+                with st.spinner(f"Generuję alternatywę dla {field_name}..."):
+                    new_text = regenerate_snippet(
+                        draft_id, field_name,
+                        provider=provider, model=model,
                     )
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Wysyłka padła: {exc}")
-            c4.button("✏️ Edytuj (TODO)", key=f"edit-{draft_id}", disabled=True)
+                st.session_state[key] = new_text
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Regeneracja padła: {exc}")
+        return value
+
+    new_subject = _field_row("📨 Subject", "subject")
+    new_s1 = _field_row("Otwarcie (snippet1)", "snippet1", height=80)
+    new_s2 = _field_row("Most do oferty (snippet2)", "snippet2", height=80)
+    new_s3 = _field_row("Propozycja wartości (snippet3)", "snippet3", height=100)
+    new_s4 = _field_row("Social proof (snippet4, opcjonalny)", "snippet4", height=80)
+    new_s5 = _field_row("CTA (snippet5)", "snippet5", height=80)
+
+    st.markdown("**Podgląd po edycji:**")
+    st.text(_assemble_draft_text(new_subject, new_s1, new_s2, new_s3, new_s4 or None, new_s5))
+
+    sc1, sc2 = st.columns([1, 1])
+    if sc1.button("💾 Zapisz zmiany", key=f"save_{draft_id}", type="primary"):
+        try:
+            _save_draft_edits(
+                draft_id, new_subject, new_s1, new_s2, new_s3,
+                new_s4 or None, new_s5,
+            )
+            st.session_state.pop(f"edit_mode_{draft_id}", None)
+            # Wyczyść field cache żeby przy kolejnym Edytuj re-seedowało z DB
+            for f in ("subject", "snippet1", "snippet2", "snippet3", "snippet4", "snippet5"):
+                st.session_state.pop(f"edit_{f}_{draft_id}", None)
+            st.success("Zmiany zapisane.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Zapis padł: {exc}")
+    if sc2.button("❌ Anuluj", key=f"cancel_{draft_id}"):
+        st.session_state.pop(f"edit_mode_{draft_id}", None)
+        for f in ("subject", "snippet1", "snippet2", "snippet3", "snippet4", "snippet5"):
+            st.session_state.pop(f"edit_{f}_{draft_id}", None)
+        st.rerun()
+
+
+def _save_draft_edits(
+    draft_id: int,
+    subject: str,
+    s1: str, s2: str, s3: str,
+    s4: str | None, s5: str,
+) -> None:
+    """Persist edits: scrub AI artifacts + rebuild full_preview + flag edited."""
+    from agent.generate import _strip_ai_artifacts
+
+    def _clean(t: str | None) -> str | None:
+        if t is None:
+            return None
+        cleaned = _strip_ai_artifacts(t)
+        # _strip_ai_artifacts może zwrócić "" gdy wszystko było clichém - zachowaj original wtedy
+        return cleaned if cleaned else t
+
+    clean_subject = _clean(subject) or subject
+    clean_s1 = _clean(s1) or s1
+    clean_s2 = _clean(s2) or s2
+    clean_s3 = _clean(s3) or s3
+    clean_s4 = _clean(s4) if s4 and s4.strip() else None
+    clean_s5 = _clean(s5) or s5
+
+    with SessionLocal() as session:
+        draft = session.get(EmailDraft, draft_id)
+        if draft is None:
+            raise ValueError(f"Draft #{draft_id} zniknął.")
+        draft.subject = clean_subject
+        draft.snippet1 = clean_s1
+        draft.snippet2 = clean_s2
+        draft.snippet3 = clean_s3
+        draft.snippet4 = clean_s4
+        draft.snippet5 = clean_s5
+        draft.full_preview = _assemble_draft_text(
+            clean_subject, clean_s1, clean_s2, clean_s3, clean_s4, clean_s5,
+        )
+        draft.edited_by_user = True
+        session.add(
+            Event(
+                level="INFO",
+                source="gui",
+                type="draft_edited",
+                message=f"Draft #{draft_id} edited by user via GUI",
+            )
+        )
+        session.commit()
 
 
 def render_logs() -> None:

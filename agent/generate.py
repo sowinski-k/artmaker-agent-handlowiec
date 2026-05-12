@@ -494,6 +494,139 @@ def generate_draft_for_lead(
         return draft.id
 
 
+SNIPPET_INSTRUCTIONS = {
+    "subject": (
+        "Wygeneruj alternatywny temat maila (subject). Max 50 znaków. "
+        "Format pytanie/liczba/konkret. Nie używaj 'Oferta:', 'Propozycja'. "
+        "Test: czy w skrzynce ten subject się otwiera bez zastanowienia?"
+    ),
+    "snippet1": (
+        "Wygeneruj alternatywne otwarcie maila. MUSI nawiązać do konkretnego "
+        "haka z researchu (dostarczonego niżej). Bez 'Dzień dobry'. Zacznij od "
+        "konkretu - pytanie, obserwacja, liczba. Max 2 zdania."
+    ),
+    "snippet2": (
+        "Wygeneruj alternatywny most do oferty - kim jesteś (1 zdanie) i czemu "
+        "piszesz akurat do nich. Max 2 zdania, naturalny ton."
+    ),
+    "snippet3": (
+        "Wygeneruj alternatywną konkretną ofertę zgodną z offer_track (b2b_panel "
+        "= panel B2B z magazynu, dostawa 24h, minimum 1000 zł, gratis transport, "
+        "URL b2b.sowins.pl; private_label = produkcja Chiny + MOQ 300-1000szt). "
+        "Liczby, terminy. Bez 'rewolucyjny', 'wyjątkowy', 'innowacyjny'."
+    ),
+    "snippet4": (
+        "Wygeneruj alternatywny social proof / konkretną liczbę. Tylko AUTENTYCZNE - "
+        "lepiej zwróć pusty string jeśli nic prawdziwego nie ma sensu wpisać."
+    ),
+    "snippet5": (
+        "Wygeneruj alternatywne CTA. MUSI być pytaniem z niskim wysiłkiem dla "
+        "odbiorcy. Np. 'Wysłać cennik?', 'Otworzysz 10 min w piątek po 14?'."
+    ),
+}
+
+
+def regenerate_snippet(
+    draft_id: int,
+    snippet_name: str,
+    *,
+    user_instruction: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Wygeneruj alternatywną wersję jednego konkretnego snippetu.
+
+    NIE zapisuje do DB - zwraca nowy tekst, caller decyduje czy podstawić.
+    Pozwala userowi w GUI klikać 'inna wersja' aż znajdzie coś co mu pasuje.
+
+    Args:
+        draft_id: ID istniejącego draftu (do kontekstu - hooki, segment leada)
+        snippet_name: jeden z 'subject', 'snippet1'..'snippet5'
+        user_instruction: opcjonalna instrukcja od usera, np. 'krócej',
+            'bardziej formalnie', 'wspomnij o ich Instagramie'
+        provider, model: jak zwykle, default z settings
+
+    Returns: pojedynczy string (nowy tekst snippetu, scrubbed z AI artifacts).
+    """
+    if snippet_name not in SNIPPET_INSTRUCTIONS:
+        raise ValueError(
+            f"snippet_name={snippet_name!r} - dozwolone: {list(SNIPPET_INSTRUCTIONS)}"
+        )
+
+    provider = (provider or settings.llm_provider).lower()
+    if provider == "anthropic":
+        model = model or settings.anthropic_model
+    elif provider == "gemini":
+        model = model or settings.gemini_model
+
+    with SessionLocal() as session:
+        draft = session.get(EmailDraft, draft_id)
+        if draft is None:
+            raise ValueError(f"Draft #{draft_id} nie istnieje.")
+        lead = session.get(Lead, draft.lead_id)
+        if lead is None:
+            raise ValueError(f"Lead #{draft.lead_id} dla draftu #{draft_id} zniknął.")
+
+        # Kontekst: aktualny stan całego maila + hooki researchu
+        rd = lead.research_data or {}
+        hooks = rd.get("concrete_hooks") or []
+        hook_lines = "\n".join(
+            f"- {h.get('text', '').strip()}" for h in hooks if h.get("text")
+        ) or "(brak haków)"
+        current_snippets = {
+            "subject": draft.subject or "",
+            "snippet1": draft.snippet1 or "",
+            "snippet2": draft.snippet2 or "",
+            "snippet3": draft.snippet3 or "",
+            "snippet4": draft.snippet4 or "",
+            "snippet5": draft.snippet5 or "",
+        }
+        current_block = "\n".join(
+            f"  [{k}{' <- DO ZMIANY' if k == snippet_name else ''}]: {v}"
+            for k, v in current_snippets.items()
+        )
+        company = lead.company_name
+
+    # Reuse istniejący persona+rules system prompt, plus szczególna instrukcja
+    base_system = _build_system_prompt()
+    specific = SNIPPET_INSTRUCTIONS[snippet_name]
+
+    user_clause = (
+        f"\nDodatkowa instrukcja od użytkownika: {user_instruction.strip()}\n"
+        if user_instruction and user_instruction.strip() else ""
+    )
+
+    user_prompt = (
+        f"## Lead\n"
+        f"Firma: {company}\n"
+        f"Haki researchowe:\n{hook_lines}\n\n"
+        f"## Aktualny stan maila\n"
+        f"{current_block}\n\n"
+        f"## Twoje zadanie\n"
+        f"{specific}\n"
+        f"{user_clause}"
+        f"\nZwróć WYŁĄCZNIE nowy tekst dla {snippet_name} jako jednolite pole 'text'. "
+        f"Bez metadanych, bez wyjaśnień, bez nazwy snippetu w wartości."
+    )
+
+    # Maleńka pydantic struct dla single-field outputu
+    class SnippetOnly(BaseModel):
+        text: str = Field(description="Nowy tekst snippetu (sam tekst, nic więcej)")
+
+    payload, _usage = parse_structured(
+        provider=provider, model=model,
+        system=base_system, user=user_prompt,
+        output_schema=SnippetOnly,
+        max_tokens=2048,
+        temperature=DRAFT_TEMPERATURE,
+    )
+    new_text = _strip_ai_artifacts(payload.text) or payload.text
+    logger.bind(source="generate").info(
+        f"Regenerated {snippet_name} for draft #{draft_id}: {new_text[:60]!r}..."
+    )
+    return new_text
+
+
 def _assemble_preview(payload: EmailDraftPayload) -> str:
     """Stitch snippets into a human-readable preview body."""
     parts = [
