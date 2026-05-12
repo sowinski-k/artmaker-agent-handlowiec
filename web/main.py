@@ -65,7 +65,12 @@ from web.auth import (
     validate_email,
     verify_password,
 )
-from web.jobs_dispatcher import create_job, find_active_job, serialize_job
+from web.jobs_dispatcher import count_active_jobs, create_job, find_active_job, serialize_job
+
+# Maks ile DISCOVERY/BULK_RESEARCH jobow moze byc w queue per workspace.
+# Worker przetwarza sekwencyjnie - ten cap to ochrona przed spamem + uzasadnienie
+# dla 409 (user widzi 'kolejka pelna, anuluj cos').
+MAX_CONCURRENT_HEAVY_JOBS = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS") or 3)
 
 
 # ─── Config ──────────────────────────────────────────────────────────────
@@ -891,7 +896,7 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
         GooglePlacesSource, run_search, score_relevance_batch,
     )
 
-    payload.max_per_source = max(1, min(payload.max_per_source, 200))
+    payload.max_per_source = max(1, min(payload.max_per_source, 100))
     today_done = _discovery_today_count(cur.workspace_id)
     if today_done >= DISCOVERY_DAILY_CAP_FREE:
         raise HTTPException(
@@ -967,7 +972,7 @@ def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current
     Twardy cap: DISCOVERY_DAILY_CAP_FREE leadów / dzień / workspace żeby nie
     spalić budżetu Apify / LLM. W przyszłości per-plan limits.
     """
-    payload.max_per_source = max(1, min(payload.max_per_source, 200))
+    payload.max_per_source = max(1, min(payload.max_per_source, 100))
     today_done = _discovery_today_count(cur.workspace_id)
     if today_done >= DISCOVERY_DAILY_CAP_FREE:
         raise HTTPException(
@@ -976,18 +981,23 @@ def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current
                    f"wyczerpany. Spróbuj jutro.",
         )
     with SessionLocal() as session:
-        active = find_active_job(
+        active_count = count_active_jobs(
             session, cur.workspace_id,
             job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
         )
-        if active is not None:
+        if active_count >= MAX_CONCURRENT_HEAVY_JOBS:
+            active = find_active_job(
+                session, cur.workspace_id,
+                job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
+            )
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "msg": "Już chodzi job pozyskiwania - poczekaj albo anuluj.",
-                    "active_job_id": active.id,
-                    "active_job_type": active.type,
-                    "active_job_status": active.status,
+                    "msg": f"Kolejka pełna ({active_count}/{MAX_CONCURRENT_HEAVY_JOBS} jobów). "
+                           f"Worker robi po kolei - poczekaj aż skończy obecne, albo anuluj któryś.",
+                    "active_job_id": active.id if active else None,
+                    "active_jobs_count": active_count,
+                    "max_concurrent": MAX_CONCURRENT_HEAVY_JOBS,
                 },
             )
         job = create_job(
@@ -995,7 +1005,7 @@ def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current
             workspace_id=cur.workspace_id, user_id=cur.user_id,
             payload=payload.model_dump(),
         )
-    return {"ok": True, "job_id": job.id,
+    return {"ok": True, "job_id": job.id, "queue_position": active_count + 1,
             "daily_used": today_done, "daily_cap": DISCOVERY_DAILY_CAP_FREE}
 
 
@@ -1041,18 +1051,23 @@ def bulk_research(payload: BulkResearchIn, cur: CurrentUser = Depends(get_curren
             detail=f"Za dużo URLi w jednej partii (max {DISCOVERY_DAILY_CAP_FREE}).",
         )
     with SessionLocal() as session:
-        active = find_active_job(
+        active_count = count_active_jobs(
             session, cur.workspace_id,
             job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
         )
-        if active is not None:
+        if active_count >= MAX_CONCURRENT_HEAVY_JOBS:
+            active = find_active_job(
+                session, cur.workspace_id,
+                job_types=[JobType.DISCOVERY_PIPELINE.value, JobType.BULK_RESEARCH_LEADS.value],
+            )
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "msg": "Już chodzi job researchowania - poczekaj albo anuluj.",
-                    "active_job_id": active.id,
-                    "active_job_type": active.type,
-                    "active_job_status": active.status,
+                    "msg": f"Kolejka pełna ({active_count}/{MAX_CONCURRENT_HEAVY_JOBS} jobów). "
+                           f"Worker robi po kolei - poczekaj aż skończy, albo anuluj któryś.",
+                    "active_job_id": active.id if active else None,
+                    "active_jobs_count": active_count,
+                    "max_concurrent": MAX_CONCURRENT_HEAVY_JOBS,
                 },
             )
         job = create_job(

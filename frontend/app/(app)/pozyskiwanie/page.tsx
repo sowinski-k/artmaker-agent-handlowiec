@@ -479,10 +479,13 @@ export default function PozyskiwaniePage() {
                 <input type="text" value={location} onChange={(e) => setLocation(e.target.value)}
                   placeholder="np. Warszawa, Pomorskie" />
               </div>
-              <div className="field" style={{ maxWidth: 160 }}>
-                <label>Max / źródło (1-200)</label>
-                <input type="number" value={maxPerSource} min={1} max={200}
+              <div className="field" style={{ maxWidth: 200 }}>
+                <label>Max / źródło (1-100)</label>
+                <input type="number" value={maxPerSource} min={1} max={100}
                   onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 50)} />
+                <span style={{ fontSize: 11, color: '#6B7280', marginTop: 4, display: 'block' }}>
+                  Twarde limity API: Google Places 60, Apify Maps 50, Allegro 100, LinkedIn 50. Włącz kilka źródeł żeby zwiększyć pulę.
+                </span>
               </div>
             </div>
 

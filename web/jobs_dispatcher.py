@@ -45,8 +45,7 @@ def find_active_job(
     job_types: list[str] | None = None,
 ) -> Job | None:
     """Zwraca pierwszy aktywny (pending lub running) job w workspace dla
-    danego typu (lub wszystkich gdy job_types=None). Uzywane do guarda
-    przeciw double-job tego samego typu.
+    danego typu (lub wszystkich gdy job_types=None).
     """
     from sqlalchemy import select as _sel
     q = _sel(Job).where(
@@ -57,6 +56,24 @@ def find_active_job(
         q = q.where(Job.type.in_(job_types))
     q = q.order_by(Job.created_at.desc()).limit(1)
     return session.execute(q).scalar_one_or_none()
+
+
+def count_active_jobs(
+    session: Session,
+    workspace_id: int,
+    *,
+    job_types: list[str] | None = None,
+) -> int:
+    """Liczy aktywne (pending + running) joby w workspace. Uzywane przez guard
+    na concurrent jobs - pozwalamy mieć kilka w queue ale nie zalewamy."""
+    from sqlalchemy import func as _func, select as _sel
+    q = _sel(_func.count(Job.id)).where(
+        Job.workspace_id == workspace_id,
+        Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+    )
+    if job_types:
+        q = q.where(Job.type.in_(job_types))
+    return int(session.scalar(q) or 0)
 
 
 def serialize_job(job: Job, *, lite: bool = False) -> dict[str, Any]:

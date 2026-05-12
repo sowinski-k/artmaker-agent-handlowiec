@@ -324,13 +324,21 @@ NIE WOLNO używać tych znaków (każdy AI-detektor je łapie):
    Nie "atrakcyjne ceny" tylko "30-40% taniej niż polska hurtownia".
 4. **CTA jako pytanie.** Zamiast "Czekam na odpowiedź" - "Otworzy Pan 10 minut
    we wtorek po 14?" albo "Wysłać Państwu cennik na sztalugi 60x80?"
-5. **Polska forma.** Pan/Pani jeśli decydent jest "po nazwisku" w researchu.
-   Po imieniu (np. Marek, Kasia) jeśli kontakt jest podany imieniem.
-   Jeśli kontaktu brak - bezosobowo, do firmy ("Państwa sklep", "Wasza oferta").
-6. **Naturalny ton.** Możesz użyć kolokwializmów ("krótko", "tak konkretnie",
+5. **JEDNA forma w CAŁYM mailu - Państwo (B2B formal).** Bezwzględnie spójnie
+   od subject do CTA. NIGDY nie mieszaj z "Wy/Wasz/Wasze/Wam/Was". Pisz:
+   - "Państwa sklep", "Państwa oferta", "u Państwa", "Państwa klienci".
+   - NIE: "Wasz sklep", "Wasza oferta", "u Was", "Waszych klientów".
+   Jeśli znamy nazwisko/imię osoby kontaktowej -> dodajemy "Panie Tomaszu" /
+   "Pani Anno" w otwarciu, ale resztą maila nadal "Państwo". Mieszanie
+   Pan/Państwo to OK; mieszanie Państwo/Wy to NIE OK.
+6. **POLSKIE ZNAKI obowiązkowe.** Subject ORAZ całe body MUSZĄ mieć polskie
+   diakrytyki: ą ć ę ł ń ó ś ź ż. Nigdy "produktow" - zawsze "produktów".
+   Nigdy "wspolpraca" - zawsze "współpraca". To MAIL DO POLAKA, brak ogonków
+   wygląda jak masówka z translate.
+7. **Naturalny ton.** Możesz użyć kolokwializmów ("krótko", "tak konkretnie",
    "rzucam temat", "z mojej strony"). Mail ma brzmieć jak napisany szybko
    przez człowieka, nie wypolerowany przez bota.
-7. **Sygnatura prosta.** Bez "Z poważaniem". Po prostu imię + Artmaker.
+8. **Sygnatura prosta.** Bez "Z poważaniem". Po prostu imię + Artmaker.
    snippet5 zawiera CTA-pytanie. Nie pisz sygnatury w snippetach - zostawiamy ją systemowi.
 
 ### Subject - to się ZA NAJWIĘCEJ liczy
