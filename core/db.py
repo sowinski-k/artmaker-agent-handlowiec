@@ -264,9 +264,13 @@ def init_db() -> None:
 def _migrate_workspace_columns() -> None:
     """Dokleja workspace_id do leads/email_drafts/events jeśli stara DB.
 
-    Bezpieczne dla obu Postgres i SQLite. Każdy ALTER osobno w try/except -
-    gdy kolumna już jest, ALTER rzuca błąd i ignorujemy. Idempotent.
+    Bezpieczne dla obu Postgres i SQLite. KAŻDY ALTER w osobnej transakcji -
+    bo Postgres "aborts" transakcję na pierwszym błędzie (column already exists)
+    i wszystkie kolejne ALTERy w tej samej transakcji by się sypały.
+    Idempotent: kolumna już istnieje -> exception zignorowany.
     """
+    import logging
+    log = logging.getLogger("ecombinat.migrate")
     from sqlalchemy import text
     is_pg = not str(settings.db_url).startswith("sqlite")
     migrations = [
@@ -284,13 +288,19 @@ def _migrate_workspace_columns() -> None:
         ("events", "user_id", "INTEGER"),
         ("events", "payload", "JSON" if is_pg else "TEXT"),
     ]
-    with _engine.begin() as conn:
-        for table, column, coltype in migrations:
-            try:
+    added = 0
+    for table, column, coltype in migrations:
+        try:
+            with _engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
-            except Exception:
-                # Kolumna już istnieje - OK, idziemy dalej
-                pass
+                added += 1
+        except Exception as exc:
+            # Kolumna już istnieje (najczęściej) lub tabela nie istnieje - OK
+            msg = str(exc).lower()
+            if "already exists" not in msg and "duplicate column" not in msg:
+                log.warning(f"ALTER TABLE {table} ADD COLUMN {column} skipped: {exc}")
+    if added:
+        log.info(f"Schema migration: added {added} columns")
 
 
 def _ensure_default_workspace() -> None:

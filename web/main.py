@@ -50,6 +50,7 @@ from core.db import (
     SessionLocal,
     User,
     Workspace,
+    WorkspaceMember,
     init_db,
 )
 from web.auth import (
@@ -229,14 +230,10 @@ def login(request: Request, payload: LoginIn, response: Response) -> AuthOut:
 
         # Wybierz najnowszy workspace (jeśli user ma kilka)
         ws = session.execute(
-            select(Workspace).join(
-                Workspace.__table__.join(
-                    __import__("core.db", fromlist=["WorkspaceMember"]).WorkspaceMember.__table__,
-                    Workspace.id == __import__("core.db", fromlist=["WorkspaceMember"]).WorkspaceMember.workspace_id,
-                )
-            ).where(
-                __import__("core.db", fromlist=["WorkspaceMember"]).WorkspaceMember.user_id == user.id,
-            ).order_by(Workspace.created_at.desc())
+            select(Workspace)
+            .join(WorkspaceMember, Workspace.id == WorkspaceMember.workspace_id)
+            .where(WorkspaceMember.user_id == user.id)
+            .order_by(Workspace.created_at.desc())
         ).scalars().first()
 
         if ws is None:
@@ -247,7 +244,20 @@ def login(request: Request, payload: LoginIn, response: Response) -> AuthOut:
             ).scalars().first()
 
         if ws is None:
-            raise HTTPException(status_code=500, detail="Brak workspace - skontaktuj się z administratorem.")
+            log.error(f"User {user.id} has no workspace - creating fallback default")
+            from web.auth import slugify
+            ws_name = (user.name or user.email.split("@")[0])[:255] or "Workspace"
+            base_slug = slugify(ws_name)
+            slug = base_slug
+            n = 1
+            while session.execute(select(Workspace).where(Workspace.slug == slug)).scalar_one_or_none():
+                n += 1
+                slug = f"{base_slug}-{n}"
+            ws = Workspace(name=ws_name, slug=slug, owner_user_id=user.id, plan="free", monthly_credits=100)
+            session.add(ws)
+            session.flush()
+            session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role="owner"))
+            session.commit()
 
         user.last_login_at = datetime.now(timezone.utc)
         session.commit()
