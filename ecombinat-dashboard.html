@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>eCombinat — Hala</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.5.0/dist/tabler-icons.min.css">
+<style>
+  :root {
+    --bg: #FAFAF7;
+    --panel: #FFFFFF;
+    --ink: #111111;
+    --muted: #6B7280;
+    --muted-2: #9CA3AF;
+    --border: #E5E7EB;
+    --border-strong: #D1D5DB;
+    --red: #D4212C;
+    --red-dark: #8F1018;
+    --red-tint: #FDECED;
+    --graphite: #1C1C1C;
+    --graphite-2: #2A2A2A;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .mono { font-family: 'JetBrains Mono', monospace; font-feature-settings: "tnum"; }
+  .tabular { font-feature-settings: "tnum"; font-variant-numeric: tabular-nums; }
+
+  /* ─── LAYOUT ─── */
+  .app {
+    display: grid;
+    grid-template-columns: 224px 1fr;
+    min-height: 100vh;
+  }
+
+  /* ─── SIDEBAR ─── */
+  aside.sidebar {
+    background: var(--graphite);
+    color: #fff;
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+  }
+  .sb-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 18px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 14px;
+  }
+  .sb-logo-mark {
+    width: 28px; height: 28px;
+    background: var(--red);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff;
+  }
+  .sb-logo-mark i { font-size: 16px; }
+  .sb-logo-text {
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: -0.2px;
+  }
+  .sb-logo-env {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--muted-2);
+    padding: 1px 6px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 3px;
+    margin-left: auto;
+  }
+
+  .sb-section {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: rgba(255,255,255,0.4);
+    padding: 12px 10px 4px;
+    font-weight: 600;
+  }
+  .sb-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    color: #D1D5DB;
+    font-size: 13px;
+    cursor: pointer;
+    text-decoration: none;
+    position: relative;
+  }
+  .sb-item:hover { background: rgba(255,255,255,0.05); color: #fff; }
+  .sb-item.active {
+    background: rgba(212,33,44,0.12);
+    color: #fff;
+  }
+  .sb-item.active::before {
+    content: '';
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px; height: 18px;
+    background: var(--red);
+    border-radius: 0 2px 2px 0;
+  }
+  .sb-item i { font-size: 16px; width: 16px; }
+  .sb-item .sb-count {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    color: rgba(255,255,255,0.5);
+  }
+  .sb-item.active .sb-count { color: rgba(255,255,255,0.85); }
+
+  .sb-foot {
+    margin-top: auto;
+    padding: 10px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 6px;
+  }
+  .sb-foot-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; color: rgba(255,255,255,0.6); margin-bottom: 4px;
+  }
+  .sb-foot-row strong { color: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+  .sb-bar {
+    height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden;
+    margin: 6px 0 8px;
+  }
+  .sb-bar > div { height: 100%; background: var(--red); }
+  .sb-foot a {
+    font-size: 11px; color: rgba(255,255,255,0.5); text-decoration: none;
+    display: block; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  .sb-foot a:hover { color: #fff; }
+
+  /* ─── MAIN ─── */
+  main { min-width: 0; }
+
+  /* ─── TOPBAR ─── */
+  .topbar {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    height: 52px;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .crumb {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--muted);
+  }
+  .crumb strong { color: var(--ink); font-weight: 500; }
+  .crumb i { font-size: 12px; color: var(--muted-2); }
+
+  .search {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    width: 280px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .search i { font-size: 14px; }
+  .search .kbd {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: var(--muted);
+  }
+
+  .topbtn {
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 6px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    position: relative;
+    cursor: pointer;
+  }
+  .topbtn:hover { color: var(--ink); border-color: var(--border-strong); }
+  .topbtn .dot {
+    position: absolute; top: 6px; right: 6px;
+    width: 6px; height: 6px;
+    background: var(--red);
+    border-radius: 50%;
+    border: 1.5px solid var(--panel);
+  }
+
+  .avatar {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--graphite);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 12px;
+    border: 2px solid var(--red);
+  }
+
+  /* ─── CONTENT ─── */
+  .content {
+    padding: 24px;
+  }
+
+  .page-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    margin-bottom: 24px;
+    gap: 16px;
+  }
+  .page-head h1 {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.4px;
+    margin-bottom: 4px;
+  }
+  .page-head p {
+    color: var(--muted);
+    font-size: 13.5px;
+  }
+  .page-head p .mono { color: var(--ink); }
+
+  .timerange {
+    display: flex; gap: 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .timerange button {
+    padding: 6px 12px;
+    font-size: 12.5px;
+    font-family: inherit;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+  }
+  .timerange button:last-child { border-right: none; }
+  .timerange button:hover { background: var(--bg); color: var(--ink); }
+  .timerange button.active { background: var(--graphite); color: #fff; }
+
+  /* ─── STAT CARDS ─── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    position: relative;
+  }
+  .stat-label {
+    font-size: 11.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-weight: 500;
+    margin-bottom: 8px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .stat-label i { font-size: 13px; }
+  .stat-value {
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.6px;
+    line-height: 1.1;
+    font-feature-settings: "tnum";
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .stat-value .unit { font-size: 13px; color: var(--muted); font-weight: 400; }
+  .stat-delta {
+    margin-top: 6px;
+    font-size: 11.5px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .stat-delta.up { color: var(--red-dark); }
+  .stat-delta.down { color: var(--muted); }
+  .stat-spark {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    opacity: 0.55;
+  }
+
+  /* ─── GRID ─── */
+  .grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .grid.split {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title i { color: var(--red); font-size: 15px; }
+  .card-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .pill-btn {
+    padding: 3px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 11.5px;
+    color: var(--muted);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .pill-btn:hover { color: var(--ink); border-color: var(--border-strong); }
+  .pill-btn.active { background: var(--graphite); color: #fff; border-color: var(--graphite); }
+
+  .card-body { padding: 16px; }
+
+  /* ─── CHART ─── */
+  .chart-wrap { padding: 8px 4px 0 4px; }
+  .legend {
+    display: flex;
+    gap: 16px;
+    padding: 0 12px 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .legend-dot {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+
+  /* ─── QUEUE / JOBS ─── */
+  .queue-list { padding: 0; }
+  .queue-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .queue-item:last-child { border-bottom: none; }
+  .queue-thumb {
+    width: 36px; height: 36px;
+    border-radius: 6px;
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .queue-thumb i { font-size: 18px; }
+  .queue-thumb.t1 { background: linear-gradient(135deg, #2a2a2a, #8F1018); color: #fff; border: none; }
+  .queue-thumb.t2 { background: linear-gradient(135deg, #1C1C1C, #4a4a4a); color: #fff; border: none; }
+  .queue-thumb.t3 { background: linear-gradient(135deg, #D4212C, #4a0a0e); color: #fff; border: none; }
+  .queue-name {
+    font-weight: 500;
+    font-size: 13px;
+    margin-bottom: 2px;
+  }
+  .queue-meta {
+    font-size: 11.5px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .badge {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .badge.done { background: var(--bg); color: var(--graphite); border: 1px solid var(--border); }
+  .badge.running { background: var(--red-tint); color: var(--red-dark); }
+  .badge.queue { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+  .badge.failed { background: #fef2f2; color: var(--red-dark); border: 1px solid #fecaca; }
+  .queue-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    color: var(--muted);
+    text-align: right;
+    min-width: 50px;
+  }
+
+  /* ─── TABLE ─── */
+  table.tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  table.tbl th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 10px 16px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  table.tbl th.num, table.tbl td.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+  table.tbl td {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.tbl tr:last-child td { border-bottom: none; }
+  table.tbl tr:hover td { background: var(--bg); }
+  .tool-cell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tool-ico {
+    width: 24px; height: 24px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--red);
+  }
+  .tool-ico i { font-size: 14px; }
+
+  .delta-pos { color: var(--red-dark); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .delta-neg { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+
+  /* ─── PIPELINE / FUNNEL ─── */
+  .funnel { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .funnel-row {
+    display: grid;
+    grid-template-columns: 130px 1fr 60px;
+    align-items: center;
+    gap: 12px;
+    font-size: 12.5px;
+  }
+  .funnel-label {
+    color: var(--ink);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .funnel-label i { font-size: 14px; color: var(--muted); }
+  .funnel-bar {
+    height: 18px;
+    background: var(--bg);
+    border-radius: 3px;
+    position: relative;
+    overflow: hidden;
+  }
+  .funnel-fill {
+    height: 100%;
+    background: var(--graphite);
+    display: flex; align-items: center;
+    padding-left: 8px;
+    color: #fff;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .funnel-fill.red { background: var(--red); }
+  .funnel-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: right;
+  }
+
+  /* ─── STATUS DOTS ─── */
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }
+  .status-dot.ok { background: #10B981; box-shadow: 0 0 0 3px rgba(16,185,129,0.15); }
+  .status-dot.warn { background: #F59E0B; }
+  .status-dot.err { background: var(--red); }
+
+  /* ─── ACTIVITY ─── */
+  .activity { padding: 0; }
+  .act-item {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 12.5px;
+  }
+  .act-item:last-child { border-bottom: none; }
+  .act-ico {
+    width: 24px; height: 24px;
+    border-radius: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .act-ico i { font-size: 13px; }
+  .act-ico.red { background: var(--red-tint); border-color: rgba(212,33,44,0.2); color: var(--red); }
+  .act-text { line-height: 1.4; color: var(--muted); }
+  .act-text strong { color: var(--ink); font-weight: 500; }
+  .act-time { color: var(--muted-2); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+
+  /* ─── SYSTEM ─── */
+  .sys-row {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12.5px;
+  }
+  .sys-row:last-child { border-bottom: none; }
+  .sys-label { color: var(--ink); display: flex; align-items: center; }
+  .sys-val { font-family: 'JetBrains Mono', monospace; color: var(--muted); font-size: 12px; }
+
+  .last-update {
+    font-size: 11px;
+    color: var(--muted-2);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ─── MINI ─── */
+  .col-3 { grid-column: span 3; }
+  .col-2 { grid-column: span 2; }
+
+  @media (max-width: 1100px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .grid, .grid.split { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 720px) {
+    .app { grid-template-columns: 1fr; }
+    aside.sidebar { display: none; }
+    .search { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ═══════════ SIDEBAR ═══════════ -->
+  <aside class="sidebar">
+    <div class="sb-logo">
+      <div class="sb-logo-mark"><i class="ti ti-flame"></i></div>
+      <div class="sb-logo-text">eCombinat</div>
+      <span class="sb-logo-env">PROD</span>
+    </div>
+
+    <div class="sb-section">Hala</div>
+    <a class="sb-item active"><i class="ti ti-layout-dashboard"></i> Pulpit</a>
+    <a class="sb-item"><i class="ti ti-folder"></i> Projekty <span class="sb-count">24</span></a>
+    <a class="sb-item"><i class="ti ti-photo"></i> Biblioteka <span class="sb-count">1.2k</span></a>
+
+    <div class="sb-section">Kuźnia</div>
+    <a class="sb-item"><i class="ti ti-camera"></i> Zdjęcia produktowe</a>
+    <a class="sb-item"><i class="ti ti-video"></i> Wideo <span class="sb-count">3</span></a>
+    <a class="sb-item"><i class="ti ti-wand"></i> Opisy AI</a>
+    <a class="sb-item"><i class="ti ti-eraser"></i> Usuń tło</a>
+    <a class="sb-item"><i class="ti ti-arrows-maximize"></i> Upscaler</a>
+
+    <div class="sb-section">Integracje</div>
+    <a class="sb-item"><i class="ti ti-brand-shopify"></i> Shopify</a>
+    <a class="sb-item"><i class="ti ti-shopping-bag"></i> Allegro</a>
+    <a class="sb-item"><i class="ti ti-api"></i> API</a>
+
+    <div class="sb-foot">
+      <div class="sb-foot-row">Kredyty <strong>847 / 2000</strong></div>
+      <div class="sb-bar"><div style="width: 42%"></div></div>
+      <div class="sb-foot-row" style="margin-bottom: 0;">Odnowienie <strong>za 18 dni</strong></div>
+      <a href="#">↑ Zwiększ plan →</a>
+    </div>
+  </aside>
+
+  <!-- ═══════════ MAIN ═══════════ -->
+  <main>
+
+    <!-- TOPBAR -->
+    <div class="topbar">
+      <div class="crumb">
+        Workspace
+        <i class="ti ti-chevron-right"></i>
+        <strong>Stalownia Marka K.</strong>
+        <i class="ti ti-chevron-right"></i>
+        Pulpit
+      </div>
+
+      <div class="search">
+        <i class="ti ti-search"></i>
+        Szukaj projektów, plików, ustawień…
+        <span class="kbd">⌘K</span>
+      </div>
+
+      <button class="topbtn" title="Nowy projekt"><i class="ti ti-plus"></i></button>
+      <button class="topbtn" title="Powiadomienia"><i class="ti ti-bell"></i><span class="dot"></span></button>
+      <button class="topbtn" title="Pomoc"><i class="ti ti-help"></i></button>
+      <div class="avatar">MK</div>
+    </div>
+
+    <!-- CONTENT -->
+    <div class="content">
+
+      <!-- PAGE HEAD -->
+      <div class="page-head">
+        <div>
+          <h1>Pulpit</h1>
+          <p>Stan kombinatu <span class="mono">·</span> <span class="last-update">aktualizacja 14 s temu</span></p>
+        </div>
+        <div class="timerange">
+          <button>24h</button>
+          <button>7d</button>
+          <button class="active">30d</button>
+          <button>90d</button>
+          <button>YTD</button>
+        </div>
+      </div>
+
+      <!-- STATS -->
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-label"><i class="ti ti-photo"></i> Wykuto materiałów</div>
+          <div class="stat-value tabular">1 284</div>
+          <div class="stat-delta up"><i class="ti ti-arrow-up-right"></i> +312 (+32.1%)</div>
+          <svg class="stat-spark" width="80" height="28" viewBox="0 0 80 28">
+            <polyline fill="none" stroke="#D4212C" stroke-width="1.5" points="0,22 8,20 16,18 24,19 32,15 40,16 48,11 56,12 64,7 72,8 80,4" />
+          </svg>
+        </div>
+        <div class="stat">
+          <div class="stat-label"><i class="ti ti-coin"></i> Zużyte kredyty</div>
+          <div class="stat-value tabular">847 <span class="unit">/ 2 000</span></div>
+          <div class="stat-delta">≈ 28.2 dziennie · pozostało 18 d</div>
+          <svg class="stat-spark" width="80" height="28" viewBox="0 0 80 28">
+            <polyline fill="none" stroke="#6B7280" stroke-width="1.5" points="0,24 10,22 20,20 30,18 40,16 50,14 60,12 70,10 80,8" />
+          </svg>
+        </div>
+        <div class="stat">
+          <div class="stat-label"><i class="ti ti-eye"></i> CTR karty produktu</div>
+          <div class="stat-value tabular">4.7<span class="unit">%</span></div>
+          <div class="stat-delta up"><i class="ti ti-arrow-up-right"></i> +1.2 pp · vs poprzedni okres</div>
+          <svg class="stat-spark" width="80" height="28" viewBox="0 0 80 28">
+            <polyline fill="none" stroke="#D4212C" stroke-width="1.5" points="0,18 8,20 16,16 24,17 32,12 40,14 48,10 56,8 64,9 72,5 80,6" />
+          </svg>
+        </div>
+        <div class="stat">
+          <div class="stat-label"><i class="ti ti-cash"></i> Oszczędność vs sesja</div>
+          <div class="stat-value tabular">14 280<span class="unit">zł</span></div>
+          <div class="stat-delta">vs 3 sesje fotograficzne · 30 d</div>
+          <svg class="stat-spark" width="80" height="28" viewBox="0 0 80 28">
+            <polyline fill="none" stroke="#8F1018" stroke-width="1.5" points="0,26 12,22 24,20 36,16 48,12 60,9 72,6 80,4" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- ROW 1: CHART + JOBS -->
+      <div class="grid">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-chart-area"></i> Produkcja materiałów</div>
+            <div class="card-actions">
+              <button class="pill-btn active">Zdjęcia</button>
+              <button class="pill-btn">Wideo</button>
+              <button class="pill-btn">Opisy</button>
+              <button class="pill-btn" style="margin-left: 6px;"><i class="ti ti-download" style="font-size: 12px;"></i></button>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <div class="legend">
+              <span><span class="legend-dot" style="background: var(--red);"></span>Wykuto</span>
+              <span><span class="legend-dot" style="background: var(--graphite);"></span>Pobrano</span>
+              <span><span class="legend-dot" style="background: var(--border-strong);"></span>Odrzucono</span>
+            </div>
+            <svg viewBox="0 0 640 220" width="100%" height="220" preserveAspectRatio="none">
+              <!-- gridlines -->
+              <g stroke="#E5E7EB" stroke-width="0.5">
+                <line x1="40" y1="20" x2="630" y2="20" />
+                <line x1="40" y1="65" x2="630" y2="65" />
+                <line x1="40" y1="110" x2="630" y2="110" />
+                <line x1="40" y1="155" x2="630" y2="155" />
+                <line x1="40" y1="200" x2="630" y2="200" stroke="#D1D5DB"/>
+              </g>
+              <!-- y axis labels -->
+              <g font-family="JetBrains Mono" font-size="9" fill="#9CA3AF">
+                <text x="0" y="23">80</text>
+                <text x="0" y="68">60</text>
+                <text x="0" y="113">40</text>
+                <text x="0" y="158">20</text>
+                <text x="0" y="203">0</text>
+              </g>
+              <!-- x axis labels -->
+              <g font-family="JetBrains Mono" font-size="9" fill="#9CA3AF" text-anchor="middle">
+                <text x="60" y="215">1.04</text>
+                <text x="155" y="215">8.04</text>
+                <text x="250" y="215">15.04</text>
+                <text x="345" y="215">22.04</text>
+                <text x="440" y="215">29.04</text>
+                <text x="535" y="215">6.05</text>
+                <text x="625" y="215">12.05</text>
+              </g>
+              <!-- area fill - red -->
+              <path d="M 60,170 L 100,160 L 140,150 L 180,140 L 220,125 L 260,130 L 300,115 L 340,100 L 380,105 L 420,85 L 460,75 L 500,70 L 540,55 L 580,45 L 620,30 L 620,200 L 60,200 Z"
+                    fill="#D4212C" opacity="0.08" />
+              <!-- area line - red (Wykuto) -->
+              <path d="M 60,170 L 100,160 L 140,150 L 180,140 L 220,125 L 260,130 L 300,115 L 340,100 L 380,105 L 420,85 L 460,75 L 500,70 L 540,55 L 580,45 L 620,30"
+                    fill="none" stroke="#D4212C" stroke-width="2" stroke-linejoin="round" />
+              <!-- area line - graphite (Pobrano) -->
+              <path d="M 60,180 L 100,175 L 140,168 L 180,160 L 220,155 L 260,158 L 300,148 L 340,140 L 380,138 L 420,120 L 460,115 L 500,108 L 540,98 L 580,90 L 620,75"
+                    fill="none" stroke="#1C1C1C" stroke-width="1.5" stroke-linejoin="round" />
+              <!-- dashed - odrzucono -->
+              <path d="M 60,195 L 100,193 L 140,194 L 180,192 L 220,193 L 260,190 L 300,191 L 340,188 L 380,189 L 420,185 L 460,186 L 500,183 L 540,184 L 580,180 L 620,178"
+                    fill="none" stroke="#D1D5DB" stroke-width="1.2" stroke-dasharray="3,3" />
+              <!-- highlight today -->
+              <line x1="620" y1="20" x2="620" y2="200" stroke="#D4212C" stroke-width="0.8" stroke-dasharray="2,3" opacity="0.4" />
+              <circle cx="620" cy="30" r="3.5" fill="#D4212C" />
+              <circle cx="620" cy="30" r="6" fill="#D4212C" opacity="0.2" />
+              <!-- callout -->
+              <g transform="translate(540, 8)">
+                <rect width="80" height="18" rx="3" fill="#1C1C1C"/>
+                <text x="40" y="12" font-family="JetBrains Mono" font-size="10" fill="#fff" text-anchor="middle">dziś · 67</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-stack-2"></i> Kolejka pieca</div>
+            <div class="card-actions">
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px;"><span class="status-dot ok"></span>4 aktywne</span>
+            </div>
+          </div>
+          <div class="queue-list">
+            <div class="queue-item">
+              <div class="queue-thumb t1"><i class="ti ti-photo"></i></div>
+              <div>
+                <div class="queue-name">Whisky Reserve · butelka</div>
+                <div class="queue-meta">4 warianty · 1:1 · seed 4821</div>
+              </div>
+              <span class="badge running">kuje</span>
+              <span class="queue-time">0:34</span>
+            </div>
+            <div class="queue-item">
+              <div class="queue-thumb t2"><i class="ti ti-video"></i></div>
+              <div>
+                <div class="queue-name">Buty skórzane · klip 8s</div>
+                <div class="queue-meta">9:16 · 1080p · seed 0917</div>
+              </div>
+              <span class="badge running">kuje</span>
+              <span class="queue-time">1:42</span>
+            </div>
+            <div class="queue-item">
+              <div class="queue-thumb"><i class="ti ti-wand"></i></div>
+              <div>
+                <div class="queue-name">Opisy SEO · 12 SKU</div>
+                <div class="queue-meta">PL+EN+DE · ton: premium</div>
+              </div>
+              <span class="badge queue">kolejka</span>
+              <span class="queue-time">—</span>
+            </div>
+            <div class="queue-item">
+              <div class="queue-thumb t3"><i class="ti ti-eraser"></i></div>
+              <div>
+                <div class="queue-name">Batch usuwania tła</div>
+                <div class="queue-meta">82 / 200 plików</div>
+              </div>
+              <span class="badge running">kuje</span>
+              <span class="queue-time">3:08</span>
+            </div>
+            <div class="queue-item">
+              <div class="queue-thumb"><i class="ti ti-arrows-maximize"></i></div>
+              <div>
+                <div class="queue-name">Upscale · katalog jesień</div>
+                <div class="queue-meta">47 plików · 2× → 4×</div>
+              </div>
+              <span class="badge done">gotowe</span>
+              <span class="queue-time">12:03</span>
+            </div>
+            <div class="queue-item">
+              <div class="queue-thumb"><i class="ti ti-photo"></i></div>
+              <div>
+                <div class="queue-name">Zegarek Tissot · detal</div>
+                <div class="queue-meta">timeout API · retry 2/3</div>
+              </div>
+              <span class="badge failed">błąd</span>
+              <span class="queue-time">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ROW 2: TABLE + FUNNEL -->
+      <div class="grid">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-table"></i> Wykorzystanie narzędzi</div>
+            <div class="card-actions">
+              <span style="font-size: 11.5px;">30 dni</span>
+              <button class="pill-btn"><i class="ti ti-dots" style="font-size: 12px;"></i></button>
+            </div>
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>Narzędzie</th>
+                <th class="num">Uruchomień</th>
+                <th class="num">Kredyty</th>
+                <th class="num">Sukces</th>
+                <th class="num">vs 30d</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><div class="tool-cell"><div class="tool-ico"><i class="ti ti-camera"></i></div> Zdjęcia produktowe</div></td>
+                <td class="num">487</td>
+                <td class="num">412</td>
+                <td class="num">98.4%</td>
+                <td class="num"><span class="delta-pos">+34%</span></td>
+              </tr>
+              <tr>
+                <td><div class="tool-cell"><div class="tool-ico"><i class="ti ti-video"></i></div> Wideo produktowe</div></td>
+                <td class="num">52</td>
+                <td class="num">208</td>
+                <td class="num">94.2%</td>
+                <td class="num"><span class="delta-pos">+121%</span></td>
+              </tr>
+              <tr>
+                <td><div class="tool-cell"><div class="tool-ico"><i class="ti ti-wand"></i></div> Opisy AI</div></td>
+                <td class="num">312</td>
+                <td class="num">94</td>
+                <td class="num">99.7%</td>
+                <td class="num"><span class="delta-pos">+12%</span></td>
+              </tr>
+              <tr>
+                <td><div class="tool-cell"><div class="tool-ico"><i class="ti ti-eraser"></i></div> Usuwanie tła</div></td>
+                <td class="num">218</td>
+                <td class="num">87</td>
+                <td class="num">99.1%</td>
+                <td class="num"><span class="delta-neg">−8%</span></td>
+              </tr>
+              <tr>
+                <td><div class="tool-cell"><div class="tool-ico"><i class="ti ti-arrows-maximize"></i></div> Upscaler 4K</div></td>
+                <td class="num">94</td>
+                <td class="num">46</td>
+                <td class="num">100%</td>
+                <td class="num"><span class="delta-pos">+4%</span></td>
+              </tr>
+              <tr>
+                <td><div class="tool-cell"><div class="tool-ico"><i class="ti ti-color-swatch"></i></div> Brand kit</div></td>
+                <td class="num">121</td>
+                <td class="num">0</td>
+                <td class="num">—</td>
+                <td class="num"><span class="delta-pos">+18%</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-funnel"></i> Pipeline produkcji</div>
+            <div class="card-actions"><span style="font-size: 11.5px;">30 dni</span></div>
+          </div>
+          <div class="card-body">
+            <div class="funnel">
+              <div class="funnel-row">
+                <div class="funnel-label"><i class="ti ti-upload"></i> Wsad</div>
+                <div class="funnel-bar"><div class="funnel-fill red" style="width: 100%;">1 284</div></div>
+                <div class="funnel-num">100%</div>
+              </div>
+              <div class="funnel-row">
+                <div class="funnel-label"><i class="ti ti-flame"></i> Wykute</div>
+                <div class="funnel-bar"><div class="funnel-fill red" style="width: 96%; background: #B91D26;">1 233</div></div>
+                <div class="funnel-num">96.0%</div>
+              </div>
+              <div class="funnel-row">
+                <div class="funnel-label"><i class="ti ti-check"></i> Zaakceptowane</div>
+                <div class="funnel-bar"><div class="funnel-fill" style="width: 73%;">937</div></div>
+                <div class="funnel-num">73.0%</div>
+              </div>
+              <div class="funnel-row">
+                <div class="funnel-label"><i class="ti ti-download"></i> Pobrane</div>
+                <div class="funnel-bar"><div class="funnel-fill" style="width: 64%; background: #2A2A2A;">821</div></div>
+                <div class="funnel-num">64.0%</div>
+              </div>
+              <div class="funnel-row">
+                <div class="funnel-label"><i class="ti ti-brand-shopify"></i> Wypchnięte</div>
+                <div class="funnel-bar"><div class="funnel-fill" style="width: 51%; background: #444;">655</div></div>
+                <div class="funnel-num">51.0%</div>
+              </div>
+            </div>
+            <div style="border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between;">
+              <span>Średni koszt akceptowanego materiału</span>
+              <strong class="mono" style="color: var(--ink); font-weight: 600;">0.90 kr.</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ROW 3: ACTIVITY + SYSTEM + TIPS -->
+      <div class="grid split">
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-activity"></i> Ostatnia aktywność</div>
+            <div class="card-actions"><a href="#" style="font-size: 11.5px; color: var(--muted); text-decoration: none;">Wszystkie →</a></div>
+          </div>
+          <div class="activity">
+            <div class="act-item">
+              <div class="act-ico red"><i class="ti ti-photo"></i></div>
+              <div class="act-text"><strong>Anna B.</strong> wykuła 8 wariantów dla <strong>Whisky Reserve</strong></div>
+              <span class="act-time">14:32</span>
+            </div>
+            <div class="act-item">
+              <div class="act-ico"><i class="ti ti-brand-shopify"></i></div>
+              <div class="act-text"><strong>Auto-push</strong> wysłał 12 zdjęć do Shopify</div>
+              <span class="act-time">14:18</span>
+            </div>
+            <div class="act-item">
+              <div class="act-ico red"><i class="ti ti-video"></i></div>
+              <div class="act-text"><strong>Ty</strong> wygenerowałeś klip <strong>Buty skórzane 8s</strong></div>
+              <span class="act-time">13:54</span>
+            </div>
+            <div class="act-item">
+              <div class="act-ico"><i class="ti ti-x"></i></div>
+              <div class="act-text"><strong>Job #2841</strong> przerwany — limit treści</div>
+              <span class="act-time">13:41</span>
+            </div>
+            <div class="act-item">
+              <div class="act-ico"><i class="ti ti-user-plus"></i></div>
+              <div class="act-text"><strong>Tomek N.</strong> dołączył do workspace</div>
+              <span class="act-time">12:08</span>
+            </div>
+            <div class="act-item">
+              <div class="act-ico red"><i class="ti ti-wand"></i></div>
+              <div class="act-text">Batch <strong>Opisy SEO · 47 SKU</strong> ukończony</div>
+              <span class="act-time">11:22</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-server"></i> Stan systemu</div>
+            <div class="card-actions"><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px;"><span class="status-dot ok"></span>operational</span></div>
+          </div>
+          <div>
+            <div class="sys-row">
+              <span class="sys-label"><span class="status-dot ok"></span> API kuźni</span>
+              <span class="sys-val">142 ms · p99</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label"><span class="status-dot ok"></span> Generator zdjęć</span>
+              <span class="sys-val">~14 s / job</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label"><span class="status-dot warn"></span> Generator wideo</span>
+              <span class="sys-val">kolejka +47 s</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label"><span class="status-dot ok"></span> Shopify sync</span>
+              <span class="sys-val">2 min temu</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label"><span class="status-dot ok"></span> Allegro sync</span>
+              <span class="sys-val">4 min temu</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label"><span class="status-dot ok"></span> Storage</span>
+              <span class="sys-val">38.4 / 100 GB</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label">Region</span>
+              <span class="sys-val">eu-central-1 · Frankfurt</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><i class="ti ti-bookmark"></i> Skróty</div>
+            <div class="card-actions"><span style="font-size: 11.5px;">ulubione</span></div>
+          </div>
+          <div>
+            <div class="sys-row" style="cursor: pointer;">
+              <span class="sys-label" style="gap: 8px; display: flex; align-items: center;"><div class="tool-ico"><i class="ti ti-camera"></i></div> Nowy projekt zdjęciowy</span>
+              <i class="ti ti-arrow-right" style="color: var(--muted-2); font-size: 14px;"></i>
+            </div>
+            <div class="sys-row" style="cursor: pointer;">
+              <span class="sys-label" style="gap: 8px; display: flex; align-items: center;"><div class="tool-ico"><i class="ti ti-template"></i></div> Wczytaj brand kit</span>
+              <i class="ti ti-arrow-right" style="color: var(--muted-2); font-size: 14px;"></i>
+            </div>
+            <div class="sys-row" style="cursor: pointer;">
+              <span class="sys-label" style="gap: 8px; display: flex; align-items: center;"><div class="tool-ico"><i class="ti ti-upload"></i></div> Import z Shopify</span>
+              <i class="ti ti-arrow-right" style="color: var(--muted-2); font-size: 14px;"></i>
+            </div>
+            <div class="sys-row" style="cursor: pointer;">
+              <span class="sys-label" style="gap: 8px; display: flex; align-items: center;"><div class="tool-ico"><i class="ti ti-file-export"></i></div> Eksport raportu</span>
+              <i class="ti ti-arrow-right" style="color: var(--muted-2); font-size: 14px;"></i>
+            </div>
+            <div class="sys-row" style="cursor: pointer;">
+              <span class="sys-label" style="gap: 8px; display: flex; align-items: center;"><div class="tool-ico"><i class="ti ti-key"></i></div> Klucze API</span>
+              <i class="ti ti-arrow-right" style="color: var(--muted-2); font-size: 14px;"></i>
+            </div>
+            <div class="sys-row" style="cursor: pointer;">
+              <span class="sys-label" style="gap: 8px; display: flex; align-items: center;"><div class="tool-ico"><i class="ti ti-users"></i></div> Zaproś zespół</span>
+              <i class="ti ti-arrow-right" style="color: var(--muted-2); font-size: 14px;"></i>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </main>
+</div>
+
+</body>
+</html>
