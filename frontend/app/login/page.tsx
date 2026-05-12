@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
+import { login } from '@/lib/api';
+
 export default function LoginPage() {
   const router = useRouter();
   const [password, setPassword] = useState('');
@@ -15,20 +17,10 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-        credentials: 'include',
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.detail || 'Złe hasło.');
-        return;
-      }
+      await login(password);
       router.push('/pulpit');
     } catch (err) {
-      setError('Błąd połączenia z serwerem.');
+      setError(err instanceof Error ? err.message : 'Błąd logowania.');
     } finally {
       setLoading(false);
     }

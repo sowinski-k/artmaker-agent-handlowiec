@@ -1,9 +1,16 @@
 /* Pulpit - dashboard 1:1 z ecombinat-dashboard.html.
- * Server Component - fetches /api/dashboard SSR.
- * Wszystkie liczby z mock'a teraz (web/main.py) -> commit 2 podłączy real DB.
+ *
+ * Client Component - fetchuje dane client-side z localStorage token.
+ * SSR pomijamy bo cross-origin cookies sa problematyczne. Render
+ * loading state -> fetch -> render data. Acceptable dla protected pages.
  */
 
-import { headers } from 'next/headers';
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+
+import { api, getToken } from '@/lib/api';
 
 interface DashboardData {
   stats: {
@@ -30,28 +37,51 @@ interface ActivityItem {
   time: string;
 }
 
-async function fetchDashboard(): Promise<DashboardData> {
-  const cookieHeader = (await headers()).get('cookie') || '';
-  const res = await fetch(`${process.env.BACKEND_URL || 'http://localhost:8000'}/api/dashboard`, {
-    headers: { cookie: cookieHeader },
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error('Nie udało się pobrać dashboard');
-  return res.json();
-}
+export default function PulpitPage() {
+  const router = useRouter();
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [events, setEvents] = useState<ActivityItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-async function fetchEvents(): Promise<ActivityItem[]> {
-  const cookieHeader = (await headers()).get('cookie') || '';
-  const res = await fetch(`${process.env.BACKEND_URL || 'http://localhost:8000'}/api/events?limit=8`, {
-    headers: { cookie: cookieHeader },
-    cache: 'no-store',
-  });
-  if (!res.ok) return [];
-  return res.json();
-}
+  useEffect(() => {
+    // Auth gate - bez tokena redirect na login
+    if (!getToken()) {
+      router.push('/login');
+      return;
+    }
 
-export default async function PulpitPage() {
-  const [data, events] = await Promise.all([fetchDashboard(), fetchEvents()]);
+    Promise.all([
+      api<DashboardData>('/api/dashboard'),
+      api<ActivityItem[]>('/api/events?limit=8').catch(() => []),
+    ])
+      .then(([d, e]) => {
+        setData(d);
+        setEvents(e);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Błąd pobierania danych');
+        setLoading(false);
+      });
+  }, [router]);
+
+  if (loading) {
+    return (
+      <div style={{ padding: '60px 24px', textAlign: 'center', color: '#6B7280' }}>
+        Ładowanie pulpitu…
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <div style={{ padding: '60px 24px', textAlign: 'center', color: '#8F1018' }}>
+        {error || 'Brak danych'}
+      </div>
+    );
+  }
+
   const { stats, funnel, system, segments } = data;
 
   return (

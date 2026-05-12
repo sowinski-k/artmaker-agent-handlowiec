@@ -44,11 +44,14 @@ SESSION_SECRET = os.getenv("SESSION_SECRET") or "ecombinat-dev-secret-change-in-
 COOKIE_NAME = "ecombinat_session"
 COOKIE_MAX_AGE = 7 * 24 * 60 * 60  # 7 dni
 
-ALLOWED_ORIGINS = [
-    o.strip()
-    for o in (os.getenv("FRONTEND_ORIGINS") or "http://localhost:3000").split(",")
-    if o.strip()
-]
+_origins_env = (os.getenv("FRONTEND_ORIGINS") or "http://localhost:3000").strip()
+# Special value "*" -> wildcard. Inaczej comma-separated lista origin'ow.
+if _origins_env == "*":
+    ALLOWED_ORIGINS = ["*"]
+else:
+    ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
+# UWAGA: gdy allow_credentials=True, browsery odrzucaja allow_origins=["*"].
+# W production zawsze podaj konkretny URL frontendu w FRONTEND_ORIGINS.
 
 serializer = URLSafeSerializer(SESSION_SECRET, salt="ecombinat-session-v1")
 
@@ -68,11 +71,14 @@ app.add_middleware(
 
 # ─── Auth helpers ───────────────────────────────────────────────────────
 
-def _make_session_cookie() -> str:
+def _make_token() -> str:
+    """Token sesji (signed JWT-like blob). Działa zarówno jako Bearer token
+    w Authorization header (preferred, cross-origin friendly) jak i jako
+    httponly cookie (fallback dla SSR)."""
     return serializer.dumps({"authed": True, "iat": datetime.now(timezone.utc).isoformat()})
 
 
-def _verify_session(token: str | None) -> bool:
+def _verify_token(token: str | None) -> bool:
     if not token:
         return False
     try:
@@ -82,12 +88,19 @@ def _verify_session(token: str | None) -> bool:
         return False
 
 
+def _extract_token(request: Request) -> str | None:
+    """Pobierz token: najpierw z Authorization: Bearer ..., potem z cookie."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.cookies.get(COOKIE_NAME)
+
+
 def require_auth(request: Request) -> None:
     """FastAPI dependency: rzuca 401 jeśli sesja niewazna."""
     if not APP_PASSWORD:
         return  # No password set = open access (lokalny dev)
-    token = request.cookies.get(COOKIE_NAME)
-    if not _verify_session(token):
+    if not _verify_token(_extract_token(request)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Brak autoryzacji - zaloguj się.",
@@ -102,6 +115,12 @@ class LoginIn(BaseModel):
 
 class StatusOut(BaseModel):
     authed: bool
+    app_name: str = "Ecombinat"
+
+
+class LoginOut(BaseModel):
+    authed: bool
+    token: str  # Bearer token - frontend zapisuje w localStorage
     app_name: str = "Ecombinat"
 
 
@@ -124,18 +143,22 @@ def healthz() -> dict[str, str]:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginIn, response: Response) -> StatusOut:
+def login(payload: LoginIn, response: Response) -> LoginOut:
     if APP_PASSWORD and payload.password != APP_PASSWORD:
         raise HTTPException(status_code=401, detail="Złe hasło.")
+    token = _make_token()
+    # Ustaw też cookie jako fallback dla SSR (jeśli kiedyś frontend będzie
+    # robił auth-aware SSR). Cross-origin -> samesite=none + secure=true.
+    is_prod = os.getenv("RAILWAY_ENVIRONMENT") is not None
     response.set_cookie(
         key=COOKIE_NAME,
-        value=_make_session_cookie(),
+        value=token,
         max_age=COOKIE_MAX_AGE,
         httponly=True,
-        samesite="lax",
-        secure=os.getenv("RAILWAY_ENVIRONMENT") is not None,  # secure w prod
+        samesite="none" if is_prod else "lax",
+        secure=is_prod,
     )
-    return StatusOut(authed=True)
+    return LoginOut(authed=True, token=token)
 
 
 @app.post("/api/auth/logout")
@@ -146,10 +169,9 @@ def logout(response: Response) -> StatusOut:
 
 @app.get("/api/auth/me")
 def me(request: Request) -> StatusOut:
-    token = request.cookies.get(COOKIE_NAME)
     if not APP_PASSWORD:
         return StatusOut(authed=True)
-    return StatusOut(authed=_verify_session(token))
+    return StatusOut(authed=_verify_token(_extract_token(request)))
 
 
 # ─── Dashboard (mock data na ten commit) ────────────────────────────────
