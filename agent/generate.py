@@ -43,7 +43,7 @@ from core.db import (
     init_db,
 )
 from core.kill_switch import is_stopped
-from core.llm import estimate_cost_usd, parse_structured
+from core.llm import parse_structured
 from core.logger import logger, setup_logging
 from prompts.brand import BRAND_CONTEXT
 
@@ -467,10 +467,9 @@ def generate_draft_for_lead(
     )
 
     full_preview = _assemble_preview(payload)
-    cost = estimate_cost_usd(provider, model, usage)
     logger.bind(source="generate").info(
         f"Draft generated for lead #{lead_id} via {provider}/{model}; "
-        f"~${cost} usd; track={payload.offer_track}; subject={payload.subject!r}"
+        f"track={payload.offer_track}; subject={payload.subject!r}"
     )
 
     with SessionLocal() as session:

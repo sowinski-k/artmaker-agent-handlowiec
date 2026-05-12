@@ -85,11 +85,36 @@ export default function LeadyPage() {
   async function generateDraft(leadId: number) {
     setGenerating(true);
     try {
-      const res = await api<{ draft_id: number }>('/api/drafts', {
+      const res = await api<{ ok: boolean; job_id: number }>('/api/drafts', {
         method: 'POST',
         body: JSON.stringify({ lead_id: leadId }),
       });
-      alert(`✅ Draft #${res.draft_id} wygenerowany. Zobacz w Drafty.`);
+      // Job utworzony - worker generuje draft async (~20-40s). Polluj az done.
+      const jobId = res.job_id;
+      const maxWaitMs = 90_000;  // 90s hard limit
+      const start = Date.now();
+      let lastStatus = 'pending';
+      while (Date.now() - start < maxWaitMs) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const job = await api<{ status: string; result: { draft_id?: number } | null; last_error?: string }>(
+            `/api/jobs/${jobId}`
+          );
+          lastStatus = job.status;
+          if (job.status === 'done') {
+            const draftId = job.result?.draft_id;
+            alert(`✅ Draft #${draftId ?? '?'} wygenerowany. Zobacz w Drafty.`);
+            return;
+          }
+          if (job.status === 'failed' || job.status === 'cancelled') {
+            alert(`❌ Draft NIE wygenerowany (status: ${job.status}). ${job.last_error || ''}`);
+            return;
+          }
+        } catch {
+          /* network glitch, poll again */
+        }
+      }
+      alert(`⏳ Draft jeszcze sie generuje (job #${jobId}, status: ${lastStatus}). Sprawdz /drafty za chwile.`);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Błąd');
     } finally {
