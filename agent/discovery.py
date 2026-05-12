@@ -298,26 +298,53 @@ class GooglePlacesSource:
         return has_places_key()
 
     def search(self, *, query: str, max_results: int) -> list[DiscoveredPlace]:
+        """Google Places Text Search NEW.
+
+        Hard limit API: maxResultCount = 20 per request. Aby dostac wiecej,
+        uzywamy paginacji przez `nextPageToken` z response - do 3 stron
+        total (Google ogranicza tylko do 3 paged responses, max 60 wynikow).
+
+        max_results > 60 zostanie scapowany do 60 (warning w log).
+        """
         api_key = _resolve_secret(settings.google_places_api_key, "GOOGLE_PLACES_API_KEY")
         if not api_key:
             raise RuntimeError("Brak GOOGLE_PLACES_API_KEY.")
 
         headers = {
             "X-Goog-Api-Key": api_key,
-            "X-Goog-FieldMask": self._FIELD_MASK,
+            "X-Goog-FieldMask": f"{self._FIELD_MASK},nextPageToken",
             "Content-Type": "application/json",
         }
-        payload = {
-            "textQuery": query,
-            "languageCode": "pl",
-            "regionCode": "PL",
-            "maxResultCount": min(max_results, 20),
-        }
+        wanted = max(1, min(max_results, 60))
+        per_page = min(wanted, 20)
+        results: list[DiscoveredPlace] = []
+        page_token: str | None = None
+
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(self._ENDPOINT, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return [self._normalize(p) for p in data.get("places", [])]
+            for page_idx in range(3):  # max 3 stron (Google API hard cap)
+                payload: dict[str, object] = {
+                    "textQuery": query,
+                    "languageCode": "pl",
+                    "regionCode": "PL",
+                    "maxResultCount": per_page,
+                }
+                if page_token:
+                    # Google wymaga ~2s pause przed page_token call
+                    import time as _time
+                    _time.sleep(2)
+                    payload["pageToken"] = page_token
+                response = client.post(self._ENDPOINT, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                places = data.get("places", []) or []
+                for p in places:
+                    results.append(self._normalize(p))
+                    if len(results) >= wanted:
+                        return results
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break  # brak kolejnej strony - mamy wszystko co Google ma
+        return results
 
     @staticmethod
     def _normalize(p: dict) -> DiscoveredPlace:
