@@ -50,6 +50,7 @@ class LeadStatus(str, Enum):
     REPLIED = "replied"
     BOUNCED = "bounced"
     BLACKLISTED = "blacklisted"
+    DEAD_END = "dead_end"  # research/enrichment nie znalazly kontaktu - skip do recheck
 
 
 class DraftStatus(str, Enum):
@@ -71,6 +72,8 @@ class JobType(str, Enum):
     DISCOVERY_PIPELINE = "discovery_pipeline"  # discovery + research + (auto-draft)
     RESEARCH_LEAD = "research_lead"            # pojedynczy lead z URL
     BULK_RESEARCH_LEADS = "bulk_research_leads"  # lista URLi do researchu (praca ręczna)
+    ENRICH_LEAD = "enrich_lead"                # uzupełnij email/telefon dla pojedynczego lead
+    BULK_ENRICH_LEADS = "bulk_enrich_leads"    # batch enrichment leadów bez kontaktu
     GENERATE_DRAFT = "generate_draft"          # draft dla lead_id
     BULK_GENERATE_DRAFTS = "bulk_generate_drafts"
     SEND_DRAFT = "send_draft"                  # push do Woodpecker
@@ -159,6 +162,9 @@ class Lead(Base):
     status: Mapped[str] = mapped_column(String(50), default=LeadStatus.NEW.value, index=True)
     research_data: Mapped[dict | None] = mapped_column(JSON)
     notes: Mapped[str | None] = mapped_column(Text)
+    # Enrichment tracking: kiedy ostatnio probowalismy znalezc email/phone.
+    # Dead-end leady recheckujemy po 90 dniach (firmy aktualizuja wizytowki).
+    last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -281,6 +287,7 @@ def _migrate_workspace_columns() -> None:
         ("leads", "source", "VARCHAR(50)"),
         ("leads", "research_data", "JSON" if is_pg else "TEXT"),
         ("leads", "notes", "TEXT"),
+        ("leads", "last_enriched_at", "TIMESTAMP" if is_pg else "DATETIME"),
         ("email_drafts", "workspace_id", "INTEGER"),
         ("email_drafts", "snippet4", "TEXT"),
         ("email_drafts", "snippet5", "TEXT"),
@@ -343,12 +350,28 @@ def _ensure_default_workspace() -> None:
             session.flush()
             log.info(f"Admin user CREATED: {admin_email}")
         elif admin_pw:
-            # Admin istnieje. Jeśli env-set password nie pasuje - UPDATE.
+            # Admin istnieje. Sprawdz czy env password pasuje do bieżącego hash.
+            # Jesli nie - reset (defensywnie: bcrypt z różnych wersji może mieć
+            # kompatybilne hashe ale czasem trafia się dramat z encodingiem).
             from web.auth import hash_password, verify_password
-            if not verify_password(admin_pw, admin.password_hash):
+            try:
+                matches = verify_password(admin_pw, admin.password_hash)
+            except Exception:
+                matches = False
+            if not matches:
                 admin.password_hash = hash_password(admin_pw)
                 session.flush()
-                log.info(f"Admin password RESET from env for {admin_email}")
+                log.warning(
+                    f"Admin password RESET from env for {admin_email} "
+                    f"(was: hash didn't verify env password)"
+                )
+            else:
+                log.info(f"Admin password OK for {admin_email}")
+        else:
+            log.warning(
+                f"Admin user {admin_email} exists but ADMIN_PASSWORD env NOT SET - "
+                f"login impossible until you set ADMIN_PASSWORD env var"
+            )
 
         # Default workspace dla admina
         ws = session.execute(

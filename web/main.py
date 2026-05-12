@@ -180,6 +180,44 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/_diag")
+def diagnostics() -> dict[str, Any]:
+    """Diagnostic endpoint - bezpieczny do public bo NIE leakuje wartosci sekretow.
+
+    Zwraca tylko czy env vars sa ustawione + czy admin user istnieje w bazie.
+    Pomocne kiedy login admina nie dziala - widac czy env doszedl, czy DB ma usera.
+    """
+    admin_email = (os.getenv("ADMIN_EMAIL") or "").strip().lower()
+    admin_pw = (os.getenv("APP_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
+    out = {
+        "admin_email_env_set": bool(admin_email),
+        "admin_email_preview": (admin_email[:3] + "...") if admin_email else None,
+        "admin_password_env_set": bool(admin_pw),
+        "admin_password_length": len(admin_pw) if admin_pw else 0,
+        "admin_user_in_db": False,
+        "admin_workspace_count": 0,
+        "total_users": 0,
+        "total_workspaces": 0,
+        "db_url_kind": "postgres" if not str(__import__("core.config", fromlist=["settings"]).settings.db_url).startswith("sqlite") else "sqlite",
+    }
+    try:
+        with SessionLocal() as session:
+            out["total_users"] = int(session.scalar(select(func.count(User.id))) or 0)
+            out["total_workspaces"] = int(session.scalar(select(func.count(Workspace.id))) or 0)
+            if admin_email:
+                admin = session.execute(select(User).where(User.email == admin_email)).scalar_one_or_none()
+                if admin:
+                    out["admin_user_in_db"] = True
+                    out["admin_user_is_admin"] = bool(admin.is_admin)
+                    out["admin_user_active"] = bool(admin.is_active)
+                    out["admin_workspace_count"] = int(session.scalar(
+                        select(func.count(WorkspaceMember.id)).where(WorkspaceMember.user_id == admin.id)
+                    ) or 0)
+    except Exception as exc:
+        out["error"] = str(exc)[:200]
+    return out
+
+
 # ─── Auth ────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/register", response_model=AuthOut)
