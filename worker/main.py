@@ -142,12 +142,14 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
 
     auto_draft_th = p.get("auto_draft_threshold")
     researched, drafted, dups, failed = 0, 0, 0, 0
+    recent: list[dict] = []  # Live ticker - frontend wyswietla na biezaco
 
     for i, place in enumerate(targets, start=1):
         if _shutdown: break
         if _is_cancelled(session, job.id):
             log.info(f"Job #{job.id} cancelled by user at {i}/{len(targets)}")
             break
+        entry: dict = {"url": place.website, "name": place.name or place.website}
         try:
             lead_id, result, was_researched = research_and_save(
                 place.website,
@@ -157,18 +159,37 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
             )
             if not was_researched:
                 dups += 1
+                entry.update({"status": "duplicate", "lead_id": lead_id})
             else:
                 researched += 1
+                entry.update({
+                    "status": "researched",
+                    "lead_id": lead_id,
+                    "name": result.company_name if result else entry["name"],
+                    "score": result.score.total if result else None,
+                })
                 if auto_draft_th is not None and result.score.total >= int(auto_draft_th):
                     try:
                         generate_draft_for_lead(lead_id, workspace_id=job.workspace_id)
                         drafted += 1
+                        entry["drafted"] = True
                     except Exception as exc:
                         log.warning(f"Job #{job.id} draft for lead {lead_id} failed: {exc}")
+                        entry["drafted"] = False
         except Exception as exc:
             failed += 1
             log.warning(f"Job #{job.id} research for {place.website} failed: {exc}")
+            entry.update({"status": "failed", "error": str(exc)[:120]})
+        # Trzymamy ostatnich 15 - wystarcza dla UI, lekkie payload.
+        recent.append(entry)
+        recent = recent[-15:]
         job.progress = i
+        job.result = {
+            "places_found": len(places), "targets_matching": len(targets),
+            "researched": researched, "drafted": drafted,
+            "duplicates": dups, "failed": failed,
+            "recent": recent,
+        }
         session.commit()
 
     return {
@@ -178,6 +199,7 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
         "drafted": drafted,
         "duplicates": dups,
         "failed": failed,
+        "recent": recent,
     }
 
 
@@ -218,12 +240,14 @@ def handle_bulk_research_leads(session: Session, job: Job) -> dict:
 
     researched, dups, failed, drafted = 0, 0, 0, 0
     auto_draft_th = p.get("auto_draft_threshold")
+    recent: list[dict] = []  # Live ticker
 
     for i, url in enumerate(urls, start=1):
         if _shutdown: break
         if _is_cancelled(session, job.id):
             log.info(f"Job #{job.id} cancelled by user at {i}/{len(urls)}")
             break
+        entry: dict = {"url": url, "name": url}
         try:
             lead_id, result, was = research_and_save(
                 url,
@@ -233,23 +257,41 @@ def handle_bulk_research_leads(session: Session, job: Job) -> dict:
             )
             if not was:
                 dups += 1
+                entry.update({"status": "duplicate", "lead_id": lead_id})
             else:
                 researched += 1
+                entry.update({
+                    "status": "researched",
+                    "lead_id": lead_id,
+                    "name": result.company_name if result else url,
+                    "score": result.score.total if result else None,
+                })
                 if auto_draft_th is not None and result and result.score.total >= int(auto_draft_th):
                     try:
                         generate_draft_for_lead(lead_id, workspace_id=job.workspace_id)
                         drafted += 1
+                        entry["drafted"] = True
                     except Exception as exc:
                         log.warning(f"Job #{job.id} draft for lead {lead_id} failed: {exc}")
+                        entry["drafted"] = False
         except Exception as exc:
             failed += 1
             log.warning(f"Job #{job.id} research {url} failed: {exc}")
+            entry.update({"status": "failed", "error": str(exc)[:120]})
+        recent.append(entry)
+        recent = recent[-15:]
         job.progress = i
+        job.result = {
+            "total": len(urls), "researched": researched,
+            "duplicates": dups, "failed": failed, "drafted": drafted,
+            "recent": recent,
+        }
         session.commit()
 
     return {
         "total": len(urls), "researched": researched,
         "duplicates": dups, "failed": failed, "drafted": drafted,
+        "recent": recent,
     }
 
 

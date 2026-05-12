@@ -395,6 +395,41 @@ export default function PozyskiwaniePage() {
                 <span className="mono">job #{activeJob.id}</span>
               </div>
             )}
+            {/* LIVE TICKER - lista ostatnio przetworzonych leadow */}
+            {(() => {
+              const recent = (activeJob.result as { recent?: Array<{
+                name?: string; url?: string; status?: string; score?: number;
+                lead_id?: number; drafted?: boolean; error?: string;
+              }> } | null)?.recent;
+              if (!recent || recent.length === 0) return null;
+              return (
+                <div className="live-ticker">
+                  <div className="live-ticker-head">
+                    <i className="ti ti-activity" /> Ostatnio przetworzone
+                  </div>
+                  <div className="live-ticker-list">
+                    {[...recent].reverse().map((r, i) => (
+                      <div className={`lt-row lt-${r.status || 'pending'}`} key={i}>
+                        <span className="lt-icon">
+                          {r.status === 'researched' && <i className="ti ti-check" />}
+                          {r.status === 'duplicate' && <i className="ti ti-copy" />}
+                          {r.status === 'failed' && <i className="ti ti-alert-triangle" />}
+                        </span>
+                        <span className="lt-name" title={r.url}>{r.name || r.url}</span>
+                        {r.score != null && (
+                          <span className="lt-score mono">{r.score}/10</span>
+                        )}
+                        {r.drafted && <span className="lt-tag">draft</span>}
+                        {r.status === 'duplicate' && <span className="lt-tag muted">dup</span>}
+                        {r.status === 'failed' && (
+                          <span className="lt-tag err" title={r.error}>błąd</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             {activeJob.status === 'done' && activeJob.result && (
               <div className="job-result">
                 <JobResult result={activeJob.result} />
@@ -732,6 +767,84 @@ const CSS = `
   font-size: 12px; color: #6B7280;
 }
 .progress-meta .mono { font-family: 'JetBrains Mono', monospace; }
+
+.live-ticker {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #E5E7EB;
+}
+.live-ticker-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #6B7280;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-ticker-head i { color: #D4212C; font-size: 13px; }
+.live-ticker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.lt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #FAFAF7;
+  border: 1px solid #E5E7EB;
+  border-radius: 6px;
+  font-size: 12.5px;
+  animation: lt-slidein 0.25s ease-out;
+}
+@keyframes lt-slidein {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.lt-row.lt-researched { border-left: 3px solid #16A34A; }
+.lt-row.lt-duplicate { border-left: 3px solid #9CA3AF; opacity: 0.75; }
+.lt-row.lt-failed { border-left: 3px solid #D4212C; }
+.lt-icon { width: 16px; display: flex; align-items: center; }
+.lt-row.lt-researched .lt-icon i { color: #16A34A; }
+.lt-row.lt-duplicate .lt-icon i { color: #6B7280; }
+.lt-row.lt-failed .lt-icon i { color: #D4212C; }
+.lt-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #1F2937;
+  font-weight: 500;
+}
+.lt-score {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #6B7280;
+  background: white;
+  border: 1px solid #E5E7EB;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.lt-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+  background: rgba(212,33,44,0.1);
+  color: #8F1018;
+  border: 1px solid rgba(212,33,44,0.2);
+}
+.lt-tag.muted { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; }
+.lt-tag.err { background: rgba(212,33,44,0.15); color: #8F1018; }
 
 .job-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid #E5E7EB; }
 .result-grid {
