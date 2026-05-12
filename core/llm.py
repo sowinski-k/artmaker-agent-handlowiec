@@ -210,6 +210,18 @@ def _parse_gemini(
 
 # ---- Public dispatch --------------------------------------------------------
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Czy blad jest tymczasowy (warto retry'owac z backoffem) czy permanent
+    (autoryzacja, model name itd - retry nie pomoze)."""
+    msg = str(exc).lower()
+    # HTTP 5xx, 429 throttle, 408 timeout - retry
+    transient_codes = ["503", "502", "504", "500", "429", "408",
+                       "unavailable", "overloaded", "rate limit",
+                       "timeout", "deadline", "internal error",
+                       "connection reset", "connection error"]
+    return any(code in msg for code in transient_codes)
+
+
 def parse_structured(
     *,
     provider: str,
@@ -219,27 +231,53 @@ def parse_structured(
     output_schema: type[T],
     max_tokens: int = 4096,
     temperature: float = 0.3,
+    max_retries: int = 4,
 ) -> tuple[T, dict]:
     """Call the chosen provider, return (parsed_pydantic_model, usage_info).
 
     Default temperature 0.3 is right for grounded, deterministic structured
     output (research scoring, relevance classification). Bump for creative
     work — drafts use ~0.85 to escape AI-cliché defaults.
+
+    Retry logic: exponential backoff (2s, 4s, 8s, 16s) dla 503/429/timeout.
+    4xx (auth, bad request) NIE retry'owany - propagacja bledu od razu.
     """
+    import time
+    import logging
+    log = logging.getLogger("ecombinat.llm")
+
     provider = provider.lower()
-    if provider == "anthropic":
-        return _parse_anthropic(
-            model=model, system=system, user=user,
-            output_schema=output_schema, max_tokens=max_tokens,
-            temperature=temperature,
-        )
-    if provider == "gemini":
-        return _parse_gemini(
-            model=model, system=system, user=user,
-            output_schema=output_schema, max_tokens=max_tokens,
-            temperature=temperature,
-        )
-    raise ValueError(f"Unknown LLM provider: {provider!r}. Use 'anthropic' or 'gemini'.")
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            if provider == "anthropic":
+                return _parse_anthropic(
+                    model=model, system=system, user=user,
+                    output_schema=output_schema, max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            if provider == "gemini":
+                return _parse_gemini(
+                    model=model, system=system, user=user,
+                    output_schema=output_schema, max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            raise ValueError(f"Unknown LLM provider: {provider!r}. Use 'anthropic' or 'gemini'.")
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_error(exc):
+                raise
+            if attempt >= max_retries - 1:
+                break
+            wait_s = 2 ** (attempt + 1)  # 2, 4, 8, 16
+            log.warning(
+                f"LLM transient error (attempt {attempt+1}/{max_retries}, "
+                f"provider={provider}, model={model}): {str(exc)[:200]}. "
+                f"Retry za {wait_s}s..."
+            )
+            time.sleep(wait_s)
+    # Wszystkie retry'a zuzyte
+    raise last_exc if last_exc else RuntimeError("LLM call failed without exception")
 
 
 def estimate_cost_usd(provider: str, model: str, usage: dict) -> float | None:
