@@ -309,28 +309,46 @@ def _ensure_default_workspace() -> None:
 
     Wszystkie stare dane (Lead, EmailDraft, Event bez workspace_id) są
     przypisane do tego workspace'u.
+
+    Hasło admina: jeśli ADMIN_PASSWORD/APP_PASSWORD jest ustawione w env i
+    różni się od bieżącego hasha - UPDATE'ujemy. Pozwala na zmianę hasła
+    bez resetowania bazy (poprzednio admin dostawał default "ecombinat-admin"
+    przy pierwszym deploy i potem env był ignorowany).
     """
+    import logging
     import os
     from sqlalchemy import select, update
+
+    log = logging.getLogger("ecombinat.bootstrap")
 
     admin_email = (os.getenv("ADMIN_EMAIL") or "").strip().lower()
     if not admin_email:
         return  # bez ADMIN_EMAIL nie tworzymy nic automatycznie
 
+    admin_pw = (os.getenv("APP_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
+
     with SessionLocal() as session:
         admin = session.execute(select(User).where(User.email == admin_email)).scalar_one_or_none()
         if admin is None:
-            # Stwórz admina z hasłem ze SESSION_SECRET (zmień przez UI po pierwszym logowaniu)
+            # Stwórz admina
             from web.auth import hash_password  # lazy import żeby uniknąć cyklicznych
-            admin_pw = (os.getenv("APP_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "ecombinat-admin").strip()
+            pw_to_use = admin_pw or "ecombinat-admin"
             admin = User(
                 email=admin_email,
-                password_hash=hash_password(admin_pw),
+                password_hash=hash_password(pw_to_use),
                 name="Admin",
                 is_admin=True,
             )
             session.add(admin)
             session.flush()
+            log.info(f"Admin user CREATED: {admin_email}")
+        elif admin_pw:
+            # Admin istnieje. Jeśli env-set password nie pasuje - UPDATE.
+            from web.auth import hash_password, verify_password
+            if not verify_password(admin_pw, admin.password_hash):
+                admin.password_hash = hash_password(admin_pw)
+                session.flush()
+                log.info(f"Admin password RESET from env for {admin_email}")
 
         # Default workspace dla admina
         ws = session.execute(
@@ -346,6 +364,15 @@ def _ensure_default_workspace() -> None:
             )
             session.add(ws)
             session.flush()
+
+        # Upewnij się że admin jest członkiem swojego workspace'u
+        member = session.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == ws.id,
+                WorkspaceMember.user_id == admin.id,
+            )
+        ).scalar_one_or_none()
+        if member is None:
             session.add(WorkspaceMember(
                 workspace_id=ws.id,
                 user_id=admin.id,
