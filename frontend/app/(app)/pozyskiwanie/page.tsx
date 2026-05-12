@@ -1,7 +1,22 @@
+/* Pozyskiwanie leadów - dwa tryby:
+ *
+ *  1) Praca ręczna (peek + select + bulk research)
+ *     - /api/discovery/peek SYNC: pokazuje listę firm bez palenia tokenów
+ *     - user wybiera które researchować
+ *     - /api/research/bulk -> BULK_RESEARCH_LEADS job -> worker
+ *     - frontend polluje /api/jobs/{id}, pokazuje progress
+ *
+ *  2) Wyślij agenta w teren (full async)
+ *     - /api/discovery/search -> DISCOVERY_PIPELINE job (znajdź + research + draft)
+ *     - frontend polluje, user moze zamknac przegladarke
+ *     - agent leci do skutku
+ */
+
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 
 import { api, getToken } from '@/lib/api';
 
@@ -18,9 +33,24 @@ interface DiscoveredPlace {
   relevance: { score: number; reason: string } | null;
 }
 
-interface SearchResponse {
+interface PeekResponse {
   places: DiscoveredPlace[];
   diagnostics: Array<{ source: string; places: unknown[]; error?: string; duration_s?: number }>;
+  daily_used: number;
+  daily_cap: number;
+}
+
+interface JobInfo {
+  id: number;
+  type: string;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+  progress: number;
+  total: number;
+  result: Record<string, unknown> | null;
+  last_error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 const SEGMENTS = [
@@ -41,27 +71,40 @@ const SOURCES = [
   { key: 'apify_linkedin', label: 'Apify LinkedIn' },
 ];
 
+type Mode = 'manual' | 'agent';
+
 export default function PozyskiwaniePage() {
   const router = useRouter();
+  const [mode, setMode] = useState<Mode>('manual');
+
+  // Form
   const [segment, setSegment] = useState('sklep_papierniczy');
   const [location, setLocation] = useState('');
   const [customTarget, setCustomTarget] = useState('');
   const [maxPerSource, setMaxPerSource] = useState(50);
   const [selectedSources, setSelectedSources] = useState<string[]>(['google_places']);
-  const [autoResearch, setAutoResearch] = useState(false);
   const [autoDraft, setAutoDraft] = useState(false);
   const [relevanceThreshold, setRelevanceThreshold] = useState(6);
 
-  const [searching, setSearching] = useState(false);
-  const [results, setResults] = useState<DiscoveredPlace[] | null>(null);
-  const [diag, setDiag] = useState<SearchResponse['diagnostics']>([]);
+  // Peek state (manual)
+  const [peeking, setPeeking] = useState(false);
+  const [peekResults, setPeekResults] = useState<DiscoveredPlace[] | null>(null);
+  const [peekDiag, setPeekDiag] = useState<PeekResponse['diagnostics']>([]);
+  const [peekCap, setPeekCap] = useState<{ used: number; cap: number } | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [log, setLog] = useState<string[]>([]);
-  const [bulkRunning, setBulkRunning] = useState(false);
+
+  // Job tracking (manual bulk research + agent mode)
+  const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!getToken()) router.push('/login');
   }, [router]);
+
+  useEffect(() => () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+  }, []);
 
   function toggleSource(key: string) {
     setSelectedSources((prev) =>
@@ -69,34 +112,54 @@ export default function PozyskiwaniePage() {
     );
   }
 
-  async function handleSearch(e: React.FormEvent) {
+  function buildQuery() {
+    const phrase = customTarget.trim() || segment.replace(/_/g, ' ');
+    return location.trim() ? `${phrase} ${location.trim()}` : phrase;
+  }
+
+  function startJobPolling(jobId: number) {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const j = await api<JobInfo>(`/api/jobs/${jobId}`);
+        setActiveJob(j);
+        if (j.status === 'done' || j.status === 'failed' || j.status === 'cancelled') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } catch (err) {
+        console.error('Poll failed:', err);
+      }
+    }, 2000);
+  }
+
+  async function handlePeek(e: React.FormEvent) {
     e.preventDefault();
     if (selectedSources.length === 0) {
       alert('Wybierz przynajmniej jedno źródło.');
       return;
     }
-    setSearching(true);
-    setResults(null);
+    setPeeking(true);
+    setPeekResults(null);
     setSelected(new Set());
-    setLog([]);
     try {
-      const phrase = customTarget.trim() || segment.replace(/_/g, ' ');
-      const query = location.trim() ? `${phrase} ${location.trim()}` : phrase;
-      const res = await api<SearchResponse>('/api/discovery/search', {
+      const res = await api<PeekResponse>('/api/discovery/peek', {
         method: 'POST',
         body: JSON.stringify({
-          query,
+          query: buildQuery(),
           sources: selectedSources,
           max_per_source: maxPerSource,
           segment,
           location: location.trim() || null,
           custom_description: customTarget.trim() || null,
           use_relevance_filter: true,
+          relevance_threshold: relevanceThreshold,
         }),
       });
-      setResults(res.places);
-      setDiag(res.diagnostics);
-      // Auto-select trafnych
+      setPeekResults(res.places);
+      setPeekDiag(res.diagnostics);
+      setPeekCap({ used: res.daily_used, cap: res.daily_cap });
+
       const auto = new Set<number>();
       res.places.forEach((p, i) => {
         if (
@@ -109,62 +172,101 @@ export default function PozyskiwaniePage() {
         }
       });
       setSelected(auto);
-
-      if (autoResearch && auto.size > 0) {
-        void runBulkResearch(res.places, Array.from(auto));
-      }
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Błąd wyszukiwania');
     } finally {
-      setSearching(false);
+      setPeeking(false);
     }
   }
 
-  async function runBulkResearch(allPlaces: DiscoveredPlace[], indices: number[]) {
-    setBulkRunning(true);
-    setLog([]);
-    let ok = 0, fail = 0, skipped = 0, drafts = 0;
-    for (const idx of indices) {
-      const p = allPlaces[idx];
-      if (!p?.website) continue;
-      setLog((prev) => [...prev, `→ ${p.name}: researchuję...`]);
-      try {
-        const res = await api<{ lead_id: number; was_researched: boolean; score: number; company: string }>(
-          '/api/research', {
-          method: 'POST',
-          body: JSON.stringify({
-            url: p.website,
-            segment_hint: segment,
-            city_hint: location || null,
-          }),
-        });
-        if (!res.was_researched) {
-          skipped++;
-          setLog((prev) => [...prev, `⏭️ ${p.name}: już w bazie (#${res.lead_id})`]);
-        } else {
-          ok++;
-          setLog((prev) => [...prev, `✅ ${p.name}: #${res.lead_id}, score ${res.score}/10`]);
-          if (autoDraft && res.score >= 7) {
-            try {
-              const d = await api<{ draft_id: number }>('/api/drafts', {
-                method: 'POST',
-                body: JSON.stringify({ lead_id: res.lead_id }),
-              });
-              drafts++;
-              setLog((prev) => [...prev, `   ✉️ draft #${d.draft_id} gotowy`]);
-            } catch (e) {
-              setLog((prev) => [...prev, `   ⚠️ draft padł: ${e instanceof Error ? e.message : e}`]);
-            }
-          }
-        }
-      } catch (err) {
-        fail++;
-        setLog((prev) => [...prev, `❌ ${p.name}: ${err instanceof Error ? err.message : 'błąd'}`]);
-      }
+  async function handleResearchSelected() {
+    if (!peekResults || selected.size === 0) return;
+    const urls = Array.from(selected)
+      .map((i) => peekResults[i]?.website)
+      .filter((w): w is string => !!w);
+    if (urls.length === 0) return;
+
+    setSubmitting(true);
+    try {
+      const res = await api<{ job_id: number; total: number }>('/api/research/bulk', {
+        method: 'POST',
+        body: JSON.stringify({
+          urls,
+          segment_hint: segment,
+          city_hint: location || null,
+          auto_draft_threshold: autoDraft ? 7 : null,
+        }),
+      });
+      setActiveJob({
+        id: res.job_id, type: 'bulk_research_leads',
+        status: 'pending', progress: 0, total: res.total,
+        result: null, last_error: null,
+        created_at: new Date().toISOString(),
+        started_at: null, completed_at: null,
+      });
+      startJobPolling(res.job_id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Błąd uruchomienia researchu');
+    } finally {
+      setSubmitting(false);
     }
-    setLog((prev) => [...prev, '', `=== ${ok} OK · ${skipped} duplikatów · ${fail} błędów · ${drafts} draftów ===`]);
-    setBulkRunning(false);
   }
+
+  async function handleSendAgent(e: React.FormEvent) {
+    e.preventDefault();
+    if (selectedSources.length === 0) {
+      alert('Wybierz przynajmniej jedno źródło.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await api<{ job_id: number; daily_used: number; daily_cap: number }>(
+        '/api/discovery/search', {
+        method: 'POST',
+        body: JSON.stringify({
+          query: buildQuery(),
+          sources: selectedSources,
+          max_per_source: maxPerSource,
+          segment,
+          location: location.trim() || null,
+          custom_description: customTarget.trim() || null,
+          use_relevance_filter: true,
+          relevance_threshold: relevanceThreshold,
+          auto_research: true,
+          auto_draft_threshold: autoDraft ? 7 : null,
+        }),
+      });
+      setActiveJob({
+        id: res.job_id, type: 'discovery_pipeline',
+        status: 'pending', progress: 0, total: 0,
+        result: null, last_error: null,
+        created_at: new Date().toISOString(),
+        started_at: null, completed_at: null,
+      });
+      startJobPolling(res.job_id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Błąd uruchomienia agenta');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function cancelJob() {
+    if (!activeJob) return;
+    try {
+      await api(`/api/jobs/${activeJob.id}/cancel`, { method: 'POST' });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function clearJob() {
+    setActiveJob(null);
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+  }
+
+  const jobActive = activeJob && (activeJob.status === 'pending' || activeJob.status === 'running');
 
   return (
     <>
@@ -172,30 +274,122 @@ export default function PozyskiwaniePage() {
 
       <div className="topbar">
         <div className="crumb">
-          Workspace <i className="ti ti-chevron-right" /> <strong>Ecombinat</strong>
+          <strong>Handlowiec</strong>
           <i className="ti ti-chevron-right" /> Pozyskiwanie
         </div>
-        <div className="search">
-          <i className="ti ti-search" />
-          Szukaj…
-          <span className="kbd">⌘K</span>
-        </div>
-        <div className="avatar">EC</div>
+        {peekCap && (
+          <div className="cap-pill">
+            <i className="ti ti-bolt" /> {peekCap.used} / {peekCap.cap} dziś
+          </div>
+        )}
       </div>
 
       <div className="content">
         <div className="page-head">
           <div>
             <h1>Pozyskiwanie leadów</h1>
-            <p>Znajdź nowe firmy w Google Maps / Apify / LinkedIn z filtrem trafności LLM.</p>
+            <p>Wybierz tryb i zacznij szukać. Praca leci w tle - możesz wylogować się.</p>
           </div>
         </div>
 
+        {/* MODE TOGGLE */}
+        <div className="mode-tabs">
+          <button
+            className={`mode-tab ${mode === 'manual' ? 'active' : ''}`}
+            onClick={() => setMode('manual')}>
+            <div className="mode-tab-icon"><i className="ti ti-hand-click" /></div>
+            <div className="mode-tab-text">
+              <div className="mode-tab-name">Praca ręczna</div>
+              <div className="mode-tab-desc">Zobacz listę, wybierz co researchować. Nie pali tokenów dopóki nie klikniesz.</div>
+            </div>
+          </button>
+          <button
+            className={`mode-tab ${mode === 'agent' ? 'active' : ''}`}
+            onClick={() => setMode('agent')}>
+            <div className="mode-tab-icon"><i className="ti ti-truck-delivery" /></div>
+            <div className="mode-tab-text">
+              <div className="mode-tab-name">Wyślij agenta w teren</div>
+              <div className="mode-tab-desc">Agent sam znajdzie, zrobi research, wygeneruje drafty. Możesz wyjść.</div>
+            </div>
+          </button>
+        </div>
+
+        {/* JOB PROGRESS */}
+        {activeJob && (
+          <div className="job-card">
+            <div className="job-head">
+              <div className="job-title">
+                <i className={`ti ti-${jobActive ? 'loader-2 spin' : activeJob.status === 'done' ? 'check' : 'x'}`} />
+                {jobActive ? 'Agent pracuje...' :
+                 activeJob.status === 'done' ? 'Gotowe!' :
+                 activeJob.status === 'failed' ? 'Job padł' : 'Anulowano'}
+              </div>
+              <div className="job-actions">
+                {jobActive ? (
+                  <button className="btn-ghost" onClick={cancelJob}>
+                    <i className="ti ti-x" /> Anuluj
+                  </button>
+                ) : (
+                  <button className="btn-ghost" onClick={clearJob}>
+                    <i className="ti ti-x" /> Zamknij
+                  </button>
+                )}
+              </div>
+            </div>
+            {activeJob.total > 0 && (
+              <>
+                <div className="progress-bar">
+                  <div style={{ width: `${(activeJob.progress / Math.max(activeJob.total, 1)) * 100}%` }} />
+                </div>
+                <div className="progress-meta">
+                  <span>{activeJob.progress} / {activeJob.total} przerobione</span>
+                  <span className="mono">job #{activeJob.id}</span>
+                </div>
+              </>
+            )}
+            {!activeJob.total && jobActive && (
+              <div className="progress-meta">
+                <span>Agent znajduje miejsca...</span>
+                <span className="mono">job #{activeJob.id}</span>
+              </div>
+            )}
+            {activeJob.status === 'done' && activeJob.result && (
+              <div className="job-result">
+                <JobResult result={activeJob.result} />
+                <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                  <Link href="/leady" className="btn btn-primary">
+                    <i className="ti ti-users" /> Zobacz leady
+                  </Link>
+                  <Link href="/drafty" className="btn btn-ghost">
+                    <i className="ti ti-mail" /> Drafty
+                  </Link>
+                </div>
+              </div>
+            )}
+            {activeJob.status === 'failed' && (
+              <div className="job-error">
+                <strong>Błąd:</strong> {activeJob.last_error || 'Nieznany błąd'}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* SEARCH FORM */}
         <div className="card">
           <div className="card-head">
-            <div className="card-title"><i className="ti ti-search" /> Wyszukiwanie</div>
+            <div className="card-title">
+              <i className="ti ti-search" />
+              {mode === 'manual' ? 'Zajrzyj na rynek' : 'Patrol agenta'}
+            </div>
+            <div className="card-actions">
+              {peekCap && peekCap.used >= peekCap.cap && (
+                <span style={{ color: '#8F1018' }}>
+                  <i className="ti ti-alert-triangle" /> Dzienny limit wyczerpany
+                </span>
+              )}
+            </div>
           </div>
-          <form onSubmit={handleSearch} className="card-body">
+          <form onSubmit={mode === 'manual' ? handlePeek : handleSendAgent} className="card-body">
             <div className="form-row">
               <div className="field">
                 <label>Segment</label>
@@ -204,11 +398,11 @@ export default function PozyskiwaniePage() {
                 </select>
               </div>
               <div className="field">
-                <label>Lokalizacja (miasto / województwo / "Polska")</label>
+                <label>Lokalizacja (miasto / województwo)</label>
                 <input type="text" value={location} onChange={(e) => setLocation(e.target.value)}
-                  placeholder="np. Warszawa" />
+                  placeholder="np. Warszawa, Pomorskie" />
               </div>
-              <div className="field" style={{ maxWidth: 140 }}>
+              <div className="field" style={{ maxWidth: 160 }}>
                 <label>Max / źródło (1-200)</label>
                 <input type="number" value={maxPerSource} min={1} max={200}
                   onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 50)} />
@@ -237,60 +431,55 @@ export default function PozyskiwaniePage() {
 
             <div className="form-row">
               <label className="check">
-                <input type="checkbox" checked={autoResearch}
-                  onChange={(e) => setAutoResearch(e.target.checked)} />
-                <span>🔥 Auto-research po wyszukaniu</span>
-              </label>
-              <label className="check">
                 <input type="checkbox" checked={autoDraft}
                   onChange={(e) => setAutoDraft(e.target.checked)} />
-                <span>✉️ Auto-draft jeśli score ≥ 7</span>
+                <span><i className="ti ti-mail" /> Auto-draft jeśli score &ge; 7</span>
               </label>
-              <div className="field" style={{ maxWidth: 200 }}>
-                <label>Próg trafności</label>
+              <div className="field" style={{ maxWidth: 240 }}>
+                <label>Próg trafności LLM &ge; {relevanceThreshold}</label>
                 <input type="range" min={0} max={10} value={relevanceThreshold}
                   onChange={(e) => setRelevanceThreshold(parseInt(e.target.value))} />
-                <span className="mono" style={{ fontSize: 12 }}>≥ {relevanceThreshold}</span>
               </div>
             </div>
 
-            <button type="submit" className="btn btn-primary" disabled={searching}>
-              {searching ? 'Szukam…' : '🚀 Szukaj'}
+            <button type="submit" className="btn btn-primary"
+              disabled={peeking || submitting || !!jobActive}>
+              {mode === 'manual'
+                ? (peeking ? 'Szukam...' : 'Zajrzyj na rynek')
+                : (submitting ? 'Wysyłam agenta...' : 'Wyślij agenta w teren')}
             </button>
           </form>
         </div>
 
-        {diag.length > 0 && (
+        {/* PEEK DIAGNOSTICS */}
+        {peekDiag.length > 0 && mode === 'manual' && (
           <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-            {diag.map((d) => (
-              <div key={d.source} style={{
-                padding: '6px 12px', borderRadius: 6, fontSize: 12,
-                background: d.error ? '#fef2f2' : '#FDECED',
-                color: d.error ? '#8F1018' : '#8F1018',
-                border: `1px solid ${d.error ? '#fecaca' : 'rgba(212,33,44,0.15)'}`,
-              }}>
+            {peekDiag.map((d) => (
+              <div key={d.source} className={`diag-pill ${d.error ? 'err' : ''}`}>
                 <strong>{d.source}</strong>: {d.error || `${(d.places as unknown[]).length} firm · ${d.duration_s}s`}
               </div>
             ))}
           </div>
         )}
 
-        {results && (
+        {/* PEEK RESULTS TABLE */}
+        {mode === 'manual' && peekResults && (
           <div className="card" style={{ marginTop: 16 }}>
             <div className="card-head">
               <div className="card-title">
-                <i className="ti ti-list" /> Wyniki ({results.length})
-                {results.some((r) => r.existing_lead_id) && (
+                <i className="ti ti-list" /> Wyniki ({peekResults.length})
+                {peekResults.some((r) => r.existing_lead_id) && (
                   <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 8 }}>
-                    · {results.filter((r) => r.existing_lead_id).length} już w bazie
+                    · {peekResults.filter((r) => r.existing_lead_id).length} już w bazie
                   </span>
                 )}
               </div>
               <div className="card-actions">
                 <span style={{ fontSize: 12 }}>Zaznaczonych: {selected.size}</span>
-                <button className="btn btn-primary" disabled={bulkRunning || selected.size === 0}
-                  onClick={() => runBulkResearch(results, Array.from(selected))}>
-                  {bulkRunning ? 'Pracuję…' : `Researchuj ${selected.size}`}
+                <button className="btn btn-primary"
+                  disabled={submitting || selected.size === 0 || !!jobActive}
+                  onClick={handleResearchSelected}>
+                  {submitting ? 'Tworzę job...' : `Researchuj ${selected.size} →`}
                 </button>
               </div>
             </div>
@@ -302,12 +491,12 @@ export default function PozyskiwaniePage() {
                   <th>Adres</th>
                   <th className="num">Ocena</th>
                   <th className="num">Trafność</th>
-                  <th>Status</th>
+                  <th>Powód</th>
                   <th>WWW</th>
                 </tr>
               </thead>
               <tbody>
-                {results.map((p, i) => {
+                {peekResults.map((p, i) => {
                   const dup = p.existing_lead_id != null;
                   const rel = p.relevance;
                   return (
@@ -317,18 +506,29 @@ export default function PozyskiwaniePage() {
                           disabled={!p.website || dup}
                           onChange={() => {
                             const s = new Set(selected);
-                            s.has(i) ? s.delete(i) : s.add(i);
+                            if (s.has(i)) s.delete(i); else s.add(i);
                             setSelected(s);
                           }} />
                       </td>
-                      <td><strong>{p.name}</strong>{dup && <span style={{ color: '#6B7280', fontSize: 11 }}> · w bazie #{p.existing_lead_id}</span>}</td>
+                      <td>
+                        <strong>{p.name}</strong>
+                        {dup && <span style={{ color: '#6B7280', fontSize: 11 }}> · w bazie #{p.existing_lead_id}</span>}
+                      </td>
                       <td style={{ color: '#6B7280' }}>{p.address || '-'}</td>
                       <td className="num">{p.rating?.toFixed(1) || '-'}</td>
-                      <td className="num">{rel ? rel.score : '-'}</td>
-                      <td><span style={{ color: '#6B7280', fontSize: 12 }}>{rel?.reason || ''}</span></td>
+                      <td className="num">
+                        {rel ? (
+                          <span className={`rel-pill ${rel.score >= 7 ? 'hot' : rel.score >= 5 ? 'warm' : 'cold'}`}>
+                            {rel.score}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td style={{ color: '#6B7280', fontSize: 12 }}>{rel?.reason || ''}</td>
                       <td>
                         {p.website ? (
-                          <a href={p.website} target="_blank" rel="noopener" style={{ color: '#D4212C', fontSize: 12 }}>{p.website.slice(0, 30)}…</a>
+                          <a href={p.website} target="_blank" rel="noopener" style={{ color: '#D4212C', fontSize: 12 }}>
+                            {p.website.replace(/^https?:\/\//, '').slice(0, 28)}...
+                          </a>
                         ) : '-'}
                       </td>
                     </tr>
@@ -339,21 +539,50 @@ export default function PozyskiwaniePage() {
           </div>
         )}
 
-        {log.length > 0 && (
-          <div className="card" style={{ marginTop: 16 }}>
-            <div className="card-head">
-              <div className="card-title"><i className="ti ti-activity" /> Live log</div>
+        {/* AGENT MODE EXPLAINER (no results yet) */}
+        {mode === 'agent' && !activeJob && (
+          <div className="explainer">
+            <div className="explainer-head">
+              <i className="ti ti-info-circle" /> Jak działa patrol agenta
             </div>
-            <pre style={{
-              padding: 16, fontFamily: 'JetBrains Mono, monospace', fontSize: 12,
-              color: '#111', background: '#FAFAF7', margin: 0,
-              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-              maxHeight: 300, overflow: 'auto',
-            }}>{log.join('\n')}</pre>
+            <ol className="explainer-list">
+              <li>Klikasz "Wyślij agenta w teren" - powstaje zadanie w kolejce.</li>
+              <li>Worker (osobny serwer) zaczyna pracę: znajduje firmy w wybranych źródłach.</li>
+              <li>LLM filtruje trafność (próg &ge; {relevanceThreshold}) - odpada szum z Google Maps.</li>
+              <li>Dla każdej trafnej firmy: scraping strony + research LLM + scoring 0-10.</li>
+              <li>{autoDraft ? 'Score ≥ 7 → wygenerowany draft maila gotowy do approve.' : 'Drafty NIE są generowane (włącz checkbox jeśli chcesz).'}</li>
+              <li>Możesz wylogować się / zamknąć przeglądarkę. Patrol leci do końca.</li>
+            </ol>
           </div>
         )}
       </div>
     </>
+  );
+}
+
+function JobResult({ result }: { result: Record<string, unknown> }) {
+  const items: Array<[string, string | number]> = [];
+  for (const [k, v] of Object.entries(result)) {
+    if (typeof v === 'number' || typeof v === 'string') items.push([k, v]);
+  }
+  const labels: Record<string, string> = {
+    places_found: 'Firm znalezionych',
+    targets_matching: 'Trafnych',
+    researched: 'Zresearchowanych',
+    drafted: 'Draftów',
+    duplicates: 'Już w bazie',
+    failed: 'Błędów',
+    total: 'Łącznie',
+  };
+  return (
+    <div className="result-grid">
+      {items.map(([k, v]) => (
+        <div className="result-item" key={k}>
+          <div className="result-value tabular">{v}</div>
+          <div className="result-label">{labels[k] || k}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -362,15 +591,145 @@ const CSS = `
 .crumb { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #6B7280; }
 .crumb strong { color: #111; font-weight: 500; }
 .crumb i { font-size: 12px; color: #9CA3AF; }
-.search { margin-left: auto; display: flex; align-items: center; gap: 8px; background: #FAFAF7; border: 1px solid #E5E7EB; border-radius: 6px; padding: 6px 10px; width: 280px; color: #6B7280; font-size: 13px; }
-.kbd { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px; background: #fff; border: 1px solid #E5E7EB; padding: 1px 5px; border-radius: 3px; }
-.avatar { width: 32px; height: 32px; border-radius: 50%; background: #1C1C1C; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px; border: 2px solid #D4212C; }
-.content { padding: 24px; }
+.cap-pill {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: #6B7280;
+  background: #FAFAF7;
+  border: 1px solid #E5E7EB;
+  padding: 5px 10px;
+  border-radius: 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.cap-pill i { color: #D4212C; font-size: 13px; }
+
+.content { padding: 24px; max-width: 1320px; }
 .page-head { margin-bottom: 20px; }
 .page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; margin: 0 0 4px; }
 .page-head p { color: #6B7280; font-size: 13.5px; margin: 0; }
 
-.card { background: #fff; border: 1px solid #E5E7EB; border-radius: 8px; margin-bottom: 12px; }
+.mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.mode-tab {
+  background: #fff;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: all 0.15s;
+}
+.mode-tab:hover { border-color: #D1D5DB; }
+.mode-tab.active {
+  border-color: rgba(212,33,44,0.5);
+  background: rgba(212,33,44,0.03);
+  box-shadow: 0 0 0 3px rgba(212,33,44,0.08);
+}
+.mode-tab-icon {
+  width: 40px; height: 40px;
+  background: #FAFAF7;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: #6B7280;
+  flex-shrink: 0;
+}
+.mode-tab.active .mode-tab-icon {
+  background: rgba(212,33,44,0.1);
+  border-color: rgba(212,33,44,0.2);
+  color: #D4212C;
+}
+.mode-tab-icon i { font-size: 20px; }
+.mode-tab-text { flex: 1; }
+.mode-tab-name { font-size: 14px; font-weight: 600; margin-bottom: 3px; color: #111; }
+.mode-tab-desc { font-size: 12px; color: #6B7280; line-height: 1.4; }
+
+.job-card {
+  background: #fff;
+  border: 1px solid rgba(212,33,44,0.3);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 16px -8px rgba(212,33,44,0.2);
+}
+.job-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.job-title {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+  color: #111;
+}
+.job-title i { color: #D4212C; font-size: 18px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.job-actions { display: flex; gap: 8px; }
+
+.progress-bar {
+  height: 8px;
+  background: #FAFAF7;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.progress-bar > div {
+  height: 100%;
+  background: linear-gradient(90deg, #D4212C, #8F1018);
+  transition: width 0.3s;
+}
+.progress-meta {
+  display: flex; justify-content: space-between;
+  font-size: 12px; color: #6B7280;
+}
+.progress-meta .mono { font-family: 'JetBrains Mono', monospace; }
+
+.job-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid #E5E7EB; }
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 12px;
+}
+.result-item {
+  background: #FAFAF7;
+  border: 1px solid #E5E7EB;
+  border-radius: 6px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.result-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #111;
+  letter-spacing: -0.3px;
+}
+.result-label {
+  font-size: 10.5px;
+  color: #6B7280;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 2px;
+}
+.tabular { font-feature-settings: "tnum"; font-variant-numeric: tabular-nums; }
+
+.job-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #FDECED;
+  border: 1px solid rgba(212,33,44,0.2);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #8F1018;
+}
+
+.card { background: #fff; border: 1px solid #E5E7EB; border-radius: 10px; margin-bottom: 12px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid #E5E7EB; }
 .card-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .card-title i { color: #D4212C; font-size: 15px; }
@@ -388,15 +747,41 @@ const CSS = `
   outline: none; border-color: #D4212C; box-shadow: 0 0 0 3px rgba(212,33,44,0.08);
 }
 .field textarea { resize: vertical; min-height: 50px; }
+.field input[type=range] { padding: 0; height: 28px; }
 
 .checkbox-row { display: flex; gap: 16px; flex-wrap: wrap; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #111; cursor: pointer; }
 .check input { margin: 0; cursor: pointer; }
+.check i { font-size: 14px; color: #6B7280; margin-right: 2px; }
 
-.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; font-family: inherit; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; font-family: inherit; text-decoration: none; }
 .btn-primary { background: #D4212C; color: #fff; }
 .btn-primary:hover:not(:disabled) { background: #8F1018; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-ghost {
+  background: transparent;
+  color: #6B7280;
+  border: 1px solid #E5E7EB;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-ghost:hover { color: #111; border-color: #D1D5DB; }
+
+.diag-pill {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #FDECED;
+  color: #8F1018;
+  border: 1px solid rgba(212,33,44,0.15);
+}
+.diag-pill.err { background: #fef2f2; border-color: #fecaca; }
 
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.tbl th { text-align: left; font-weight: 500; font-size: 11px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.8px; padding: 10px 16px; background: #FAFAF7; border-bottom: 1px solid #E5E7EB; }
@@ -404,5 +789,39 @@ table.tbl th.num, table.tbl td.num { text-align: right; font-family: 'JetBrains 
 table.tbl td { padding: 11px 16px; border-bottom: 1px solid #E5E7EB; }
 table.tbl tr:last-child td { border-bottom: none; }
 table.tbl tr:hover td { background: #FAFAF7; }
-.mono { font-family: 'JetBrains Mono', monospace; }
+
+.rel-pill {
+  display: inline-block;
+  min-width: 26px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  text-align: center;
+}
+.rel-pill.hot { background: rgba(212,33,44,0.15); color: #8F1018; }
+.rel-pill.warm { background: #FEF3C7; color: #92400E; }
+.rel-pill.cold { background: #F3F4F6; color: #6B7280; }
+
+.explainer {
+  background: #fff;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+.explainer-head {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #111;
+  display: flex; align-items: center; gap: 8px;
+}
+.explainer-head i { color: #D4212C; font-size: 16px; }
+.explainer-list {
+  padding-left: 20px;
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.7;
+}
+.explainer-list li { margin-bottom: 4px; }
 `;

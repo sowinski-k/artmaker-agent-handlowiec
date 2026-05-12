@@ -145,11 +145,11 @@ export default function DraftyPage() {
     }
     if (!confirm('Wysłać draft do Woodpecker? Lead trafi do sekwencji follow-upów.')) return;
     try {
-      const res = await api<{ prospect_id: string }>(`/api/drafts/${draftId}/send`, {
+      const res = await api<{ job_id: number }>(`/api/drafts/${draftId}/send`, {
         method: 'POST',
         body: JSON.stringify({ campaign_id: selectedCampaign }),
       });
-      alert(`✅ Wysłano. Woodpecker prospect_id: ${res.prospect_id || 'unknown'}`);
+      alert(`✓ Draft #${draftId} w kolejce do wysyłki (job #${res.job_id}). Worker dorzuci do Woodpecker w tle.`);
       await load();
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Błąd wysyłki');

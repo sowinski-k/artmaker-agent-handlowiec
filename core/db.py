@@ -70,6 +70,7 @@ class JobStatus(str, Enum):
 class JobType(str, Enum):
     DISCOVERY_PIPELINE = "discovery_pipeline"  # discovery + research + (auto-draft)
     RESEARCH_LEAD = "research_lead"            # pojedynczy lead z URL
+    BULK_RESEARCH_LEADS = "bulk_research_leads"  # lista URLi do researchu (praca ręczna)
     GENERATE_DRAFT = "generate_draft"          # draft dla lead_id
     BULK_GENERATE_DRAFTS = "bulk_generate_drafts"
     SEND_DRAFT = "send_draft"                  # push do Woodpecker

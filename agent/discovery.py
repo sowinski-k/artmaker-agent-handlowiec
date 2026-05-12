@@ -388,6 +388,7 @@ def run_search(
     query: str,
     max_results_per_source: int = 20,
     progress_callback: Callable[[str, str], None] | None = None,
+    workspace_id: int | None = None,
 ) -> tuple[list[DiscoveredPlace], list[SourceResult]]:
     """Run all enabled sources in parallel; return deduplicated places + per-source diagnostics."""
     import time
@@ -436,17 +437,20 @@ def run_search(
     merged_places = list(seen.values())
     # Mark places that are already in our leads DB - so downstream (relevance
     # filter, GUI) wie czego nie tknąć.
-    mark_existing_in_db(merged_places)
+    mark_existing_in_db(merged_places, workspace_id=workspace_id)
     return merged_places, results
 
 
-def mark_existing_in_db(places: list[DiscoveredPlace]) -> None:
+def mark_existing_in_db(places: list[DiscoveredPlace], workspace_id: int | None = None) -> None:
     """In-place: ustawia existing_lead_id i existing_lead_score na DiscoveredPlace
     których URL pasuje do istniejącego Lead w bazie.
 
     Jedno zapytanie SQL na cały batch (ILIKE po unikalnych hostach), potem
     weryfikacja przez normalize_url() w Pythonie. Skala: tysiące leadów w
     bazie = OK, bo ograniczamy zapytanie do hostów z aktualnej listy.
+
+    workspace_id (opcjonalny): jeśli podany, dedup tylko per workspace - inaczej
+    user widzi leady z cudzych workspace'ów jako "duplikaty".
     """
     if not places:
         return
@@ -472,12 +476,13 @@ def mark_existing_in_db(places: list[DiscoveredPlace]) -> None:
     # z naszej batch listy
     with SessionLocal() as session:
         conditions = [Lead.website.ilike(f"%{h}%") for h in hosts_to_check]
-        rows = session.execute(
-            select(Lead.id, Lead.website, Lead.score).where(
-                Lead.website.isnot(None),
-                or_(*conditions),
-            )
-        ).all()
+        q = select(Lead.id, Lead.website, Lead.score).where(
+            Lead.website.isnot(None),
+            or_(*conditions),
+        )
+        if workspace_id is not None:
+            q = q.where(Lead.workspace_id == workspace_id)
+        rows = session.execute(q).all()
 
     # Mapuj DB rows -> DiscoveredPlace przez exact normalize_url match
     by_norm: dict[str, tuple[int, float | None]] = {

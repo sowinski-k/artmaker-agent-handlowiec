@@ -105,7 +105,8 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
     places, diag = run_search(
         sources,
         query=p["query"],
-        max_results_per_source=int(p.get("max_per_source", 20)),
+        max_results_per_source=int(p.get("max_per_source", 50)),
+        workspace_id=job.workspace_id,
     )
 
     threshold = int(p.get("relevance_threshold", 6))
@@ -193,6 +194,58 @@ def handle_research_lead(session: Session, job: Job) -> dict:
     }
 
 
+def handle_bulk_research_leads(session: Session, job: Job) -> dict:
+    """Praca ręczna - user wybrał N stron WWW, researchujemy każdą.
+
+    Payload:
+        urls: list[str]
+        segment_hint: str | None
+        city_hint: str | None
+        auto_draft_threshold: int | None
+    """
+    from agent.research import research_and_save
+    from agent.generate import generate_draft_for_lead
+
+    p = job.payload
+    urls = list(p.get("urls") or [])
+    job.total = len(urls)
+    job.progress = 0
+    session.commit()
+
+    researched, dups, failed, drafted = 0, 0, 0, 0
+    auto_draft_th = p.get("auto_draft_threshold")
+
+    for i, url in enumerate(urls, start=1):
+        if _shutdown: break
+        try:
+            lead_id, result, was = research_and_save(
+                url,
+                segment_hint=p.get("segment_hint"),
+                city_hint=p.get("city_hint"),
+                workspace_id=job.workspace_id,
+            )
+            if not was:
+                dups += 1
+            else:
+                researched += 1
+                if auto_draft_th is not None and result and result.score.total >= int(auto_draft_th):
+                    try:
+                        generate_draft_for_lead(lead_id, workspace_id=job.workspace_id)
+                        drafted += 1
+                    except Exception as exc:
+                        log.warning(f"Job #{job.id} draft for lead {lead_id} failed: {exc}")
+        except Exception as exc:
+            failed += 1
+            log.warning(f"Job #{job.id} research {url} failed: {exc}")
+        job.progress = i
+        session.commit()
+
+    return {
+        "total": len(urls), "researched": researched,
+        "duplicates": dups, "failed": failed, "drafted": drafted,
+    }
+
+
 def handle_generate_draft(session: Session, job: Job) -> dict:
     from agent.generate import generate_draft_for_lead
     p = job.payload
@@ -231,6 +284,7 @@ def handle_poll_woodpecker(session: Session, job: Job) -> dict:
 JOB_HANDLERS = {
     JobType.DISCOVERY_PIPELINE.value: handle_discovery_pipeline,
     JobType.RESEARCH_LEAD.value: handle_research_lead,
+    JobType.BULK_RESEARCH_LEADS.value: handle_bulk_research_leads,
     JobType.GENERATE_DRAFT.value: handle_generate_draft,
     JobType.BULK_GENERATE_DRAFTS.value: handle_bulk_generate_drafts,
     JobType.SEND_DRAFT.value: handle_send_draft,

@@ -2,9 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
-import { clearToken, getToken, logout } from '@/lib/api';
+import { api, clearToken, getToken, logout } from '@/lib/api';
 
 const HANDLOWIEC_PAGES = [
   { href: '/handlowiec/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
@@ -28,15 +28,46 @@ const KANCELARIA_TOOLS = [
   { icon: 'shield-check', label: 'Asystent GPSR', desc: 'compliance UE' },
 ];
 
+interface JobLite { id: number; status: string; type: string; progress: number; total: number }
+
+interface MeResp {
+  workspace: { credits: number; used_credits: number; name: string };
+}
+
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [activeJobs, setActiveJobs] = useState<JobLite[]>([]);
+  const [credits, setCredits] = useState<{ used: number; total: number } | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && !getToken()) {
       router.push('/login');
     }
   }, [router]);
+
+  // Poll active jobs every 8s (workspace-wide widget)
+  useEffect(() => {
+    if (!getToken()) return;
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const [jobs, me] = await Promise.all([
+          api<JobLite[]>('/api/jobs?status=running&limit=10').catch(() => [] as JobLite[]),
+          api<MeResp>('/api/auth/me').catch(() => null),
+        ]);
+        if (cancelled) return;
+        // Backend filtruje status pojedynczo - pobierz tez pending
+        const pending = await api<JobLite[]>('/api/jobs?status=pending&limit=10').catch(() => [] as JobLite[]);
+        if (cancelled) return;
+        setActiveJobs([...jobs, ...pending]);
+        if (me?.workspace) setCredits({ used: me.workspace.used_credits, total: me.workspace.credits });
+      } catch {}
+    }
+    refresh();
+    const iv = setInterval(refresh, 8000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [pathname]);
 
   const isHandlowiecActive = HANDLOWIEC_PAGES.some((p) => p.href === pathname);
 
@@ -45,6 +76,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     clearToken();
     router.push('/login');
   }
+
+  const creditsPct = credits && credits.total > 0
+    ? Math.min(100, Math.round((credits.used / credits.total) * 100))
+    : 0;
 
   return (
     <>
@@ -141,9 +176,35 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <span className="sb-label">Apify</span>
           </a>
 
+          {activeJobs.length > 0 && (
+            <Link href="/pulpit" className="sb-jobs">
+              <div className="sb-jobs-head">
+                <i className="ti ti-loader-2 spin"></i>
+                <span>Praca w tle</span>
+                <span className="sb-jobs-count">{activeJobs.length}</span>
+              </div>
+              <div className="sb-jobs-list">
+                {activeJobs.slice(0, 2).map((j) => (
+                  <div className="sb-jobs-item" key={j.id}>
+                    <span className="sb-jobs-type">{labelForJob(j.type)}</span>
+                    {j.total > 0 && (
+                      <span className="sb-jobs-prog mono">{j.progress}/{j.total}</span>
+                    )}
+                  </div>
+                ))}
+                {activeJobs.length > 2 && (
+                  <div className="sb-jobs-more">+ {activeJobs.length - 2} więcej</div>
+                )}
+              </div>
+            </Link>
+          )}
+
           <div className="sb-foot">
-            <div className="sb-foot-row">Kredyty <strong>0 / 100</strong></div>
-            <div className="sb-bar"><div style={{ width: '0%' }}></div></div>
+            <div className="sb-foot-row">
+              Kredyty
+              <strong>{credits?.used ?? 0} / {credits?.total ?? 100}</strong>
+            </div>
+            <div className="sb-bar"><div style={{ width: `${creditsPct}%` }}></div></div>
             <button onClick={handleLogout} className="logout-btn">
               <i className="ti ti-logout"></i> Wyloguj
             </button>
@@ -156,6 +217,19 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </div>
     </>
   );
+}
+
+function labelForJob(type: string): string {
+  switch (type) {
+    case 'discovery_pipeline': return 'Agent w terenie';
+    case 'bulk_research_leads': return 'Bulk research';
+    case 'research_lead': return 'Research';
+    case 'generate_draft': return 'Draft';
+    case 'bulk_generate_drafts': return 'Bulk drafty';
+    case 'send_draft': return 'Wysyłka';
+    case 'poll_woodpecker': return 'Sync Woodpecker';
+    default: return type;
+  }
 }
 
 const APP_CSS = `
@@ -404,6 +478,60 @@ aside.sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); bor
   font-weight: 600;
 }
 .sb-subitem i { font-size: 13px; }
+
+.sb-jobs {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: rgba(212,33,44,0.1);
+  border: 1px solid rgba(212,33,44,0.25);
+  border-radius: 8px;
+  text-decoration: none;
+  color: #fff;
+  display: block;
+  transition: all 0.15s;
+}
+.sb-jobs:hover {
+  background: rgba(212,33,44,0.18);
+  border-color: rgba(212,33,44,0.4);
+}
+.sb-jobs-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  margin-bottom: 6px;
+  color: #fff;
+}
+.sb-jobs-head i { font-size: 14px; color: #FCA5A5; }
+.sb-jobs-count {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  background: rgba(255,255,255,0.15);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.sb-jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sb-jobs-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: rgba(255,255,255,0.72);
+}
+.sb-jobs-type { font-weight: 500; }
+.sb-jobs-prog { color: rgba(255,255,255,0.55); }
+.sb-jobs-more {
+  font-size: 10px;
+  color: rgba(255,255,255,0.45);
+  font-style: italic;
+}
+.spin { animation: spin 1.5s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.mono { font-family: 'JetBrains Mono', monospace; }
 
 .sb-foot {
   margin-top: auto;

@@ -815,10 +815,90 @@ def _discovery_today_count(workspace_id: int) -> int:
         ) or 0)
 
 
+@app.post("/api/discovery/peek")
+def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Praca ręczna: SYNC discovery + relevance scoring, BEZ researchu i draftów.
+
+    User dostaje listę kandydatów z trafnością LLM i sam wybiera których
+    chce researchować. Nie pali tokenów na research dopóki user nie kliknie.
+
+    Czas odpowiedzi: 5-30s (Apify call + ewentualnie LLM batch scoring).
+    """
+    from agent.discovery import (
+        ApifyAllegroSource, ApifyLinkedInSource, ApifySource,
+        GooglePlacesSource, run_search, score_relevance_batch,
+    )
+
+    payload.max_per_source = max(1, min(payload.max_per_source, 200))
+    today_done = _discovery_today_count(cur.workspace_id)
+    if today_done >= DISCOVERY_DAILY_CAP_FREE:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Dzienny limit pozyskiwania ({DISCOVERY_DAILY_CAP_FREE} leadów) "
+                   f"wyczerpany. Spróbuj jutro.",
+        )
+
+    src_classes = {
+        "apify": ApifySource, "google_places": GooglePlacesSource,
+        "apify_allegro": ApifyAllegroSource, "apify_linkedin": ApifyLinkedInSource,
+    }
+    sources = []
+    for s in payload.sources:
+        cls = src_classes.get(s)
+        if cls is None: continue
+        inst = cls()
+        if inst.available():
+            sources.append(inst)
+    if not sources:
+        raise HTTPException(
+            status_code=400,
+            detail="Żadne źródło nie jest skonfigurowane (brak kluczy API).",
+        )
+
+    try:
+        places, diag = run_search(
+            sources, query=payload.query,
+            max_results_per_source=payload.max_per_source,
+            workspace_id=cur.workspace_id,
+        )
+    except Exception as exc:
+        log.exception(f"discovery_peek run_search failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Błąd źródeł: {exc}")
+
+    rel_map: dict[int, dict[str, Any]] = {}
+    if payload.use_relevance_filter and places:
+        try:
+            items, _ = score_relevance_batch(
+                places, segment=payload.segment,
+                city=payload.location,
+                custom_description=payload.custom_description,
+            )
+            for it in items:
+                if 0 <= it.idx < len(places):
+                    rel_map[it.idx] = {"score": it.score, "reason": it.reason}
+        except Exception as exc:
+            log.warning(f"score_relevance_batch failed (continuing without): {exc}")
+
+    return {
+        "places": [{
+            "source": p.source, "name": p.name, "website": p.website,
+            "address": p.address, "phone": p.phone,
+            "rating": p.rating, "review_count": p.review_count,
+            "existing_lead_id": p.existing_lead_id,
+            "existing_lead_score": p.existing_lead_score,
+            "relevance": rel_map.get(i),
+        } for i, p in enumerate(places)],
+        "diagnostics": [d.model_dump() for d in diag],
+        "daily_used": today_done,
+        "daily_cap": DISCOVERY_DAILY_CAP_FREE,
+    }
+
+
 @app.post("/api/discovery/search")
 def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
-    """Tworzy DISCOVERY_PIPELINE job - worker zrobi: znajdź -> filter -> research -> draft.
+    """Wyślij agenta w teren: tworzy DISCOVERY_PIPELINE job.
 
+    Worker robi pełen pipeline: znajdź -> filter -> research -> draft.
     Zwraca job_id natychmiast. Frontend polluje /api/jobs/{id} dla progressu.
     User może wylogować się - worker leci dalej.
 
@@ -860,6 +940,42 @@ def research_lead(payload: ResearchIn, cur: CurrentUser = Depends(get_current_us
             payload=payload.model_dump(),
         )
     return {"ok": True, "job_id": job.id}
+
+
+class BulkResearchIn(BaseModel):
+    urls: list[str]
+    segment_hint: str | None = None
+    city_hint: str | None = None
+    auto_draft_threshold: int | None = None
+
+
+@app.post("/api/research/bulk")
+def bulk_research(payload: BulkResearchIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Praca ręczna: bulk research z listy URLi (po wybraniu z /api/discovery/peek).
+
+    Tworzy jeden BULK_RESEARCH_LEADS job - worker przelatuje listę. Progress
+    via /api/jobs/{id}.
+    """
+    urls = [u.strip() for u in payload.urls if u and u.strip()]
+    if not urls:
+        raise HTTPException(status_code=400, detail="Pusta lista URLi.")
+    if len(urls) > DISCOVERY_DAILY_CAP_FREE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Za dużo URLi w jednej partii (max {DISCOVERY_DAILY_CAP_FREE}).",
+        )
+    with SessionLocal() as session:
+        job = create_job(
+            session, job_type=JobType.BULK_RESEARCH_LEADS,
+            workspace_id=cur.workspace_id, user_id=cur.user_id,
+            payload={
+                "urls": urls,
+                "segment_hint": payload.segment_hint,
+                "city_hint": payload.city_hint,
+                "auto_draft_threshold": payload.auto_draft_threshold,
+            },
+        )
+    return {"ok": True, "job_id": job.id, "total": len(urls)}
 
 
 # ─── Jobs polling ────────────────────────────────────────────────────────
