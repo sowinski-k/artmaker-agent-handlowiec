@@ -1,0 +1,23 @@
+# Railway config dla FRONTEND service (Next.js 15).
+#
+# To jest osobny service w tym samym Railway project co backend (web/main.py).
+# Variables needed:
+#   BACKEND_URL - URL backendu, np. http://backend-service.railway.internal:8000
+#                 albo publiczny URL backendu z generated domain
+#
+# Backend variables (potrzebne na backend service):
+#   APP_PASSWORD     - haslo dostepu do panelu
+#   SESSION_SECRET   - dlugi random string do podpisywania cookies
+#   FRONTEND_ORIGINS - URL frontendu dla CORS, np. https://app.ecombinat.pl
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "frontend/Dockerfile"
+buildContext = "frontend"
+watchPatterns = ["frontend/**"]
+
+[deploy]
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

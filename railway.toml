@@ -1,18 +1,20 @@
-# Railway deployment config dla Artmaker Agent.
-# Docs: https://docs.railway.com/reference/config-as-code
+# Railway config dla BACKEND service (FastAPI - Ecombinat API).
+#
+# Frontend (Next.js) jest osobnym service'em - patrz frontend/railway.toml.
+# Aby utworzyć drugi service w tym samym projekcie Railway:
+#   1. W panelu projektu: + Create -> Empty Service
+#   2. Settings -> Source -> Connect repo same as backend
+#   3. Settings -> Build -> Dockerfile Path: frontend/Dockerfile
+#   4. Settings -> Build -> Watch Path: frontend
+#   5. Variables: BACKEND_URL = http://<backend-service-name>.railway.internal:8000
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+dockerfilePath = "web/Dockerfile"
+watchPatterns = ["web/**", "agent/**", "core/**", "scripts/**", "prompts/**", "requirements.txt"]
 
 [deploy]
-# CMD w Dockerfile używa $PORT - Railway go ustawia automatycznie.
-# Tu nie nadpisujemy startCommand, polegamy na Dockerfile CMD.
-
-# Streamlit ma natywny health endpoint.
-healthcheckPath = "/_stcore/health"
+healthcheckPath = "/healthz"
 healthcheckTimeout = 30
-
-# Restart przy crashu (np. zły klucz API, OOM przy dużym researchu).
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
