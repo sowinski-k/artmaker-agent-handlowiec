@@ -36,7 +36,7 @@ from pydantic import BaseModel, EmailStr
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from sqlalchemy import desc, func, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import joinedload
 
 from core.db import (
@@ -631,8 +631,16 @@ def list_leads(
 ) -> dict[str, Any]:
     limit = max(1, min(limit, 200)); offset = max(0, offset)
     with SessionLocal() as session:
+        # Sort: leady z kontaktem najpierw (po score DESC), potem leady bez
+        # email+phone na samym dole (rowniez po score DESC dla porzadku).
+        # DEAD_END status z auto-enrichmentu to silny sygnal "puste" - leci na dol.
+        empty_flag = case(
+            (Lead.status == LeadStatus.DEAD_END.value, 2),
+            (((Lead.email.is_(None)) & (Lead.phone.is_(None))), 1),
+            else_=0,
+        )
         q = select(Lead).where(Lead.workspace_id == cur.workspace_id) \
-            .order_by(desc(Lead.score), desc(Lead.created_at))
+            .order_by(empty_flag.asc(), desc(Lead.score), desc(Lead.created_at))
         if segment: q = q.where(Lead.segment == segment)
         if status: q = q.where(Lead.status == status)
         if min_score > 0: q = q.where(Lead.score >= min_score)
