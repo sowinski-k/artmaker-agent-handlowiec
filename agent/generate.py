@@ -414,6 +414,7 @@ def generate_draft_for_lead(
     *,
     provider: str | None = None,
     model: str | None = None,
+    workspace_id: int | None = None,
 ) -> int:
     """Generate and persist a cold email draft for one lead. Returns draft id.
 
@@ -474,6 +475,7 @@ def generate_draft_for_lead(
 
     with SessionLocal() as session:
         draft = EmailDraft(
+            workspace_id=workspace_id,
             lead_id=lead_id,
             template_variant=f"cold_v1_{payload.offer_track}",
             subject=payload.subject,
@@ -649,26 +651,28 @@ def generate_all_researched(
     provider: str | None = None,
     model: str | None = None,
     min_score: float = 0.0,
+    workspace_id: int | None = None,
 ) -> tuple[int, int]:
     """Bulk-generate drafts for every researched lead without an active draft.
 
     Returns (made, failed). Skips leads with score < min_score.
     """
     with SessionLocal() as session:
-        candidate_ids = session.execute(
-            select(Lead.id).where(
-                Lead.status == LeadStatus.RESEARCHED.value,
-                Lead.score >= min_score,
-            )
-        ).scalars().all()
+        q = select(Lead.id).where(
+            Lead.status == LeadStatus.RESEARCHED.value,
+            Lead.score >= min_score,
+        )
+        if workspace_id is not None:
+            q = q.where(Lead.workspace_id == workspace_id)
+        candidate_ids = session.execute(q).scalars().all()
 
     made, failed = 0, 0
     for lead_id in candidate_ids:
         if is_stopped():
-            logger.bind(source="generate").warning("STOP.txt detected — halting bulk generate.")
+            logger.bind(source="generate").warning("STOP.txt detected, halting bulk generate.")
             break
         try:
-            generate_draft_for_lead(lead_id, provider=provider, model=model)
+            generate_draft_for_lead(lead_id, provider=provider, model=model, workspace_id=workspace_id)
             made += 1
         except Exception as exc:
             failed += 1

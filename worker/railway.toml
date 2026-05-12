@@ -1,0 +1,32 @@
+# Railway config dla WORKER service (background job processor).
+#
+# Trzeci service obok backend (web/) i frontend (frontend/). Worker działa
+# 24/7, nie ma public domain (nie wystawia HTTP). Korzysta z tego samego
+# Postgres co backend - synchronizuje przez Job table.
+#
+# Setup w Railway:
+#   1. + Create -> Empty Service
+#   2. Source -> connect ten sam repo
+#   3. Build:
+#      - Dockerfile Path: worker/Dockerfile
+#      - Root Directory: (puste lub /)
+#      - Watch Paths: worker/**, agent/**, core/**, scripts/**, prompts/**, requirements.txt
+#   4. Variables - DOKLADNIE TE SAME co backend:
+#      - DATABASE_URL = ${{Postgres.DATABASE_URL}}
+#      - ANTHROPIC_API_KEY, GEMINI_API_KEY, APIFY_API_TOKEN,
+#        GOOGLE_PLACES_API_KEY, WOODPECKER_API_KEY
+#      - LLM_PROVIDER=gemini (albo anthropic)
+#      - SESSION_SECRET (ten sam co backend dla weryfikacji tokenów)
+#      - WORKER_POLL_INTERVAL=5 (opcjonalne, default 5s)
+#      - JOB_MAX_RETRIES=3 (opcjonalne, default 3)
+#   5. Networking - NIE generuj domain (worker nie wystawia HTTP)
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "worker/Dockerfile"
+watchPatterns = ["worker/**", "agent/**", "core/**", "scripts/**", "prompts/**", "requirements.txt"]
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 100
+# Brak healthcheck - worker to background daemon, nie HTTP serwer

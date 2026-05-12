@@ -7,8 +7,10 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.orm import (
@@ -25,6 +27,8 @@ from core.config import settings
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
+# ─── Enums ──────────────────────────────────────────────────────────────
 
 class LeadSegment(str, Enum):
     SKLEP_PLASTYCZNY = "sklep_plastyczny"
@@ -55,14 +59,91 @@ class DraftStatus(str, Enum):
     SENT = "sent"
 
 
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class JobType(str, Enum):
+    DISCOVERY_PIPELINE = "discovery_pipeline"  # discovery + research + (auto-draft)
+    RESEARCH_LEAD = "research_lead"            # pojedynczy lead z URL
+    GENERATE_DRAFT = "generate_draft"          # draft dla lead_id
+    BULK_GENERATE_DRAFTS = "bulk_generate_drafts"
+    SEND_DRAFT = "send_draft"                  # push do Woodpecker
+    POLL_WOODPECKER = "poll_woodpecker"        # update statusów replied/bounced
+
+
+class WorkspaceRole(str, Enum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
 class Base(DeclarativeBase):
     pass
 
+
+# ─── Multi-tenant: User + Workspace ─────────────────────────────────────
+
+class User(Base):
+    """Klient SaaS. Każdy może należeć do wielu Workspace'ów (przez WorkspaceMember)."""
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    name: Mapped[str | None] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)  # super-admin (Twoje konto)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Workspace(Base):
+    """Konto klienta. Każdy klient ma własny workspace z izolowanymi danymi.
+    Lead, EmailDraft, Event, Job są kontekstualizowane przez workspace_id."""
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    plan: Mapped[str] = mapped_column(String(50), default="free")
+    monthly_credits: Mapped[int] = mapped_column(Integer, default=100)
+    used_credits: Mapped[int] = mapped_column(Integer, default=0)
+    # Per-workspace API keys (szyfrowane / encoded base64; w produkcji dorzucić Fernet)
+    api_keys: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class WorkspaceMember(Base):
+    """User <-> Workspace many-to-many z rolą."""
+    __tablename__ = "workspace_members"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_member"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), default=WorkspaceRole.MEMBER.value)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+# ─── Lead / EmailDraft / Event teraz z workspace_id ─────────────────────
 
 class Lead(Base):
     __tablename__ = "leads"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # workspace_id nullable na potrzeby migracji starych danych - kod
+    # filter'uje by workspace, ale fallback do "default workspace" w razie
+    # potrzeby. Po commit 4 wszystkie nowe leady mają workspace_id.
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), index=True, nullable=True,
+    )
     segment: Mapped[str] = mapped_column(String(50), default=LeadSegment.INNE.value)
     company_name: Mapped[str] = mapped_column(String(255))
     contact_name: Mapped[str | None] = mapped_column(String(255))
@@ -89,6 +170,9 @@ class EmailDraft(Base):
     __tablename__ = "email_drafts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), index=True, nullable=True,
+    )
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"))
     template_variant: Mapped[str | None] = mapped_column(String(50))
     subject: Mapped[str | None] = mapped_column(String(500))
@@ -112,6 +196,10 @@ class Event(Base):
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), index=True, nullable=True,
+    )
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     type: Mapped[str] = mapped_column(String(100), index=True)
     level: Mapped[str] = mapped_column(String(20), default="INFO", index=True)
     source: Mapped[str | None] = mapped_column(String(50))
@@ -120,13 +208,108 @@ class Event(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+# ─── Job queue (worker process polluje) ─────────────────────────────────
+
+class Job(Base):
+    """Background job - worker polluje co N sekund pending jobs i wykonuje.
+    Pozwala na 'fire and forget' z UI - user może wylogować się, job leci dalej.
+    """
+    __tablename__ = "jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    type: Mapped[str] = mapped_column(String(50), index=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default=JobStatus.PENDING.value, index=True,
+    )
+    payload: Mapped[dict] = mapped_column(JSON)
+    result: Mapped[dict | None] = mapped_column(JSON)
+
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    retries: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+# ─── Engine + session ────────────────────────────────────────────────────
+
 _engine = create_engine(settings.db_url, echo=False, future=True)
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
 
 
 def init_db() -> None:
-    settings.db_file.parent.mkdir(parents=True, exist_ok=True)
+    """Tworzy tabele i upewnia się że istnieje default workspace + admin user.
+
+    Default workspace dostaje stare leady (z workspace_id=NULL przed migracją)
+    przy pierwszym uruchomieniu po deploy. Admin user (z env ADMIN_EMAIL) jest
+    automatycznie tworzony - to Twoje konto.
+    """
+    if str(settings.db_url).startswith("sqlite"):
+        # Local dev: stwórz folder dla pliku DB
+        settings.db_file.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(_engine)
+    _ensure_default_workspace()
+
+
+def _ensure_default_workspace() -> None:
+    """Idempotent: tworzy 'default' workspace + admin user jeśli jeszcze nie ma.
+
+    Wszystkie stare dane (Lead, EmailDraft, Event bez workspace_id) są
+    przypisane do tego workspace'u.
+    """
+    import os
+    from sqlalchemy import select, update
+
+    admin_email = (os.getenv("ADMIN_EMAIL") or "").strip().lower()
+    if not admin_email:
+        return  # bez ADMIN_EMAIL nie tworzymy nic automatycznie
+
+    with SessionLocal() as session:
+        admin = session.execute(select(User).where(User.email == admin_email)).scalar_one_or_none()
+        if admin is None:
+            # Stwórz admina z hasłem ze SESSION_SECRET (zmień przez UI po pierwszym logowaniu)
+            from web.auth import hash_password  # lazy import żeby uniknąć cyklicznych
+            admin_pw = (os.getenv("APP_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "ecombinat-admin").strip()
+            admin = User(
+                email=admin_email,
+                password_hash=hash_password(admin_pw),
+                name="Admin",
+                is_admin=True,
+            )
+            session.add(admin)
+            session.flush()
+
+        # Default workspace dla admina
+        ws = session.execute(
+            select(Workspace).where(Workspace.owner_user_id == admin.id, Workspace.slug == "default")
+        ).scalar_one_or_none()
+        if ws is None:
+            ws = Workspace(
+                name="Default Workspace",
+                slug="default",
+                owner_user_id=admin.id,
+                plan="enterprise",
+                monthly_credits=99999,
+            )
+            session.add(ws)
+            session.flush()
+            session.add(WorkspaceMember(
+                workspace_id=ws.id,
+                user_id=admin.id,
+                role=WorkspaceRole.OWNER.value,
+            ))
+
+        # Migracja starych danych: przypisz wszystkie NULL workspace_id do default
+        session.execute(update(Lead).where(Lead.workspace_id.is_(None)).values(workspace_id=ws.id))
+        session.execute(update(EmailDraft).where(EmailDraft.workspace_id.is_(None)).values(workspace_id=ws.id))
+        session.execute(update(Event).where(Event.workspace_id.is_(None)).values(workspace_id=ws.id))
+        session.commit()
 
 
 def get_session():

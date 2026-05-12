@@ -24,7 +24,7 @@ export default function LandingPage() {
           </ul>
           <div className="nav-cta">
             <Link href="/login" className="btn btn-ghost">Zaloguj</Link>
-            <Link href="/login" className="btn btn-primary">
+            <Link href="/rejestracja" className="btn btn-primary">
               Rozpal piec <i className="ti ti-arrow-right"></i>
             </Link>
           </div>
@@ -47,7 +47,7 @@ export default function LandingPage() {
               </p>
 
               <div className="hero-actions">
-                <Link href="/login" className="btn btn-primary btn-lg">
+                <Link href="/rejestracja" className="btn btn-primary btn-lg">
                   Wystartuj za darmo <i className="ti ti-arrow-right"></i>
                 </Link>
                 <a href="#features" className="btn btn-ghost btn-lg">
@@ -185,7 +185,7 @@ export default function LandingPage() {
             <h2 className="display">Rozpal piec już dziś.</h2>
             <p>Zacznij od jedynego dostępnego agenta - Handlowca cold-email. Reszta narzędzi wjeżdża wkrótce.</p>
             <div className="cta-actions">
-              <Link href="/login" className="btn btn-primary btn-lg">
+              <Link href="/rejestracja" className="btn btn-primary btn-lg">
                 Zacznij za darmo <i className="ti ti-arrow-right"></i>
               </Link>
               <a href="mailto:kontakt@ecombinat.pl" className="btn btn-white btn-lg">

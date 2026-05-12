@@ -126,6 +126,7 @@ def save_lead(
     result: ResearchResult,
     *,
     source: str = "manual_url",
+    workspace_id: int | None = None,
 ) -> tuple[int, bool]:
     """Persist or update a Lead based on URL match. Returns (lead_id, created).
 
@@ -152,6 +153,7 @@ def save_lead(
             session.commit()
             return lead.id, False
         lead = Lead(
+            workspace_id=workspace_id,
             segment=result.segment,
             company_name=result.company_name,
             contact_name=result.contact_name,
@@ -178,6 +180,7 @@ def research_and_save(
     provider: str | None = None,
     model: str | None = None,
     force_refresh: bool = False,
+    workspace_id: int | None = None,
 ) -> tuple[int, ResearchResult | None, bool]:
     """Research a URL and persist the result.
 
@@ -233,7 +236,7 @@ def research_and_save(
         provider=provider,
         model=model,
     )
-    lead_id, _created = save_lead(url, result)
+    lead_id, _created = save_lead(url, result, workspace_id=workspace_id)
     return lead_id, result, True
 
 

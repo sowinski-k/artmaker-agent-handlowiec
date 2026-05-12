@@ -1,19 +1,29 @@
-/* Ecombinat API client - same-origin fetches.
+/* Ecombinat API client - same-origin fetches przez Next.js proxy.
  *
- * Wszystkie /api/* przechodza przez Next.js catch-all proxy
- * (app/api/[...path]/route.ts), ktory server-side robi forward do
- * backendu uzywajac process.env.BACKEND_URL (runtime).
- *
- * Korzysci:
- *  - zero CORS (same domena dla frontu i /api)
- *  - cookies dzialaja natywnie (same-origin)
- *  - zmiana BACKEND_URL w Railway = dziala po RESTART frontu
- *
- * Auth token w localStorage jako fallback - przekazywany przez
- * Authorization: Bearer header. Cookies tez sa wysylane (zero overhead).
+ * Multi-tenant auth: rejestracja + login (email + hasło), token Bearer
+ * w localStorage. Każdy request leci z Authorization header, backend
+ * sprawdza token i filter'uje wszystko by workspace_id.
  */
 
 const TOKEN_KEY = 'ecombinat_token';
+const USER_KEY = 'ecombinat_user';
+const WORKSPACE_KEY = 'ecombinat_workspace';
+
+export interface UserInfo {
+  id: number;
+  email: string;
+  name: string | null;
+  is_admin: boolean;
+}
+
+export interface WorkspaceInfo {
+  id: number;
+  name: string;
+  slug: string;
+  plan: string;
+  credits: number;
+  used_credits: number;
+}
 
 export function getToken(): string | null {
   if (typeof window === 'undefined') return null;
@@ -28,6 +38,27 @@ export function setToken(token: string): void {
 export function clearToken(): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  localStorage.removeItem(WORKSPACE_KEY);
+}
+
+export function getCachedUser(): UserInfo | null {
+  if (typeof window === 'undefined') return null;
+  const raw = localStorage.getItem(USER_KEY);
+  return raw ? (JSON.parse(raw) as UserInfo) : null;
+}
+
+export function getCachedWorkspace(): WorkspaceInfo | null {
+  if (typeof window === 'undefined') return null;
+  const raw = localStorage.getItem(WORKSPACE_KEY);
+  return raw ? (JSON.parse(raw) as WorkspaceInfo) : null;
+}
+
+function _saveSession(token: string, user: UserInfo, workspace: WorkspaceInfo): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspace));
 }
 
 interface ApiOptions extends RequestInit {
@@ -37,8 +68,6 @@ interface ApiOptions extends RequestInit {
 export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
   const { noAuth, headers, ...rest } = opts;
   const token = noAuth ? null : getToken();
-
-  // Same-origin URL - Next.js api proxy obsluguje
   const url = path.startsWith('/') ? path : '/' + path;
 
   const res = await fetch(url, {
@@ -53,7 +82,9 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
 
   if (res.status === 401) {
     clearToken();
-    if (typeof window !== 'undefined') window.location.href = '/login';
+    if (typeof window !== 'undefined' && !path.startsWith('/api/auth/')) {
+      window.location.href = '/login';
+    }
     throw new Error('Brak autoryzacji');
   }
 
@@ -62,23 +93,43 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
     let detail = text;
     try {
       detail = JSON.parse(text).detail || text;
-    } catch {
-      // body nie jest JSON-em (np. HTML 404 z proxy) - zostaw raw
-    }
+    } catch {}
     throw new Error(detail || `HTTP ${res.status}`);
   }
-
   if (res.status === 204) return undefined as T;
   return res.json();
 }
 
-export async function login(password: string): Promise<{ token: string; authed: boolean }> {
-  const data = await api<{ token: string; authed: boolean }>('/api/auth/login', {
+interface AuthResponse {
+  token: string;
+  user: UserInfo;
+  workspace: WorkspaceInfo;
+}
+
+export async function login(email: string, password: string): Promise<AuthResponse> {
+  const data = await api<AuthResponse>('/api/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ email, password }),
     noAuth: true,
   });
-  setToken(data.token);
+  _saveSession(data.token, data.user, data.workspace);
+  return data;
+}
+
+export async function register(
+  email: string, password: string,
+  name?: string, workspaceName?: string,
+): Promise<AuthResponse> {
+  const data = await api<AuthResponse>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      email, password,
+      name: name || null,
+      workspace_name: workspaceName || null,
+    }),
+    noAuth: true,
+  });
+  _saveSession(data.token, data.user, data.workspace);
   return data;
 }
 
@@ -88,4 +139,13 @@ export async function logout(): Promise<void> {
   } finally {
     clearToken();
   }
+}
+
+export async function refreshMe(): Promise<{ user: UserInfo; workspace: WorkspaceInfo }> {
+  const data = await api<{ user: UserInfo; workspace: WorkspaceInfo }>('/api/auth/me');
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    localStorage.setItem(WORKSPACE_KEY, JSON.stringify(data.workspace));
+  }
+  return data;
 }
