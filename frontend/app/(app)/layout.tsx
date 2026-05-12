@@ -7,11 +7,13 @@ import { useEffect } from 'react';
 import { clearToken, getToken, logout } from '@/lib/api';
 
 const HANDLOWIEC_PAGES = [
-  { href: '/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
+  { href: '/handlowiec/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
   { href: '/pozyskiwanie', icon: 'search', label: 'Pozyskiwanie' },
   { href: '/leady', icon: 'users', label: 'Leady' },
   { href: '/drafty', icon: 'mail', label: 'Drafty' },
 ];
+
+const HALA_PATH = '/pulpit';
 
 const KUZNIA_TOOLS = [
   { icon: 'user-square', label: 'Wirtualny model / try-on', desc: 'ubrania na sylwetce' },
@@ -56,7 +58,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="sb-section">Hala</div>
-          <Link href="/pulpit" className={`sb-item ${pathname === '/pulpit' ? 'active' : ''}`}>
+          <Link href={HALA_PATH} className={`sb-item ${pathname === HALA_PATH ? 'active' : ''}`}>
             <i className="ti ti-layout-dashboard"></i>
             <span className="sb-label">Pulpit</span>
           </Link>

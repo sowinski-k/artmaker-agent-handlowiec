@@ -46,7 +46,7 @@ export default function PozyskiwaniePage() {
   const [segment, setSegment] = useState('sklep_papierniczy');
   const [location, setLocation] = useState('');
   const [customTarget, setCustomTarget] = useState('');
-  const [maxPerSource, setMaxPerSource] = useState(20);
+  const [maxPerSource, setMaxPerSource] = useState(50);
   const [selectedSources, setSelectedSources] = useState<string[]>(['google_places']);
   const [autoResearch, setAutoResearch] = useState(false);
   const [autoDraft, setAutoDraft] = useState(false);
@@ -204,14 +204,14 @@ export default function PozyskiwaniePage() {
                 </select>
               </div>
               <div className="field">
-                <label>Lokalizacja (miasto / województwo / „Polska”)</label>
+                <label>Lokalizacja (miasto / województwo / "Polska")</label>
                 <input type="text" value={location} onChange={(e) => setLocation(e.target.value)}
                   placeholder="np. Warszawa" />
               </div>
               <div className="field" style={{ maxWidth: 140 }}>
-                <label>Max / źródło</label>
-                <input type="number" value={maxPerSource} min={5} max={50}
-                  onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 20)} />
+                <label>Max / źródło (1-200)</label>
+                <input type="number" value={maxPerSource} min={1} max={200}
+                  onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 50)} />
               </div>
             </div>
 

@@ -1,33 +1,46 @@
-/* Pulpit - dashboard 1:1 z ecombinat-dashboard.html.
+/* Pulpit Hala - ogólny widok workspace (cross-module).
  *
- * Client Component - fetchuje dane client-side z localStorage token.
- * SSR pomijamy bo cross-origin cookies sa problematyczne. Render
- * loading state -> fetch -> render data. Acceptable dla protected pages.
+ * Pokazuje wszystkie aktywne moduły, kredyty, ostatnią aktywność.
+ * Module-specific dashboardy są pod /handlowiec/pulpit itp.
  */
 
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { api, getToken } from '@/lib/api';
 
-interface DashboardData {
-  stats: {
-    leads_total: number;
-    leads_hot: number;
-    drafts_pending: number;
-    avg_score: number;
-    researched: number;
-    sent_today: number;
-    replied: number;
-    reply_rate: number;
-    bounced: number;
+interface Module {
+  slug: string;
+  name: string;
+  desc: string;
+  icon: string;
+  status: 'live' | 'soon' | 'beta';
+  href: string | null;
+  metrics?: Record<string, number>;
+}
+
+interface Shortcut {
+  label: string;
+  href: string;
+  icon: string;
+}
+
+interface Overview {
+  workspace: {
+    id: number;
+    name: string;
+    plan: string;
+    credits: number;
+    used_credits: number;
   };
-  sparklines: Record<string, number[]>;
-  funnel: Array<{ label: string; value: number; percent: number; icon: string }>;
-  system: Array<{ label: string; value: string; status: 'ok' | 'warn' | 'err' }>;
-  segments: Array<{ name: string; count: number }>;
+  leads_total: number;
+  drafts_pending: number;
+  running_jobs: number;
+  modules: Module[];
+  shortcuts: Shortcut[];
 }
 
 interface ActivityItem {
@@ -37,22 +50,20 @@ interface ActivityItem {
   time: string;
 }
 
-export default function PulpitPage() {
+export default function HalaPulpit() {
   const router = useRouter();
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [data, setData] = useState<Overview | null>(null);
   const [events, setEvents] = useState<ActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Auth gate - bez tokena redirect na login
     if (!getToken()) {
       router.push('/login');
       return;
     }
-
     Promise.all([
-      api<DashboardData>('/api/dashboard'),
+      api<Overview>('/api/workspace/overview'),
       api<ActivityItem[]>('/api/events?limit=8').catch(() => []),
     ])
       .then(([d, e]) => {
@@ -82,107 +93,114 @@ export default function PulpitPage() {
     );
   }
 
-  const { stats, funnel, system, segments } = data;
+  const { workspace, modules, shortcuts } = data;
+  const creditsPct = workspace.credits > 0
+    ? Math.min(100, Math.round((workspace.used_credits / workspace.credits) * 100))
+    : 0;
 
   return (
     <>
-      <style dangerouslySetInnerHTML={{ __html: PULPIT_CSS }} />
+      <style dangerouslySetInnerHTML={{ __html: HALA_CSS }} />
 
-      {/* TOPBAR */}
       <div className="topbar">
         <div className="crumb">
-          Workspace
-          <i className="ti ti-chevron-right"></i>
-          <strong>Ecombinat</strong>
+          <strong>Hala</strong>
           <i className="ti ti-chevron-right"></i>
           Pulpit
         </div>
-        <div className="search">
-          <i className="ti ti-search"></i>
-          Szukaj leadów, kampanii, ustawień…
-          <span className="kbd">⌘K</span>
+        <div className="ws-tag">
+          <i className="ti ti-building-warehouse"></i>
+          {workspace.name}
+          <span className="plan-pill">{workspace.plan}</span>
         </div>
-        <button className="topbtn" title="Nowy projekt"><i className="ti ti-plus"></i></button>
-        <button className="topbtn" title="Powiadomienia"><i className="ti ti-bell"></i><span className="dot"></span></button>
-        <button className="topbtn" title="Pomoc"><i className="ti ti-help"></i></button>
-        <div className="avatar">EC</div>
       </div>
 
       <div className="content">
-        {/* PAGE HEAD */}
-        <div className="page-head">
+        <div className="welcome">
+          <h1>Twoja Hala</h1>
+          <p>
+            Centrum dowodzenia całym kombinatem. Wybierz agenta z prawej strony lub
+            zacznij od skrótu. Praca leci w tle - możesz zamknąć przeglądarkę.
+          </p>
+        </div>
+
+        {/* TOP STATS */}
+        <div className="kpi-row">
+          <div className="kpi">
+            <div className="kpi-label"><i className="ti ti-bolt"></i> Kredyty</div>
+            <div className="kpi-value tabular">
+              {workspace.used_credits}<span className="kpi-unit"> / {workspace.credits}</span>
+            </div>
+            <div className="kpi-bar"><div style={{ width: `${creditsPct}%` }}></div></div>
+            <div className="kpi-meta">{creditsPct}% wykorzystane</div>
+          </div>
+
+          <div className="kpi">
+            <div className="kpi-label"><i className="ti ti-database"></i> Leady w bazie</div>
+            <div className="kpi-value tabular">{data.leads_total}</div>
+            <Link href="/leady" className="kpi-link">
+              Zobacz wszystkie <i className="ti ti-arrow-right"></i>
+            </Link>
+          </div>
+
+          <div className="kpi">
+            <div className="kpi-label"><i className="ti ti-mail-forward"></i> Drafty do review</div>
+            <div className="kpi-value tabular">{data.drafts_pending}</div>
+            <Link href="/drafty" className="kpi-link">
+              Sprawdź drafty <i className="ti ti-arrow-right"></i>
+            </Link>
+          </div>
+
+          <div className="kpi">
+            <div className="kpi-label"><i className="ti ti-loader"></i> Praca w tle</div>
+            <div className="kpi-value tabular">{data.running_jobs}</div>
+            <div className="kpi-meta">
+              {data.running_jobs > 0
+                ? 'agenci pracują, zamknij spokojnie'
+                : 'cisza w fabryce'}
+            </div>
+          </div>
+        </div>
+
+        <div className="hala-grid">
+          {/* MODUŁY */}
           <div>
-            <h1>Pulpit</h1>
-            <p>Stan kombinatu <span className="mono">·</span> <span className="last-update">aktualizacja właśnie</span></p>
-          </div>
-          <div className="timerange">
-            <button>24h</button>
-            <button>7d</button>
-            <button className="active">30d</button>
-            <button>90d</button>
-            <button>YTD</button>
-          </div>
-        </div>
-
-        {/* STATS - 4 cards */}
-        <div className="stats">
-          <StatCard label="Leady w bazie" value={stats.leads_total} icon="database"
-            delta={`${stats.researched} researched`} deltaDir="up"
-            sparkline={data.sparklines.leads} sparkColor="#D4212C" />
-          <StatCard label="Hot leady" value={stats.leads_hot} unit="≥ 7/10" icon="flame"
-            delta={`${stats.leads_hot}/${stats.leads_total} ogółem`} deltaDir="up"
-            sparkline={data.sparklines.leads} sparkColor="#D4212C" />
-          <StatCard label="Drafty do review" value={stats.drafts_pending} icon="mail-forward"
-            sparkline={data.sparklines.drafts} sparkColor="#1C1C1C" />
-          <StatCard label="Średni score" value={stats.avg_score.toFixed(1)} unit="/ 10" icon="chart-bar"
-            sparkline={data.sparklines.replies} sparkColor="#6B7280" />
-        </div>
-
-        {/* ROW 1: CHART + ACTIVITY */}
-        <div className="grid">
-          <div className="card">
-            <div className="card-head">
-              <div className="card-title"><i className="ti ti-funnel"></i> Pipeline cold-mail</div>
-              <div className="card-actions">
-                <span style={{ fontSize: '11.5px' }}>30 dni</span>
-              </div>
+            <div className="section-head">
+              <h2><i className="ti ti-apps"></i> Twoi agenci</h2>
+              <span className="section-sub">moduły AI w workspace</span>
             </div>
-            <div className="card-body">
-              <div className="funnel">
-                {funnel.map((row, i) => (
-                  <div className="funnel-row" key={row.label}>
-                    <div className="funnel-label">
-                      <i className={`ti ti-${row.icon}`}></i> {row.label}
-                    </div>
-                    <div className="funnel-bar">
-                      <div className={`funnel-fill ${i < 2 ? 'red' : ''}`}
-                        style={{ width: `${row.percent}%`, ...(i >= 2 ? { background: ['#2A2A2A', '#444', '#666'][i - 2] || '#666' } : {}) }}>
-                        {row.value}
-                      </div>
-                    </div>
-                    <div className="funnel-num">{row.percent.toFixed(1)}%</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ borderTop: '1px solid var(--border)', marginTop: '14px', paddingTop: '12px',
-                fontSize: '12px', color: 'var(--muted)', display: 'flex', justifyContent: 'space-between' }}>
-                <span>Reply rate vs sent</span>
-                <strong className="mono" style={{ color: 'var(--ink)', fontWeight: 600 }}>
-                  {stats.reply_rate.toFixed(1)}%
-                </strong>
-              </div>
+
+            <div className="modules">
+              {modules.map((m) => (
+                <ModuleCard key={m.slug} module={m} />
+              ))}
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head">
-              <div className="card-title"><i className="ti ti-activity"></i> Ostatnia aktywność</div>
-              <div className="card-actions"><a href="#" style={{ fontSize: '11.5px', color: 'var(--muted)' }}>Wszystkie →</a></div>
+          {/* RIGHT COLUMN */}
+          <div>
+            <div className="section-head">
+              <h2><i className="ti ti-bookmark"></i> Skróty</h2>
+              <span className="section-sub">najczęstsze akcje</span>
+            </div>
+            <div className="shortcuts">
+              {shortcuts.map((s) => (
+                <Link key={s.href} href={s.href} className="shortcut">
+                  <div className="sc-icon"><i className={`ti ti-${s.icon}`}></i></div>
+                  <span>{s.label}</span>
+                  <i className="ti ti-arrow-right sc-arrow"></i>
+                </Link>
+              ))}
+            </div>
+
+            <div className="section-head" style={{ marginTop: '24px' }}>
+              <h2><i className="ti ti-activity"></i> Ostatnia aktywność</h2>
+              <span className="section-sub">zdarzenia w workspace</span>
             </div>
             <div className="activity">
               {events.length === 0 ? (
-                <div style={{ padding: '24px', color: 'var(--muted)', fontSize: '13px', textAlign: 'center' }}>
-                  Brak zdarzeń. Odpal pozyskiwanie żeby zobaczyć aktywność.
+                <div className="empty">
+                  Brak zdarzeń. Odpal pierwszego agenta żeby zobaczyć aktywność.
                 </div>
               ) : events.map((e, i) => (
                 <div className="act-item" key={i}>
@@ -196,139 +214,46 @@ export default function PulpitPage() {
             </div>
           </div>
         </div>
-
-        {/* ROW 2: SEGMENTS + SYSTEM + SHORTCUTS */}
-        <div className="grid split">
-          <div className="card">
-            <div className="card-head">
-              <div className="card-title"><i className="ti ti-layers-subtract"></i> Leady wg segmentu</div>
-            </div>
-            {segments.length === 0 ? (
-              <div style={{ padding: '24px', color: 'var(--muted)', fontSize: '13px', textAlign: 'center' }}>
-                Brak leadów.
-              </div>
-            ) : (
-              <table className="tbl">
-                <thead>
-                  <tr><th>Segment</th><th className="num">Liczba</th></tr>
-                </thead>
-                <tbody>
-                  {segments.map(s => (
-                    <tr key={s.name}>
-                      <td>{s.name}</td>
-                      <td className="num">{s.count}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          <div className="card">
-            <div className="card-head">
-              <div className="card-title"><i className="ti ti-server"></i> Stan systemu</div>
-              <div className="card-actions">
-                <span className="mono" style={{ fontSize: '11px' }}>
-                  <span className="status-dot ok"></span>operational
-                </span>
-              </div>
-            </div>
-            <div>
-              {system.map(row => (
-                <div className="sys-row" key={row.label}>
-                  <span className="sys-label">
-                    <span className={`status-dot ${row.status}`}></span>{row.label}
-                  </span>
-                  <span className="sys-val">{row.value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-head">
-              <div className="card-title"><i className="ti ti-bookmark"></i> Skróty</div>
-              <div className="card-actions"><span style={{ fontSize: '11.5px' }}>ulubione</span></div>
-            </div>
-            <div>
-              <a className="sys-row" href="#" style={{ textDecoration: 'none', color: 'inherit' }}>
-                <span className="sys-label" style={{ gap: '8px' }}>
-                  <div className="tool-ico"><i className="ti ti-search"></i></div> Nowe pozyskiwanie
-                </span>
-                <i className="ti ti-arrow-right" style={{ color: 'var(--muted-2)', fontSize: '14px' }}></i>
-              </a>
-              <a className="sys-row" href="#" style={{ textDecoration: 'none', color: 'inherit' }}>
-                <span className="sys-label" style={{ gap: '8px' }}>
-                  <div className="tool-ico"><i className="ti ti-mail-forward"></i></div> Drafty do review
-                </span>
-                <i className="ti ti-arrow-right" style={{ color: 'var(--muted-2)', fontSize: '14px' }}></i>
-              </a>
-              <a className="sys-row" href="#" style={{ textDecoration: 'none', color: 'inherit' }}>
-                <span className="sys-label" style={{ gap: '8px' }}>
-                  <div className="tool-ico"><i className="ti ti-users"></i></div> Lista leadów
-                </span>
-                <i className="ti ti-arrow-right" style={{ color: 'var(--muted-2)', fontSize: '14px' }}></i>
-              </a>
-              <a className="sys-row" href="#" style={{ textDecoration: 'none', color: 'inherit' }}>
-                <span className="sys-label" style={{ gap: '8px' }}>
-                  <div className="tool-ico"><i className="ti ti-key"></i></div> Klucze API
-                </span>
-                <i className="ti ti-arrow-right" style={{ color: 'var(--muted-2)', fontSize: '14px' }}></i>
-              </a>
-            </div>
-          </div>
-        </div>
       </div>
     </>
   );
 }
 
-// Helper: sparkline SVG generator
-function Sparkline({ points, color }: { points: number[]; color: string }) {
-  if (points.length < 2) return null;
-  const width = 80, height = 28;
-  const min = Math.min(...points), max = Math.max(...points);
-  const range = max - min || 1;
-  const xs = points.map((_, i) => Math.round((i * width) / (points.length - 1)));
-  const ys = points.map(p => height - Math.round(((p - min) / range) * (height - 4)) - 2);
-  const polyPoints = xs.map((x, i) => `${x},${ys[i]}`).join(' ');
-  return (
-    <svg className="stat-spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-      <polyline fill="none" stroke={color} strokeWidth="1.5" points={polyPoints} />
-    </svg>
-  );
-}
-
-// Stat card component
-function StatCard({ label, value, unit, delta, deltaDir, icon, sparkline, sparkColor }: {
-  label: string;
-  value: string | number;
-  unit?: string;
-  delta?: string;
-  deltaDir?: 'up' | 'down' | 'flat';
-  icon: string;
-  sparkline?: number[];
-  sparkColor: string;
-}) {
-  return (
-    <div className="stat">
-      <div className="stat-label"><i className={`ti ti-${icon}`}></i> {label}</div>
-      <div className="stat-value tabular">
-        {value}
-        {unit && <span className="unit">{unit}</span>}
+function ModuleCard({ module: m }: { module: Module }) {
+  const live = m.status === 'live';
+  const card = (
+    <div className={`mod-card ${m.status}`}>
+      <div className="mod-head">
+        <div className={`mod-ico ${m.status}`}>
+          <i className={`ti ti-${m.icon}`}></i>
+        </div>
+        <div className="mod-text">
+          <div className="mod-name">
+            {m.name}
+            {live && <span className="mod-badge live">live</span>}
+            {m.status === 'soon' && <span className="mod-badge soon">soon</span>}
+          </div>
+          <div className="mod-desc">{m.desc}</div>
+        </div>
+        {live && <i className="ti ti-arrow-right mod-arrow"></i>}
       </div>
-      {delta && (
-        <div className={`stat-delta ${deltaDir || 'flat'}`}>
-          {deltaDir === 'up' && <i className="ti ti-arrow-up-right"></i>}
-          {delta}
+
+      {live && m.metrics && (
+        <div className="mod-metrics">
+          {Object.entries(m.metrics).map(([k, v]) => (
+            <div className="mod-metric" key={k}>
+              <span className="mm-value">{v}</span>
+              <span className="mm-label">{k === 'leads' ? 'leady' : k === 'drafts_pending' ? 'drafty' : k}</span>
+            </div>
+          ))}
         </div>
       )}
-      {sparkline && <Sparkline points={sparkline} color={sparkColor} />}
     </div>
   );
+  return live && m.href ? <Link href={m.href} className="mod-link">{card}</Link> : card;
 }
 
-const PULPIT_CSS = `
+const HALA_CSS = `
 .topbar {
   background: var(--panel);
   border-bottom: 1px solid var(--border);
@@ -344,171 +269,239 @@ const PULPIT_CSS = `
 .crumb { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .crumb strong { color: var(--ink); font-weight: 500; }
 .crumb i { font-size: 12px; color: var(--muted-2); }
-.search {
+.ws-tag {
   margin-left: auto;
   display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--border);
+  padding: 6px 12px;
   border-radius: 6px;
-  padding: 6px 10px;
-  width: 280px;
-  color: var(--muted);
-  font-size: 13px;
 }
-.search i { font-size: 14px; }
-.search .kbd {
-  margin-left: auto;
+.ws-tag i { font-size: 14px; color: var(--red); }
+.plan-pill {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 1px 5px;
+  background: rgba(212,33,44,0.12);
+  color: var(--red-dark);
+  padding: 2px 6px;
   border-radius: 3px;
-  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 700;
 }
-.topbtn {
-  width: 32px; height: 32px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 6px;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  background: var(--panel);
-  position: relative;
-  cursor: pointer;
-}
-.topbtn:hover { color: var(--ink); border-color: var(--border-strong); }
-.topbtn .dot {
-  position: absolute; top: 6px; right: 6px;
-  width: 6px; height: 6px;
-  background: var(--red);
-  border-radius: 50%;
-  border: 1.5px solid var(--panel);
-}
-.avatar {
-  width: 32px; height: 32px;
-  border-radius: 50%;
-  background: var(--graphite);
-  color: #fff;
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 600; font-size: 12px;
-  border: 2px solid var(--red);
-}
-.content { padding: 24px; }
-.page-head {
-  display: flex; align-items: flex-end; justify-content: space-between;
-  margin-bottom: 24px;
-  gap: 16px;
-}
-.page-head h1 {
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.4px;
-  margin-bottom: 4px;
-}
-.page-head p { color: var(--muted); font-size: 13.5px; }
-.page-head p .mono { color: var(--ink); }
-.last-update { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted-2); }
-.timerange {
-  display: flex; gap: 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.timerange button {
-  padding: 6px 12px;
-  font-size: 12.5px;
-  font-family: inherit;
-  background: none;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  border-right: 1px solid var(--border);
-}
-.timerange button:last-child { border-right: none; }
-.timerange button:hover { background: var(--bg); color: var(--ink); }
-.timerange button.active { background: var(--graphite); color: #fff; }
 
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
-.stat {
+.content { padding: 24px; max-width: 1320px; }
+
+.welcome { margin-bottom: 24px; max-width: 720px; }
+.welcome h1 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin: 0 0 6px 0;
+  color: var(--ink);
+}
+.welcome p { color: var(--muted); font-size: 14px; line-height: 1.55; }
+
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.kpi {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px 16px;
-  position: relative;
+  border-radius: 10px;
+  padding: 16px;
 }
-.stat-label {
+.kpi-label {
   font-size: 11.5px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  font-weight: 500;
-  margin-bottom: 8px;
+  font-weight: 600;
+  margin-bottom: 10px;
   display: flex; align-items: center; gap: 6px;
 }
-.stat-label i { font-size: 13px; }
-.stat-value {
-  font-size: 26px;
-  font-weight: 600;
+.kpi-label i { font-size: 13px; color: var(--red); }
+.kpi-value {
+  font-size: 28px;
+  font-weight: 700;
   letter-spacing: -0.6px;
   line-height: 1.1;
   font-feature-settings: "tnum";
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  color: var(--ink);
 }
-.stat-value .unit { font-size: 13px; color: var(--muted); font-weight: 400; }
-.stat-delta {
-  margin-top: 6px;
+.kpi-unit { font-size: 14px; color: var(--muted); font-weight: 400; }
+.kpi-bar {
+  height: 4px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 10px 0 6px;
+}
+.kpi-bar > div { height: 100%; background: var(--red); transition: width 0.3s; }
+.kpi-meta {
   font-size: 11.5px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--muted);
+  color: var(--muted-2);
   font-family: 'JetBrains Mono', monospace;
 }
-.stat-delta.up { color: var(--red-dark); }
-.stat-spark { position: absolute; bottom: 12px; right: 12px; opacity: 0.55; }
-
-.grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px; }
-.grid.split { grid-template-columns: 1fr 1fr 1fr; }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
-.card-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+.kpi-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--red); text-decoration: none;
+  margin-top: 8px; font-weight: 500;
 }
-.card-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-.card-title i { color: var(--red); font-size: 15px; }
-.card-actions { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
-.card-body { padding: 16px; }
+.kpi-link:hover { text-decoration: underline; }
+.kpi-link i { font-size: 13px; }
 
-.funnel { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
-.funnel-row {
+.hala-grid {
   display: grid;
-  grid-template-columns: 130px 1fr 60px;
-  align-items: center;
-  gap: 12px;
+  grid-template-columns: 1fr 340px;
+  gap: 24px;
+}
+
+.section-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 14px;
+}
+.section-head h2 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  margin: 0;
+  display: flex; align-items: center; gap: 8px;
+  color: var(--ink);
+}
+.section-head h2 i { color: var(--red); font-size: 16px; }
+.section-sub {
+  font-size: 11.5px;
+  color: var(--muted-2);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.modules { display: flex; flex-direction: column; gap: 10px; }
+.mod-link { text-decoration: none; color: inherit; }
+.mod-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  transition: all 0.15s;
+}
+.mod-card.live { cursor: pointer; }
+.mod-card.live:hover {
+  border-color: rgba(212,33,44,0.4);
+  box-shadow: 0 4px 16px -8px rgba(212,33,44,0.2);
+  transform: translateY(-1px);
+}
+.mod-card.soon { opacity: 0.62; }
+
+.mod-head {
+  display: flex; align-items: center; gap: 14px;
+}
+.mod-ico {
+  width: 44px; height: 44px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.mod-ico.live { background: rgba(212,33,44,0.1); border-color: rgba(212,33,44,0.25); color: var(--red); }
+.mod-ico i { font-size: 22px; }
+.mod-text { flex: 1; min-width: 0; }
+.mod-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: var(--ink);
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 3px;
+}
+.mod-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.mod-badge.live { background: rgba(212,33,44,0.15); color: var(--red-dark); border: 1px solid rgba(212,33,44,0.25); }
+.mod-badge.soon { background: var(--bg); color: var(--muted-2); border: 1px solid var(--border); }
+.mod-desc { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.mod-arrow { color: var(--muted-2); font-size: 16px; }
+.mod-card.live:hover .mod-arrow { color: var(--red); }
+
+.mod-metrics {
+  display: flex;
+  gap: 18px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.mod-metric { display: flex; flex-direction: column; gap: 1px; }
+.mm-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--ink);
+  font-feature-settings: "tnum";
+}
+.mm-label {
+  font-size: 10.5px;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.shortcuts {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.shortcut {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--ink);
+  text-decoration: none;
+  transition: background 0.12s;
+}
+.shortcut:last-child { border-bottom: none; }
+.shortcut:hover { background: var(--bg); }
+.sc-icon {
+  width: 28px; height: 28px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--red);
+  flex-shrink: 0;
+}
+.sc-icon i { font-size: 14px; }
+.sc-arrow { margin-left: auto; color: var(--muted-2); font-size: 13px; }
+.shortcut:hover .sc-arrow { color: var(--red); }
+
+.activity {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--muted-2);
   font-size: 12.5px;
 }
-.funnel-label { display: flex; align-items: center; gap: 8px; }
-.funnel-label i { font-size: 14px; color: var(--muted); }
-.funnel-bar { height: 18px; background: var(--bg); border-radius: 3px; position: relative; overflow: hidden; }
-.funnel-fill {
-  height: 100%;
-  background: var(--graphite);
-  display: flex; align-items: center;
-  padding-left: 8px;
-  color: #fff;
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
-}
-.funnel-fill.red { background: var(--red); }
-.funnel-num { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); text-align: right; }
-
-.activity { padding: 0; }
 .act-item {
-  padding: 11px 16px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border);
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -519,63 +512,26 @@ const PULPIT_CSS = `
 .act-item:last-child { border-bottom: none; }
 .act-ico {
   width: 24px; height: 24px;
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--bg);
   border: 1px solid var(--border);
   display: flex; align-items: center; justify-content: center;
   color: var(--muted);
   flex-shrink: 0;
 }
-.act-ico i { font-size: 13px; }
-.act-ico.red { background: var(--red-tint); border-color: rgba(212,33,44,0.2); color: var(--red); }
-.act-text { line-height: 1.4; color: var(--muted); }
+.act-ico i { font-size: 12px; }
+.act-ico.red { background: rgba(212,33,44,0.1); border-color: rgba(212,33,44,0.2); color: var(--red); }
+.act-text { line-height: 1.4; color: var(--muted); word-break: break-word; }
 .act-text strong { color: var(--ink); font-weight: 500; }
-.act-time { color: var(--muted-2); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
-
-.sys-row {
-  padding: 11px 16px;
-  border-bottom: 1px solid var(--border);
-  display: flex; justify-content: space-between; align-items: center;
-  font-size: 12.5px;
+.act-time {
+  color: var(--muted-2);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  flex-shrink: 0;
 }
-.sys-row:last-child { border-bottom: none; }
-.sys-row:hover { background: var(--bg); }
-.sys-label { color: var(--ink); display: flex; align-items: center; gap: 6px; }
-.sys-val { font-family: 'JetBrains Mono', monospace; color: var(--muted); font-size: 12px; }
-.tool-ico {
-  width: 24px; height: 24px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  display: flex; align-items: center; justify-content: center;
-  color: var(--red);
-}
-.tool-ico i { font-size: 14px; }
-
-.status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-.status-dot.ok { background: #10B981; box-shadow: 0 0 0 3px rgba(16,185,129,0.15); }
-.status-dot.warn { background: #F59E0B; }
-.status-dot.err { background: var(--red); }
-
-table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
-table.tbl th {
-  text-align: left;
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  padding: 10px 16px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-}
-table.tbl th.num, table.tbl td.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
-table.tbl td { padding: 11px 16px; border-bottom: 1px solid var(--border); }
-table.tbl tr:last-child td { border-bottom: none; }
-table.tbl tr:hover td { background: var(--bg); }
 
 @media (max-width: 1100px) {
-  .stats { grid-template-columns: repeat(2, 1fr); }
-  .grid, .grid.split { grid-template-columns: 1fr; }
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+  .hala-grid { grid-template-columns: 1fr; }
 }
 `;

@@ -312,74 +312,188 @@ def _sparkline_for_ws(workspace_id: int, status: str | None = None, days: int = 
     return points
 
 
-@app.get("/api/dashboard")
-def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+def _safe(fn, default, label: str = ""):
+    """Wrap a query so a single broken section nigdy nie spali całego dashboardu."""
+    try:
+        return fn()
+    except Exception as exc:
+        log.warning(f"dashboard section '{label}' failed: {exc}")
+        return default
+
+
+@app.get("/api/workspace/overview")
+def workspace_overview(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Hala -> Pulpit. Ogólny widok workspace, niezależny od modułu.
+
+    Pokazuje: dane workspace, kredyty, listę modułów (live/soon), agregaty
+    pracy w tle (running jobs), ostatnie zdarzenia. Bezpieczne dla pustego
+    workspace - każda sekcja ma fallback.
+    """
     ws_id = cur.workspace_id
-    with SessionLocal() as session:
-        def cnt(*conds): return int(session.scalar(
-            select(func.count(Lead.id)).where(Lead.workspace_id == ws_id, *conds)
-        ) or 0)
-        def cnt_d(*conds): return int(session.scalar(
-            select(func.count(EmailDraft.id)).where(EmailDraft.workspace_id == ws_id, *conds)
-        ) or 0)
 
-        leads_total = cnt()
-        researched = cnt(Lead.status == LeadStatus.RESEARCHED.value)
-        drafted = cnt(Lead.status == LeadStatus.DRAFTED.value)
-        sent_lead = cnt(Lead.status == LeadStatus.SENT.value)
-        replied = cnt(Lead.status == LeadStatus.REPLIED.value)
-        bounced = cnt(Lead.status == LeadStatus.BOUNCED.value)
-        drafts_pending = cnt_d(EmailDraft.status == DraftStatus.DRAFT.value)
-        sent_today = cnt_d(EmailDraft.status == DraftStatus.SENT.value,
-                          EmailDraft.sent_at >= _start_of_day_utc())
-        sent_total = cnt_d(EmailDraft.status == DraftStatus.SENT.value)
-        avg_score = float(session.scalar(
-            select(func.avg(Lead.score)).where(Lead.workspace_id == ws_id)
-        ) or 0.0)
-        hot_leads = cnt(Lead.score >= 7.0)
+    def _stats():
+        with SessionLocal() as session:
+            ws = session.get(Workspace, ws_id)
+            leads_total = int(session.scalar(
+                select(func.count(Lead.id)).where(Lead.workspace_id == ws_id)
+            ) or 0)
+            drafts_pending = int(session.scalar(
+                select(func.count(EmailDraft.id)).where(
+                    EmailDraft.workspace_id == ws_id,
+                    EmailDraft.status == DraftStatus.DRAFT.value,
+                )
+            ) or 0)
+            running_jobs = int(session.scalar(
+                select(func.count(Job.id)).where(
+                    Job.workspace_id == ws_id,
+                    Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+                )
+            ) or 0)
+            return {
+                "workspace": {
+                    "id": ws.id, "name": ws.name, "plan": ws.plan,
+                    "credits": ws.monthly_credits, "used_credits": ws.used_credits,
+                },
+                "leads_total": leads_total,
+                "drafts_pending": drafts_pending,
+                "running_jobs": running_jobs,
+            }
 
-        segments = session.execute(
-            select(Lead.segment, func.count(Lead.id))
-            .where(Lead.workspace_id == ws_id)
-            .group_by(Lead.segment)
-            .order_by(func.count(Lead.id).desc())
-        ).all()
-
-        running_jobs = int(session.scalar(
-            select(func.count(Job.id)).where(
-                Job.workspace_id == ws_id,
-                Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
-            )
-        ) or 0)
-
-    reply_rate = (replied / max(sent_total, 1)) * 100 if sent_total else 0
-    drafted_total = drafted + sent_lead + replied + bounced
-    sent_total_w = sent_total + replied + bounced
+    base = _safe(_stats, {
+        "workspace": {"id": ws_id, "name": cur.workspace_name, "plan": cur.workspace_plan,
+                      "credits": 0, "used_credits": 0},
+        "leads_total": 0, "drafts_pending": 0, "running_jobs": 0,
+    }, "overview_stats")
 
     return {
-        "workspace": {"id": ws_id, "name": cur.workspace_name, "plan": cur.workspace_plan},
-        "stats": {
-            "leads_total": leads_total, "leads_hot": hot_leads,
-            "drafts_pending": drafts_pending, "avg_score": round(avg_score, 1),
-            "researched": researched, "sent_today": sent_today,
-            "replied": replied, "reply_rate": round(reply_rate, 1),
-            "bounced": bounced, "running_jobs": running_jobs,
-        },
-        "sparklines": {
+        **base,
+        "modules": [
+            {
+                "slug": "handlowiec", "name": "Handlowiec",
+                "desc": "Cold-email + research leadów + Woodpecker",
+                "icon": "robot", "status": "live",
+                "href": "/handlowiec/pulpit",
+                "metrics": {
+                    "leads": base.get("leads_total", 0),
+                    "drafts_pending": base.get("drafts_pending", 0),
+                },
+            },
+            {"slug": "kuznia", "name": "Kuźnia Kreatywna",
+             "desc": "Wirtualny model, generator reklam, animator packshotów",
+             "icon": "anvil", "status": "soon", "href": None},
+            {"slug": "kancelaria", "name": "Kancelaria",
+             "desc": "Agent Celny, Asystent GPSR",
+             "icon": "briefcase", "status": "soon", "href": None},
+        ],
+        "shortcuts": [
+            {"label": "Nowe pozyskiwanie leadów", "href": "/pozyskiwanie", "icon": "search"},
+            {"label": "Drafty do review", "href": "/drafty", "icon": "mail-forward"},
+            {"label": "Lista leadów", "href": "/leady", "icon": "users"},
+        ],
+    }
+
+
+@app.get("/api/dashboard")
+def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Handlowiec -> Pulpit. Module-specific dashboard cold-mail.
+
+    Każda sekcja w try/except - empty workspace = wszystkie zera, nigdy 500.
+    """
+    ws_id = cur.workspace_id
+
+    def _counts():
+        with SessionLocal() as session:
+            def cnt(*conds): return int(session.scalar(
+                select(func.count(Lead.id)).where(Lead.workspace_id == ws_id, *conds)
+            ) or 0)
+            def cnt_d(*conds): return int(session.scalar(
+                select(func.count(EmailDraft.id)).where(EmailDraft.workspace_id == ws_id, *conds)
+            ) or 0)
+
+            avg_q = session.scalar(
+                select(func.avg(Lead.score)).where(Lead.workspace_id == ws_id)
+            )
+
+            return {
+                "leads_total": cnt(),
+                "researched": cnt(Lead.status == LeadStatus.RESEARCHED.value),
+                "drafted": cnt(Lead.status == LeadStatus.DRAFTED.value),
+                "sent_lead": cnt(Lead.status == LeadStatus.SENT.value),
+                "replied": cnt(Lead.status == LeadStatus.REPLIED.value),
+                "bounced": cnt(Lead.status == LeadStatus.BOUNCED.value),
+                "drafts_pending": cnt_d(EmailDraft.status == DraftStatus.DRAFT.value),
+                "sent_today": cnt_d(EmailDraft.status == DraftStatus.SENT.value,
+                                    EmailDraft.sent_at >= _start_of_day_utc()),
+                "sent_total": cnt_d(EmailDraft.status == DraftStatus.SENT.value),
+                "avg_score": float(avg_q) if avg_q is not None else 0.0,
+                "hot_leads": cnt(Lead.score >= 7.0),
+            }
+
+    c = _safe(_counts, {
+        "leads_total": 0, "researched": 0, "drafted": 0, "sent_lead": 0,
+        "replied": 0, "bounced": 0, "drafts_pending": 0, "sent_today": 0,
+        "sent_total": 0, "avg_score": 0.0, "hot_leads": 0,
+    }, "counts")
+
+    def _segments():
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(Lead.segment, func.count(Lead.id))
+                .where(Lead.workspace_id == ws_id)
+                .group_by(Lead.segment)
+                .order_by(func.count(Lead.id).desc())
+            ).all()
+            return [{"name": (r[0] or "-"), "count": int(r[1])} for r in rows]
+
+    def _running_jobs():
+        with SessionLocal() as session:
+            return int(session.scalar(
+                select(func.count(Job.id)).where(
+                    Job.workspace_id == ws_id,
+                    Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+                )
+            ) or 0)
+
+    segments = _safe(_segments, [], "segments")
+    running_jobs = _safe(_running_jobs, 0, "running_jobs")
+    sparklines = _safe(
+        lambda: {
             "leads": _sparkline_for_ws(ws_id, days=12),
             "drafts": _sparkline_for_ws(ws_id, LeadStatus.DRAFTED.value, 12),
             "replies": _sparkline_for_ws(ws_id, LeadStatus.REPLIED.value, 12),
         },
+        {"leads": [0] * 12, "drafts": [0] * 12, "replies": [0] * 12},
+        "sparklines",
+    )
+
+    leads_total = c["leads_total"]
+    sent_total = c["sent_total"]
+    drafted_total = c["drafted"] + c["sent_lead"] + c["replied"] + c["bounced"]
+    sent_total_w = sent_total + c["replied"] + c["bounced"]
+    reply_rate = (c["replied"] / max(sent_total, 1)) * 100 if sent_total else 0.0
+    safe_total = max(leads_total, 1)
+
+    return {
+        "workspace": {"id": ws_id, "name": cur.workspace_name, "plan": cur.workspace_plan},
+        "stats": {
+            "leads_total": leads_total, "leads_hot": c["hot_leads"],
+            "drafts_pending": c["drafts_pending"], "avg_score": round(c["avg_score"], 1),
+            "researched": c["researched"], "sent_today": c["sent_today"],
+            "replied": c["replied"], "reply_rate": round(reply_rate, 1),
+            "bounced": c["bounced"], "running_jobs": running_jobs,
+        },
+        "sparklines": sparklines,
         "funnel": [
-            {"label": "Pozyskane", "value": leads_total, "percent": 100.0 if leads_total else 0, "icon": "upload"},
-            {"label": "Researched", "value": researched + drafted_total,
-             "percent": round((researched + drafted_total) / max(leads_total, 1) * 100, 1), "icon": "search"},
+            {"label": "Pozyskane", "value": leads_total,
+             "percent": 100.0 if leads_total else 0.0, "icon": "upload"},
+            {"label": "Researched", "value": c["researched"] + drafted_total,
+             "percent": round((c["researched"] + drafted_total) / safe_total * 100, 1), "icon": "search"},
             {"label": "Z draftem", "value": drafted_total,
-             "percent": round(drafted_total / max(leads_total, 1) * 100, 1), "icon": "check"},
+             "percent": round(drafted_total / safe_total * 100, 1), "icon": "check"},
             {"label": "Wysłane", "value": sent_total_w,
-             "percent": round(sent_total_w / max(leads_total, 1) * 100, 1), "icon": "send"},
-            {"label": "Odpowiedzieli", "value": replied,
-             "percent": round(replied / max(leads_total, 1) * 100, 1), "icon": "message-circle"},
+             "percent": round(sent_total_w / safe_total * 100, 1), "icon": "send"},
+            {"label": "Odpowiedzieli", "value": c["replied"],
+             "percent": round(c["replied"] / safe_total * 100, 1), "icon": "message-circle"},
         ],
         "system": [
             {"label": "Anthropic key", "value": "OK" if os.getenv("ANTHROPIC_API_KEY") else "brak",
@@ -393,7 +507,7 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
             {"label": "Woodpecker", "value": "OK" if os.getenv("WOODPECKER_API_KEY") else "brak",
              "status": "ok" if os.getenv("WOODPECKER_API_KEY") else "warn"},
         ],
-        "segments": [{"name": s[0] or "—", "count": int(s[1])} for s in segments],
+        "segments": segments,
     }
 
 
@@ -663,10 +777,14 @@ def create_draft(payload: CreateDraftIn, cur: CurrentUser = Depends(get_current_
 
 # ─── Discovery + research jako jobs ─────────────────────────────────────
 
+# Globalny dzienny cap per workspace (free plan). W przyszlosci per-plan.
+DISCOVERY_DAILY_CAP_FREE = int(os.getenv("DISCOVERY_DAILY_CAP_FREE") or 1000)
+
+
 class DiscoverIn(BaseModel):
     query: str
     sources: list[str]
-    max_per_source: int = 20
+    max_per_source: int = 50
     segment: str = "inne"
     location: str | None = None
     custom_description: str | None = None
@@ -676,20 +794,43 @@ class DiscoverIn(BaseModel):
     auto_draft_threshold: int | None = 7
 
 
+def _discovery_today_count(workspace_id: int) -> int:
+    """Ile leadów workspace pozyskał już dziś (cap dzienny)."""
+    with SessionLocal() as session:
+        return int(session.scalar(
+            select(func.count(Lead.id)).where(
+                Lead.workspace_id == workspace_id,
+                Lead.created_at >= _start_of_day_utc(),
+            )
+        ) or 0)
+
+
 @app.post("/api/discovery/search")
 def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     """Tworzy DISCOVERY_PIPELINE job - worker zrobi: znajdź -> filter -> research -> draft.
 
     Zwraca job_id natychmiast. Frontend polluje /api/jobs/{id} dla progressu.
     User może wylogować się - worker leci dalej.
+
+    Twardy cap: DISCOVERY_DAILY_CAP_FREE leadów / dzień / workspace żeby nie
+    spalić budżetu Apify / LLM. W przyszłości per-plan limits.
     """
+    payload.max_per_source = max(1, min(payload.max_per_source, 200))
+    today_done = _discovery_today_count(cur.workspace_id)
+    if today_done >= DISCOVERY_DAILY_CAP_FREE:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Dzienny limit pozyskiwania ({DISCOVERY_DAILY_CAP_FREE} leadów) "
+                   f"wyczerpany. Spróbuj jutro.",
+        )
     with SessionLocal() as session:
         job = create_job(
             session, job_type=JobType.DISCOVERY_PIPELINE,
             workspace_id=cur.workspace_id, user_id=cur.user_id,
             payload=payload.model_dump(),
         )
-    return {"ok": True, "job_id": job.id}
+    return {"ok": True, "job_id": job.id,
+            "daily_used": today_done, "daily_cap": DISCOVERY_DAILY_CAP_FREE}
 
 
 class ResearchIn(BaseModel):

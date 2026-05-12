@@ -249,12 +249,48 @@ def init_db() -> None:
     Default workspace dostaje stare leady (z workspace_id=NULL przed migracją)
     przy pierwszym uruchomieniu po deploy. Admin user (z env ADMIN_EMAIL) jest
     automatycznie tworzony - to Twoje konto.
+
+    Idempotentna migracja kolumn workspace_id: jeśli stara DB istnieje bez
+    workspace_id, doklejamy kolumnę (ALTER TABLE) zanim odpalimy resztę.
     """
     if str(settings.db_url).startswith("sqlite"):
         # Local dev: stwórz folder dla pliku DB
         settings.db_file.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(_engine)
+    _migrate_workspace_columns()
     _ensure_default_workspace()
+
+
+def _migrate_workspace_columns() -> None:
+    """Dokleja workspace_id do leads/email_drafts/events jeśli stara DB.
+
+    Bezpieczne dla obu Postgres i SQLite. Każdy ALTER osobno w try/except -
+    gdy kolumna już jest, ALTER rzuca błąd i ignorujemy. Idempotent.
+    """
+    from sqlalchemy import text
+    is_pg = not str(settings.db_url).startswith("sqlite")
+    migrations = [
+        ("leads", "workspace_id", "INTEGER"),
+        ("leads", "city", "VARCHAR(100)"),
+        ("leads", "instagram", "VARCHAR(255)"),
+        ("leads", "source", "VARCHAR(50)"),
+        ("leads", "research_data", "JSON" if is_pg else "TEXT"),
+        ("leads", "notes", "TEXT"),
+        ("email_drafts", "workspace_id", "INTEGER"),
+        ("email_drafts", "snippet4", "TEXT"),
+        ("email_drafts", "snippet5", "TEXT"),
+        ("email_drafts", "edited_by_user", "BOOLEAN DEFAULT FALSE" if is_pg else "INTEGER DEFAULT 0"),
+        ("events", "workspace_id", "INTEGER"),
+        ("events", "user_id", "INTEGER"),
+        ("events", "payload", "JSON" if is_pg else "TEXT"),
+    ]
+    with _engine.begin() as conn:
+        for table, column, coltype in migrations:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+            except Exception:
+                # Kolumna już istnieje - OK, idziemy dalej
+                pass
 
 
 def _ensure_default_workspace() -> None:
