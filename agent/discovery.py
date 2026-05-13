@@ -113,19 +113,10 @@ class RelevanceBatch(BaseModel):
     items: list[RelevanceItem]
 
 
-# ---- Secret resolution (env first, Streamlit secrets as fallback) -----------
+# ---- Secret resolution (env) ------------------------------------------------
 
 def _resolve_secret(env_value: str, secret_key: str) -> str:
-    if env_value:
-        return env_value
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-
-        if hasattr(st, "secrets") and secret_key in st.secrets:
-            return str(st.secrets[secret_key])
-    except Exception:
-        pass
-    return ""
+    return env_value or ""
 
 
 def has_apify_token() -> bool:
