@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from core.db import Job, JobStatus, JobType
+from core.serialize import iso_utc
 
 
 def create_job(
@@ -90,9 +91,9 @@ def serialize_job(job: Job, *, lite: bool = False) -> dict[str, Any]:
         "total": int(job.total or 0),
         "retries": int(job.retries or 0),
         "last_error": job.last_error,
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "started_at": job.started_at.isoformat() if job.started_at else None,
-        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "created_at": iso_utc(job.created_at),
+        "started_at": iso_utc(job.started_at),
+        "completed_at": iso_utc(job.completed_at),
     }
     if not lite:
         out["payload"] = job.payload
