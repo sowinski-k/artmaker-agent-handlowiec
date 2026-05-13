@@ -39,6 +39,8 @@ interface DashboardData {
       total_min: number;
     }>;
     rates: {
+      year: number;
+      min_wage_monthly: number;
       min_wage_pln_per_h: number;
       min_wage_employer_pln_per_h: number;
       employer_cost_multiplier: number;
@@ -171,28 +173,28 @@ export default function PulpitPage() {
             {/* 3 stawki - od konserwatywnej do realistycznej */}
             <div className="roi-amounts roi-amounts-3">
               <div className="roi-amount-block">
-                <div className="ra-label">Najniższa krajowa (brutto pracownika)</div>
+                <div className="ra-label">Gdybyś zatrudnił kogoś na najniższą krajową</div>
                 <div className="ra-value">
                   <strong>{data.roi.saved_pln.min_wage_brutto.toLocaleString('pl-PL')}</strong>
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
-                  {data.roi.rates.min_wage_pln_per_h.toFixed(1)} zł/h
+                  {data.roi.rates.min_wage_pln_per_h.toFixed(1)} zł/h brutto
                 </div>
               </div>
               <div className="roi-amount-block">
-                <div className="ra-label">Realny koszt pracodawcy (z ZUS)</div>
+                <div className="ra-label">Realny koszt etatu (z ZUS pracodawcy)</div>
                 <div className="ra-value">
                   <strong>{data.roi.saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')}</strong>
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
                   {data.roi.rates.min_wage_employer_pln_per_h.toFixed(1)} zł/h
-                  {' '}({data.roi.rates.employer_cost_multiplier}× brutto)
+                  {' '}(brutto +33% na ZUS)
                 </div>
               </div>
               <div className="roi-amount-block primary">
-                <div className="ra-label">Stawka handlowca B2B (rynek)</div>
+                <div className="ra-label">Gdybyś wynajął dobrego handlowca</div>
                 <div className="ra-value">
                   <strong>{data.roi.saved_pln.sales_rate.toLocaleString('pl-PL')}</strong>
                   <span className="ra-unit"> zł</span>
@@ -203,10 +205,10 @@ export default function PulpitPage() {
               </div>
             </div>
 
-            {/* Breakdown - co skladalo sie na ten ROI */}
+            {/* Breakdown - co skladalo sie na ten ROI (user-friendly) */}
             <div className="roi-breakdown-list">
               <div className="rbl-head">
-                <i className="ti ti-list-details" /> Co agent zrobił:
+                <i className="ti ti-list-details" /> Co dokładnie zrobił za Ciebie:
               </div>
               {data.roi.breakdown.filter(b => b.count > 0).map((b) => (
                 <div className="rbl-row" key={b.label}>
@@ -222,9 +224,8 @@ export default function PulpitPage() {
             </div>
             <div className="roi-footer-note">
               <i className="ti ti-info-circle" />
-              Stawki konfigurowalne przez env vars (LABOR_MIN_WAGE_PLN_PER_H,
-              LABOR_MIN_PER_RESEARCH itp.) - łatwa aktualizacja gdy zmieni się
-              minimalna albo Twoja oferta.
+              Liczone wg minimalnej krajowej {data.roi.rates.year} ({data.roi.rates.min_wage_monthly.toLocaleString('pl-PL')} zł brutto / m-c)
+              i przeciętnej stawki handlowca B2B. Aktualizujemy automatycznie co rok.
             </div>
           </div>
         )}
