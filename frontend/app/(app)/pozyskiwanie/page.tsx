@@ -38,6 +38,7 @@ interface PeekResponse {
   diagnostics: Array<{ source: string; places: unknown[]; error?: string; duration_s?: number }>;
   daily_used: number;
   daily_cap: number;
+  relevance_source?: 'llm' | 'heuristic' | 'none';
 }
 
 interface JobInfo {
@@ -160,6 +161,7 @@ export default function PozyskiwaniePage() {
   const [peeking, setPeeking] = useState(false);
   const [peekResults, setPeekResults] = useState<DiscoveredPlace[] | null>(null);
   const [peekDiag, setPeekDiag] = useState<PeekResponse['diagnostics']>([]);
+  const [peekRelevanceSource, setPeekRelevanceSource] = useState<string | null>(null);
   const [peekCap, setPeekCap] = useState<{ used: number; cap: number } | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
@@ -233,8 +235,28 @@ export default function PozyskiwaniePage() {
     );
   }
 
+  // Custom queries per segment - lepsze niz raw "warsztaty dzieci" ktore
+  // wciaga z Google Maps wszystko (Minecraft, kulinarne, jezykow). Bardziej
+  // specyficzny query = mniej smieci na input = mniej palonych tokenow LLM.
+  const SEGMENT_QUERY_HINTS: Record<string, string> = {
+    sklep_plastyczny: 'sklep plastyczny artykuly malarskie',
+    sklep_papierniczy: 'sklep papierniczy artykuly biurowe',
+    paint_and_sip: 'paint and sip malowanie z winem',
+    warsztaty_dzieci: 'warsztaty plastyczne kreatywne dla dzieci',
+    animatorzy_eventy: 'animatorzy eventy warsztaty kreatywne',
+    szkola_artystyczna: 'szkola artystyczna plastyczna ognisko',
+    marka_wlasna: 'zestawy DIY kreatywne marka wlasna',
+    inne: 'artykuly plastyczne kreatywne',
+  };
+
   function buildQuery() {
-    const phrase = customTarget.trim() || segment.replace(/_/g, ' ');
+    // Custom target ma pierwszeństwo (user wpisuje co chce)
+    if (customTarget.trim()) {
+      const phrase = customTarget.trim();
+      return location.trim() ? `${phrase} ${location.trim()}` : phrase;
+    }
+    // Inaczej - specyficzny query per segment, nie raw "warsztaty_dzieci"
+    const phrase = SEGMENT_QUERY_HINTS[segment] || segment.replace(/_/g, ' ');
     return location.trim() ? `${phrase} ${location.trim()}` : phrase;
   }
 
@@ -280,6 +302,7 @@ export default function PozyskiwaniePage() {
       setPeekResults(res.places);
       setPeekDiag(res.diagnostics);
       setPeekCap({ used: res.daily_used, cap: res.daily_cap });
+      setPeekRelevanceSource(res.relevance_source || null);
 
       const auto = new Set<number>();
       res.places.forEach((p, i) => {
@@ -792,6 +815,37 @@ export default function PozyskiwaniePage() {
           </div>
         )}
 
+        {/* PEEK RESULTS - banner gdy relevance source != llm */}
+        {mode === 'manual' && peekResults && peekRelevanceSource === 'heuristic' && (
+          <div className="banner-warn" style={{ marginTop: 16 }}>
+            <i className="ti ti-alert-triangle" />
+            <div>
+              <strong>Filtr trafnosci LLM nie zadzialal</strong> - pokazujemy
+              heurystyczne score (na podstawie nazw firm). Mozliwe przyczyny:
+              brak klucza Gemini, timeout, lub zbyt duzy batch.
+              {' '}<strong>Sprawdz wyniki recznie</strong> - heurystyka jest mniej
+              dokladna niz LLM. Sprawdz tez ze klucz GEMINI_API_KEY jest ustawiony
+              w Railway Variables (backend service).
+            </div>
+          </div>
+        )}
+
+        {/* PEEK RESULTS - info gdy 0 zaznaczonych mimo wynikow */}
+        {mode === 'manual' && peekResults && peekResults.length > 0 && selected.size === 0 && !peeking && (
+          <div className="banner-info" style={{ marginTop: 16 }}>
+            <i className="ti ti-info-circle" />
+            <div>
+              <strong>0 firm zaznaczonych automatycznie</strong> - zadna z {peekResults.length} firm
+              nie przekroczyla progu trafnosci ({relevanceThreshold}/10). Co mozesz zrobic:
+              <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12.5 }}>
+                <li>Obnizyc <strong>Prog trafnosci LLM</strong> w formularzu (np. z {relevanceThreshold} na 4-5)</li>
+                <li>Zaznaczyc recznie ktore firmy chcesz researchowac (kliknij checkbox per wiersz)</li>
+                <li>Zmienic <strong>segment</strong> albo <strong>opis targetu</strong> jesli wyniki sa off-topic</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
         {/* PEEK RESULTS TABLE */}
         {mode === 'manual' && peekResults && (
           <div className="card" style={{ marginTop: 16 }}>
@@ -801,6 +855,11 @@ export default function PozyskiwaniePage() {
                 {peekResults.some((r) => r.existing_lead_id) && (
                   <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 8 }}>
                     · {peekResults.filter((r) => r.existing_lead_id).length} już w bazie
+                  </span>
+                )}
+                {peekRelevanceSource === 'heuristic' && (
+                  <span style={{ fontSize: 11, color: '#92400E', marginLeft: 8, fontWeight: 500 }}>
+                    · trafnosc: heurystyka lokalna
                   </span>
                 )}
               </div>
@@ -1485,6 +1544,35 @@ table.tbl tr:hover td { background: #FAFAF7; }
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+/* ============ INFO BANNERS (warn / info) ============ */
+.banner-warn, .banner-info {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 14px 16px; border-radius: 10px;
+  font-size: 13px; line-height: 1.5;
+}
+.banner-warn {
+  background: #FFF7ED;
+  border: 1px solid #FED7AA;
+  color: #9A3412;
+}
+.banner-warn i {
+  font-size: 18px;
+  color: #C2410C;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.banner-info {
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  color: #1E40AF;
+}
+.banner-info i {
+  font-size: 18px;
+  color: #2563EB;
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 /* ============ AGENT WORKING CARD (zamiast disabled buttona "Szukam...") ============ */

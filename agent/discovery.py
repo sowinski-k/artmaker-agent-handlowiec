@@ -536,6 +536,115 @@ def mark_existing_in_db(places: list[DiscoveredPlace], workspace_id: int | None 
 
 # ---- Relevance filter (cheap LLM batch scoring) -----------------------------
 
+# Czarna lista keyword'ow w nazwie/kategorii - lapie firmy ktore JEDNOZNACZNIE
+# nie pasuja do Artmaker (farby/plotna/papier/DIY). PRE-FILTER lokalny (bez LLM)
+# = oszczednosc tokenow. Match na lowercase substring w nazwie+kategorii.
+#
+# WAZNE: tylko BARDZO PEWNE mismatch'e. Lepiej puscic do LLM ze szumem niz
+# odrzucic dobry lead lokalnie. Stad ostre keyword'y typu "minecraft",
+# "kulinarn", "fitness", a nie ogolne "warsztaty".
+_HARD_MISMATCH_KEYWORDS = [
+    # Tech / IT - nie nasz target
+    'minecraft', 'programowani', 'koderz', 'koderk', 'koderyk',
+    'scratch', 'python', 'arduino', 'roblox', 'robotyk',
+    # Jezyki obce - inny rynek
+    'jezyk angielski', 'jezyk niemieck', 'language school',
+    'lektor', 'translator',
+    # Sport / fitness / taniec - inny rynek
+    'fitness', 'crossfit', 'silowni', 'siłowni',
+    'joga ', ' joga', 'pilates', 'aerobik',
+    'taniec', 'taneczn', 'baletow', 'akrobaty', 'gimnastyk',
+    'sporto', 'futbol', 'pilkar', 'piłkar',
+    # Kulinarn - inny rynek
+    'kulinarn', 'gotowani', 'kucharsk', 'kuchni dziec',
+    'smakuje', 'baking', 'cooking',
+    # Beauty / health
+    'fryzjer', 'kosmetyk', 'manicure', 'pedicure', 'spa ',
+    'masaz', 'masaż', 'medycyn', 'stomatolog',
+    # Muzyka
+    'muzyczn', 'instrument', 'wokalist', 'piosenk', 'gitara',
+    # Inne ewidentne off-topic
+    'restaur', 'pizzeri', 'fastfood',
+    'apteka', 'apteczn',
+    'autoryzowany dealer', 'salonu samochod',
+    'kantor', 'kantyna',
+]
+
+
+def _local_prefilter_score(place: 'DiscoveredPlace') -> tuple[int, str] | None:
+    """Heurystyczny pre-filter - zwraca (score, reason) jesli ewidentny mismatch.
+    None = przepuszczamy do LLM dla wlasciwej oceny.
+
+    Match: lowercase substring w (name + notes + address). Sprawdzamy
+    najpopularniejsze mismatch'e zeby NIE PALIC TOKENOW LLM dla firm
+    ktore na 100% nie pasuja (Minecraft programowanie / kulinarne / fitness).
+    """
+    haystack = ' '.join([
+        (place.name or '').lower(),
+        (place.notes or '').lower(),
+        (place.address or '').lower(),
+    ])
+    for kw in _HARD_MISMATCH_KEYWORDS:
+        if kw in haystack:
+            return (1, f"branża niepowiązana ({kw.strip()}) - off-target dla Artmakera")
+    return None
+
+
+# Pozytywne keyword'y - sugeruja ze firma DOBRZE pasuje. Uzywane jako
+# heurystyczny fallback gdy LLM relevance call padnie (timeout / brak klucza /
+# parse fail). Dziala lokalnie, bez tokenow.
+_POSITIVE_KEYWORDS_WITH_SCORE: list[tuple[list[str], int, str]] = [
+    # Score 8: bardzo wyrazne signaly Artmaker target
+    (['plastyczn', 'malarsk', 'rysunek', 'artystyczn'], 8,
+     "warsztaty plastyczne / artystyczne - idealny target"),
+    (['scrapbook', 'rekodzieł', 'rękodzieł', 'handmade'], 8,
+     "rekodzielo / scrapbooking - mocno plastyczny"),
+    (['paint & sip', 'paint and sip', 'paint sip', 'malowanie z winem'], 8,
+     "paint&sip - segment idealny"),
+    # Score 7: dobre signaly
+    (['kreatywn', 'creative'], 7, "warsztaty kreatywne"),
+    (['ceramik', 'pottery'], 7, "ceramika - sasiedztwo branzy"),
+    (['decoupage', 'mass plastyczn'], 7, "DIY / decoupage"),
+    # Score 6: srednie - kandydat ale wymaga LLM
+    (['warsztat', 'pracowni'], 6, "ogolne warsztaty - mozliwy target"),
+    (['szkola artystyczn', 'ognisko plastyczn'], 7, "szkola plastyczna"),
+    (['papierniczy', 'biurow', 'office supply'], 7, "papier/biuro - target"),
+    (['sklep plastyczn', 'artystyczn', 'malarski'], 8,
+     "sklep plastyczny / artystyczny - target"),
+]
+
+
+def _heuristic_score(place: 'DiscoveredPlace') -> tuple[int, str]:
+    """Local fallback scoring uzywany gdy LLM relevance call padnie.
+    Zwraca (score, reason) na podstawie keyword'ow w nazwie/notes/adres.
+
+    NIE zastepuje LLM (LLM widzi kontekst, segment, custom_description), ale
+    daje USER'OWI cos do roboty gdy LLM nie odpalil. Lepsze niz puste null
+    ktore powodowalo 0-zaznaczonych w UI.
+    """
+    haystack = ' '.join([
+        (place.name or '').lower(),
+        (place.notes or '').lower(),
+        (place.address or '').lower(),
+    ])
+    # Negatywne (hard mismatch) - score 1
+    for kw in _HARD_MISMATCH_KEYWORDS:
+        if kw in haystack:
+            return (1, f"branża niepowiązana ({kw.strip()})")
+    # Pozytywne - bierzemy najwyzszy match
+    best_score = 0
+    best_reason = ""
+    for keywords, score, reason in _POSITIVE_KEYWORDS_WITH_SCORE:
+        if any(k in haystack for k in keywords):
+            if score > best_score:
+                best_score = score
+                best_reason = reason
+    if best_score > 0:
+        return (best_score, f"{best_reason} (heurystyka lokalna)")
+    # Neutral fallback - nic nie wiemy
+    return (5, "brak silnych sygnalow w nazwie - sprawdz recznie")
+
+
 def score_relevance_batch(
     places: list[DiscoveredPlace],
     *,
@@ -560,10 +669,15 @@ def score_relevance_batch(
     if not places:
         return [], {}
 
-    # PRE-FILTER: nie scoruj dubli. Dla każdego place z existing_lead_id
+    # PRE-FILTER 1: nie scoruj dubli. Dla każdego place z existing_lead_id
     # syntetyzujemy RelevanceItem (score=existing_score lub 5 jeśli nieznany)
     # zamiast wysyłać do LLM. Reszta idzie do prawdziwego scoringu.
-    duplicate_items: list[RelevanceItem] = []
+    #
+    # PRE-FILTER 2: hard-mismatch keyword'y (Minecraft / kulinarn / fitness
+    # itd.) tez nie ida do LLM - dostaja score=1 lokalnie. To oszczedza tokeny
+    # gdy Google Places wciaga 50+ smieci typu "Programowanie Minecraft" dla
+    # query "warsztaty dzieci".
+    prefilter_items: list[RelevanceItem] = []
     fresh_indices: list[int] = []  # indeksy w `places` które idą do LLM
     for idx, p in enumerate(places):
         if p.existing_lead_id is not None:
@@ -573,17 +687,27 @@ def score_relevance_batch(
                 int(round(p.existing_lead_score))
                 if p.existing_lead_score is not None else 5
             )
-            duplicate_items.append(RelevanceItem(
+            prefilter_items.append(RelevanceItem(
                 idx=idx,
                 score=max(0, min(10, score_int)),
                 reason=f"Duplikat - już w bazie jako lead #{p.existing_lead_id}",
             ))
-        else:
-            fresh_indices.append(idx)
+            continue
 
-    # Jeśli wszystkie to duble - nic nie wysyłamy do LLM
+        # Hard-mismatch keyword check (PRE-FILTER 2)
+        local = _local_prefilter_score(p)
+        if local is not None:
+            score, reason = local
+            prefilter_items.append(RelevanceItem(
+                idx=idx, score=score, reason=reason,
+            ))
+            continue
+
+        fresh_indices.append(idx)
+
+    # Jeśli wszystkie odfiltrowane - nic nie wysyłamy do LLM
     if not fresh_indices:
-        return duplicate_items, {}
+        return prefilter_items, {}
 
     if custom_description and custom_description.strip():
         target_label = "(własny target)"
@@ -648,4 +772,4 @@ def score_relevance_batch(
         for item in parsed.items
         if item.idx in fresh_to_orig
     ]
-    return remapped + duplicate_items, usage
+    return remapped + prefilter_items, usage
