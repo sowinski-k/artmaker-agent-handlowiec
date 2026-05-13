@@ -1,12 +1,17 @@
-"""Smoke testy dla agent/generate._strip_ai_artifacts.
+"""Smoke testy dla agent/generate - anti-AI-slop + Track A vs B logic.
 
-Ten post-process jest ostatnia linia obrony przed AI-slop w mailach
-(em-dash, smart quotes, korpo-frazy). Kazda regresja = wszystkie maile
-beda brzmialy jak ChatGPT.
+Te testy bronia jakosci maili. Bez nich kazda zmiana prompt'u / regexp'u
+moze niezauwazenie obnizyc jakosc na produkcji.
 """
 from __future__ import annotations
 
-from agent.generate import _strip_ai_artifacts
+from agent.generate import (
+    EmailDraftPayload,
+    _parse_volume_pln,
+    _strip_ai_artifacts,
+    _suggest_track_hint,
+    validate_draft,
+)
 
 
 class TestPunctuation:
@@ -34,9 +39,9 @@ class TestPunctuation:
 
 class TestAiCliches:
     def test_strips_pragne_poinformowac(self):
-        out = _strip_ai_artifacts("Pragnę poinformować o naszej ofercie. Dzien dobry.")
+        out = _strip_ai_artifacts("Pragnę poinformować o naszej ofercie. Konkret.")
         assert "Pragnę" not in out
-        assert "Dzien dobry" in out
+        assert "Konkret" in out
 
     def test_strips_w_dzisiejszych_czasach(self):
         out = _strip_ai_artifacts("W dzisiejszych czasach klienci szukają jakości.")
@@ -46,6 +51,162 @@ class TestAiCliches:
         out = _strip_ai_artifacts("Korzystając z okazji, chcę napisać. Tresc.")
         assert "Korzystając z okazji" not in out
         assert "Tresc" in out
+
+    def test_strips_szanowni_panstwo(self):
+        """Szanowni Panstwo to klasyczny AI-tell + korpo, musi zniknac."""
+        out = _strip_ai_artifacts("Szanowni Państwo, mam pytanie.")
+        assert "Szanowni Państwo" not in out
+        assert "mam pytanie" in out
+
+    def test_strips_buzzwords(self):
+        """Rewolucyjny / innowacyjny / wyjątkowy - typowe AI-puste slowa."""
+        for bw in ["rewolucyjny", "innowacyjny", "wyjątkowy", "unikatowy"]:
+            out = _strip_ai_artifacts(f"Mamy {bw} produkt.")
+            assert bw not in out.lower()
+
+    def test_strips_lider_w_branzy(self):
+        out = _strip_ai_artifacts("Jestesmy liderem w branzy artystycznej.")
+        assert "lider" not in out.lower()
+
+    def test_strips_pozwole_sobie(self):
+        out = _strip_ai_artifacts("Pozwolę sobie zaproponować coś. Konkret.")
+        assert "Pozwolę sobie" not in out
+        assert "Konkret" in out
+
+    def test_strips_dzien_dobry_opening(self):
+        """Dzien dobry na poczatku - banalne AI opening."""
+        out = _strip_ai_artifacts("Dzień dobry,\nNasza oferta jest świetna.")
+        assert not out.lower().startswith("dzień dobry")
+
+    def test_strips_pozdrawiam_serdecznie(self):
+        out = _strip_ai_artifacts("Tresc maila.\nPozdrawiam serdecznie")
+        assert "Pozdrawiam serdecznie" not in out
+
+    def test_strips_z_poważaniem(self):
+        out = _strip_ai_artifacts("Tresc.\nZ poważaniem.")
+        assert "Z poważaniem" not in out
+
+
+class TestSuggestTrackHint:
+    """Sygnaly skali decyduja o Track A vs B - regresja zlamie Track A priority."""
+
+    def test_marka_wlasna_zawsze_private_label(self):
+        hint = _suggest_track_hint("marka_wlasna", None, None, None)
+        assert "private_label" in hint
+        assert "Track A" in hint
+
+    def test_default_segmentu_to_both_not_b2b(self):
+        """KRYTYCZNE: default NIE moze byc b2b_panel. To bylo zlamane wczesniej."""
+        hint = _suggest_track_hint("sklep_papierniczy", None, None, None)
+        assert hint.startswith("both")
+        # b2b_panel moze byc wzmiankowany jako alternatywa, ale Track A pierwsze
+        assert "Track A" in hint or "PIERWSZY" in hint or "private_label" in hint
+
+    def test_high_bulk_potential_suggests_both_track_a(self):
+        """bulk_potential=2 -> both z mocnym Track A signal."""
+        hint = _suggest_track_hint("inne", None, 2.0, 1.0)
+        assert hint.startswith("both")
+        assert "skali" in hint.lower() or "PIERWSZE" in hint or "Track A" in hint
+
+    def test_high_volume_suggests_both(self):
+        """Volume > 2000 PLN -> both."""
+        hint = _suggest_track_hint("sklep_plastyczny", "5000 PLN", 1.0, 1.0)
+        assert hint.startswith("both")
+
+    def test_low_volume_small_shop_still_both(self):
+        """Nawet maly sklep dostaje both, nie tylko b2b_panel."""
+        hint = _suggest_track_hint("sklep_plastyczny", "300 PLN", 0.5, 0.5)
+        assert hint.startswith("both")
+
+    def test_paint_and_sip_both_with_track_b_first(self):
+        """Paint&sip konsumuja od reki, ale Track A wciaz w sugestii."""
+        hint = _suggest_track_hint("paint_and_sip", "500 PLN", 1.0, 1.0)
+        assert hint.startswith("both")
+        # Track A musi byc wymieniony nawet dla paint_and_sip
+        assert "Track A" in hint or "zestawy startowe" in hint.lower() or "branding" in hint.lower() or "marka" in hint.lower()
+
+
+class TestParseVolume:
+    def test_simple_range(self):
+        assert _parse_volume_pln("300-800 PLN") == 300
+
+    def test_open_range(self):
+        assert _parse_volume_pln("2000+ PLN") == 2000
+
+    def test_with_spaces(self):
+        assert _parse_volume_pln("5 000 PLN") == 5000
+
+    def test_none(self):
+        assert _parse_volume_pln(None) is None
+
+    def test_empty(self):
+        assert _parse_volume_pln("") is None
+
+    def test_unparseable(self):
+        assert _parse_volume_pln("kilkaset złotych") is None
+
+
+class TestValidateDraft:
+    def _make_payload(self, **overrides):
+        """Helper - default valid payload z nadpisaniami."""
+        defaults = dict(
+            offer_track="both",
+            subject="Konkretny temat dla Państwa",
+            snippet1="Zerknąłem na Państwa stronę. Mam krótkie pytanie.",
+            snippet2="Piszę z Artmakera. Importujemy farby bezpośrednio z Chin.",
+            snippet3="Możemy dla Państwa produkować farby pod własną marką. "
+                    "Trzydzieści procent taniej niż polska hurtownia. MOQ 300 sztuk. "
+                    "A jak czegoś potrzebujecie z magazynu PL, mamy panel B2B b2b.sowins.pl.",
+            snippet4=None,
+            snippet5="Wysłać wstępną wycenę produkcyjną?",
+        )
+        defaults.update(overrides)
+        return EmailDraftPayload(**defaults)
+
+    def test_valid_draft_no_warnings(self):
+        warns = validate_draft(self._make_payload())
+        assert warns == [], f"Expected no warnings, got: {warns}"
+
+    def test_subject_too_long_warns(self):
+        long_subject = "Ten subject ma stanowczo za duzo znakow zeby przejsc przez walidator"
+        warns = validate_draft(self._make_payload(subject=long_subject))
+        assert any("subject za dlugi" in w for w in warns)
+
+    def test_long_sentence_warns(self):
+        long = ("To naprawdę długie zdanie ktore ma stanowczo za dużo słów żeby "
+                "przejść przez naszą walidację i powinno wywołać warning "
+                "regression test dla pewności i kompletności sprawy.")
+        warns = validate_draft(self._make_payload(snippet2=long))
+        assert any("snippet2" in w and "slow" in w for w in warns)
+
+    def test_no_polish_diacritics_warns(self):
+        no_pl = self._make_payload(
+            snippet1="Zerknalem na Wasza strone i mam pytanie.",
+            snippet2="Pisze z Artmakera i importujemy farby z Chin do Polski.",
+            snippet3="Mozemy produkowac dla Was farby. 30-50% taniej. MOQ 300 sztuk minimum.",
+            snippet5="Wyslac wstepna wycene produkcyjna do porownania?",
+        )
+        warns = validate_draft(no_pl)
+        assert any("polskich znakow" in w for w in warns)
+
+    def test_panstwo_wy_mix_warns(self):
+        mixed = self._make_payload(
+            snippet1="Zerknałem na Państwa stronę.",
+            snippet2="Pisze do Was z Artmakera. Mamy ofertę dla Waszego sklepu.",
+            snippet3="Państwa oferta jest świetna i u Was widać skalę. MOQ 300 szt.",
+        )
+        warns = validate_draft(mixed)
+        assert any("Panstwo" in w and "Wy" in w for w in warns)
+
+    def test_track_b_before_a_in_both_warns(self):
+        """offer_track=both ale Track B wymieniony PRZED Track A - to wbrew filozofii."""
+        wrong = self._make_payload(
+            offer_track="both",
+            snippet3="Mamy panel B2B b2b.sowins.pl z magazynu, dostawa 24h. "
+                    "A jak chcecie wiekszy biznes - produkcja w Chinach pod wlasna marke.",
+        )
+        warns = validate_draft(wrong)
+        assert any("Track B" in w and "Track A" in w for w in warns)
 
 
 class TestEdgeCases:
