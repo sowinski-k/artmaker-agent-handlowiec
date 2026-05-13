@@ -98,16 +98,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <i className="ti ti-layout-dashboard"></i>
             <span className="sb-label">Pulpit</span>
           </Link>
-          <a className="sb-item disabled">
-            <i className="ti ti-folder"></i>
-            <span className="sb-label">Projekty</span>
-            <span className="sb-count">soon</span>
-          </a>
-          <a className="sb-item disabled">
-            <i className="ti ti-photo"></i>
-            <span className="sb-label">Biblioteka</span>
-            <span className="sb-count">soon</span>
-          </a>
+          {/* Projekty / Biblioteka - ukryte do czasu implementacji.
+              KUZNIA_TOOLS, KANCELARIA_TOOLS - tez ukryte. Roadmapa zostaje
+              w pamieci (komentarze w kodzie + KUZNIA_TOOLS/KANCELARIA_TOOLS
+              consts), wlaczamy gdy dany modul zacznie zylac. */}
 
           {/* ─── Agenci AI ─────────────────────────── */}
           <div className="sb-section">
@@ -133,38 +127,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               </Link>
             ))}
           </div>
-
-          {/* ─── Kuźnia Kreatywna ──────────────────── */}
-          <div className="sb-section">
-            Kuźnia Kreatywna
-            <span className="sb-section-sub">produkcja contentu</span>
-          </div>
-          {KUZNIA_TOOLS.map((t) => (
-            <a key={t.label} className="sb-item disabled">
-              <i className={`ti ti-${t.icon}`}></i>
-              <div className="sb-label-stack">
-                <span className="sb-label">{t.label}</span>
-                <span className="sb-desc">{t.desc}</span>
-              </div>
-              <span className="sb-count">soon</span>
-            </a>
-          ))}
-
-          {/* ─── Kancelaria ────────────────────────── */}
-          <div className="sb-section">
-            Kancelaria
-            <span className="sb-section-sub">compliance, cła</span>
-          </div>
-          {KANCELARIA_TOOLS.map((t) => (
-            <a key={t.label} className="sb-item disabled">
-              <i className={`ti ti-${t.icon}`}></i>
-              <div className="sb-label-stack">
-                <span className="sb-label">{t.label}</span>
-                <span className="sb-desc">{t.desc}</span>
-              </div>
-              <span className="sb-count">soon</span>
-            </a>
-          ))}
 
           {/* ─── Integracje ────────────────────────── */}
           <div className="sb-section">Integracje</div>

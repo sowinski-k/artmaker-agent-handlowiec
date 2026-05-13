@@ -938,7 +938,7 @@ def list_leads(
     limit: int = 50, offset: int = 0,
     segment: str | None = None, status: str | None = None, min_score: float = 0.0,
     q: str | None = None,
-    sort: str = "score",
+    sort: str = "newest",  # default najnowsze - swieze leady na gorze
     cur: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Lista leadow + agregowane statystyki draftow per lead.
@@ -1015,6 +1015,32 @@ def list_leads(
                 seen_lids.add(lid)
                 drafts_info.setdefault(lid, {})["latest_status"] = st
 
+        # Active job per lead - mapowanie lead_id -> typ joba (gen_draft / enrich)
+        # zeby UI pokazal indykator "praca w toku" obok wiersza w tabeli.
+        active_job_by_lead: dict[int, str] = {}
+        if lead_ids:
+            with SessionLocal() as session2:
+                running_jobs = session2.execute(
+                    select(Job).where(
+                        Job.workspace_id == cur.workspace_id,
+                        Job.status.in_(["pending", "running"]),
+                        Job.type.in_([
+                            "generate_draft", "enrich_lead", "research_lead",
+                        ]),
+                    )
+                    .order_by(desc(Job.created_at))
+                    .limit(50)
+                ).scalars().all()
+                lead_id_set = set(lead_ids)
+                for j in running_jobs:
+                    if not isinstance(j.payload, dict):
+                        continue
+                    lid = j.payload.get("lead_id")
+                    if isinstance(lid, int) and lid in lead_id_set:
+                        # Pierwszy job winsuje (najnowszy bo ORDER BY desc created_at)
+                        if lid not in active_job_by_lead:
+                            active_job_by_lead[lid] = j.type
+
         leads = [{
             "id": l.id, "segment": l.segment, "company_name": l.company_name,
             "contact_name": l.contact_name, "email": l.email, "phone": l.phone,
@@ -1023,6 +1049,9 @@ def list_leads(
             "created_at": iso_utc(l.created_at),
             "drafts_count": drafts_info.get(l.id, {}).get("count", 0),
             "latest_draft_status": drafts_info.get(l.id, {}).get("latest_status"),
+            # 'generate_draft' | 'enrich_lead' | 'research_lead' | None
+            # UI pokaze pulsujaca kropke + tooltip 'Pracuje nad ...'
+            "active_job_type": active_job_by_lead.get(l.id),
         } for l in rows]
     return {"total": total, "items": leads}
 
@@ -1232,6 +1261,40 @@ def update_lead(
                 "status": lead.status, "notes": lead.notes,
             },
         }
+
+
+@app.delete("/api/leads/{lead_id}")
+def delete_lead(
+    lead_id: int, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Usun lead z bazy. Cascade na drafty (relationship cascade='all, delete-orphan').
+
+    Eventy lead_id zostaja jako null (FK ondelete=SET NULL by bylo lepsze ale
+    w obecnym schemacie po prostu ID umiera). Audit log emit przed delete.
+    """
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+
+        company = lead.company_name
+        # Audit event - lead_id=None bo zaraz znika
+        session.add(Event(
+            workspace_id=cur.workspace_id,
+            user_id=cur.user_id,
+            type="lead.deleted",
+            level="WARNING",
+            source="user",
+            message=f"User usunal lead #{lead_id} ({company})",
+            payload={"deleted_lead_id": lead_id, "company": company},
+        ))
+        session.delete(lead)  # cascade -> drafty
+        session.commit()
+        return {"ok": True, "deleted_lead_id": lead_id, "company": company}
 
 
 @app.get("/api/drafts")
