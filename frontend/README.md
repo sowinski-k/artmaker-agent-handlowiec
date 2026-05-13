@@ -11,6 +11,20 @@ npm install
 BACKEND_URL=http://localhost:8000 npm run dev
 ```
 
+## Testy
+
+Smoke testy Vitest + @testing-library/react w jsdom. Łapią broken
+imports / React render errors / regression na strukturze stron.
+
+```bash
+cd frontend
+npm test          # one-shot run (CI mode)
+npm run test:watch  # watch mode dla developmentu
+```
+
+CI: workflow `.github/workflows/frontend-tests.yml` odpala się na każdy
+push do `frontend/**` + manual dispatch.
+
 Frontend startuje na `http://localhost:3000`. Wszystkie `/api/*` requesty
 przekierowuje na `BACKEND_URL` (FastAPI z `web/main.py`).
 

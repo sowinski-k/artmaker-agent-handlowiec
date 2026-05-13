@@ -66,13 +66,13 @@ const SEGMENTS = [
 
 // Polskie etykiety segmentow + krotkie opisy do helper tekstu
 const SEGMENT_INFO: Record<string, { label: string; desc: string }> = {
-  sklep_plastyczny: { label: 'Sklep plastyczny', desc: 'Sklepy z farbami, plotnami, sztalugami - retail.' },
+  sklep_plastyczny: { label: 'Sklep plastyczny', desc: 'Sklepy z farbami, płótnami, sztalugami - retail.' },
   sklep_papierniczy: { label: 'Sklep papierniczy', desc: 'Papier, biuro, szkolne, ozdobne, scrapbooking.' },
-  paint_and_sip: { label: 'Paint & sip', desc: 'Studia malowania z winem dla doroslych.' },
+  paint_and_sip: { label: 'Paint & sip', desc: 'Studia malowania z winem dla dorosłych.' },
   warsztaty_dzieci: { label: 'Warsztaty dzieci', desc: 'Pracownie kreatywne, animacje urodzin.' },
-  animatorzy_eventy: { label: 'Animatorzy / eventy', desc: 'Firmy eventowe organizujace zajecia kreatywne.' },
-  szkola_artystyczna: { label: 'Szkola artystyczna', desc: 'Szkoly plastyczne, ogniska, kursy rysunku.' },
-  marka_wlasna: { label: 'Marka wlasna / DIY', desc: 'Tworcy zestawow DIY, autorzy kursow, dystrybutorzy.' },
+  animatorzy_eventy: { label: 'Animatorzy / eventy', desc: 'Firmy eventowe organizujące zajęcia kreatywne.' },
+  szkola_artystyczna: { label: 'Szkoła artystyczna', desc: 'Szkoły plastyczne, ogniska, kursy rysunku.' },
+  marka_wlasna: { label: 'Marka własna / DIY', desc: 'Twórcy zestawów DIY, autorzy kursów, dystrybutorzy.' },
   inne: { label: 'Inne', desc: 'Bez konkretnego segmentu - LLM zaklasyfikuje.' },
 };
 
@@ -92,7 +92,7 @@ const SOURCES: SourceMeta[] = [
   {
     key: 'google_places',
     label: 'Google Places',
-    desc: 'Bezposrednio z Google. Najbogatsze pola (telefon, rating, kategoria, godziny). Najwyzsza jakosc.',
+    desc: 'Bezpośrednio z Google. Najbogatsze pola (telefon, rating, kategoria, godziny). Najwyższa jakość.',
     costHint: '$25/1000',
     costPer1000: 25,
     limit: 60,
@@ -100,7 +100,7 @@ const SOURCES: SourceMeta[] = [
   {
     key: 'apify',
     label: 'Apify Google Maps',
-    desc: 'Apify scraper Google Maps - alternatywa dla Places API. Tansze ale wolniejsze.',
+    desc: 'Apify scraper Google Maps - alternatywa dla Places API. Tańsze ale wolniejsze.',
     costHint: '$5/1000',
     costPer1000: 5,
     limit: 50,
@@ -108,7 +108,7 @@ const SOURCES: SourceMeta[] = [
   {
     key: 'apify_allegro',
     label: 'Apify Allegro',
-    desc: 'Sprzedawcy z Allegro - kandydaci na private label / hurt. Inny target niz Google Maps.',
+    desc: 'Sprzedawcy z Allegro - kandydaci na private label / hurt. Inny target niż Google Maps.',
     costHint: '$5/1000',
     costPer1000: 5,
     limit: 100,
@@ -116,28 +116,28 @@ const SOURCES: SourceMeta[] = [
   {
     key: 'apify_linkedin',
     label: 'Apify LinkedIn',
-    desc: 'Firmy z LinkedIna. UWAGA: TOS LinkedIn + RODO - uzywaj ostroznie i tylko dla B2B.',
+    desc: 'Firmy z LinkedIna. UWAGA: TOS LinkedIn + RODO - używaj ostrożnie i tylko dla B2B.',
     costHint: '$10/1000',
     costPer1000: 10,
     limit: 50,
-    warning: 'TOS LinkedIn + RODO - sprawdz compliance przed wlaczeniem.',
+    warning: 'TOS LinkedIn + RODO - sprawdź compliance przed włączeniem.',
   },
 ];
 
 // 16 wojewodztw + top miasta - do datalist autocomplete'a w Lokalizacja
 const POLSKA_LOCATIONS = [
-  // Wojewodztwa
-  'Dolnoslaskie', 'Kujawsko-Pomorskie', 'Lubelskie', 'Lubuskie',
-  'Lodzkie', 'Malopolskie', 'Mazowieckie', 'Opolskie',
-  'Podkarpackie', 'Podlaskie', 'Pomorskie', 'Slaskie',
-  'Swietokrzyskie', 'Warminsko-Mazurskie', 'Wielkopolskie', 'Zachodniopomorskie',
+  // Wojewodztwa (z polskimi znakami zgodnie z nazewnictwem urzedowym)
+  'Dolnośląskie', 'Kujawsko-Pomorskie', 'Lubelskie', 'Lubuskie',
+  'Łódzkie', 'Małopolskie', 'Mazowieckie', 'Opolskie',
+  'Podkarpackie', 'Podlaskie', 'Pomorskie', 'Śląskie',
+  'Świętokrzyskie', 'Warmińsko-Mazurskie', 'Wielkopolskie', 'Zachodniopomorskie',
   // Top miasta wojewodzkie
-  'Warszawa', 'Krakow', 'Lodz', 'Wroclaw', 'Poznan', 'Gdansk',
-  'Szczecin', 'Bydgoszcz', 'Lublin', 'Bialystok', 'Katowice', 'Gdynia',
-  'Czestochowa', 'Radom', 'Sosnowiec', 'Torun', 'Kielce', 'Rzeszow',
-  'Gliwice', 'Zabrze', 'Olsztyn', 'Bielsko-Biala', 'Bytom', 'Zielona Gora',
-  'Rybnik', 'Ruda Slaska', 'Tychy', 'Opole', 'Gorzow Wielkopolski',
-  'Plock', 'Elblag', 'Walbrzych',
+  'Warszawa', 'Kraków', 'Łódź', 'Wrocław', 'Poznań', 'Gdańsk',
+  'Szczecin', 'Bydgoszcz', 'Lublin', 'Białystok', 'Katowice', 'Gdynia',
+  'Częstochowa', 'Radom', 'Sosnowiec', 'Toruń', 'Kielce', 'Rzeszów',
+  'Gliwice', 'Zabrze', 'Olsztyn', 'Bielsko-Biała', 'Bytom', 'Zielona Góra',
+  'Rybnik', 'Ruda Śląska', 'Tychy', 'Opole', 'Gorzów Wielkopolski',
+  'Płock', 'Elbląg', 'Wałbrzych',
 ];
 
 type Mode = 'manual' | 'agent';
@@ -743,12 +743,41 @@ export default function PozyskiwaniePage() {
               </div>
             </div>
 
-            <button type="submit" className="btn btn-primary btn-cta"
-              disabled={peeking || submitting || !!jobActive || selectedSources.length === 0}>
-              {mode === 'manual'
-                ? (peeking ? <><span className="spinner-mini" /> Szukam...</> : <><i className="ti ti-search" /> Zajrzyj na rynek</>)
-                : (submitting ? <><span className="spinner-mini" /> Wysyłam agenta...</> : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>)}
-            </button>
+            {(peeking || submitting) ? (
+              // Pelnoekranowy "agent w akcji" panel zamiast disabled buttona.
+              // Daje wizualne potwierdzenie ze cos sie dzieje + jakie zrodla
+              // sprawdza w tej chwili (rotuje co 1.5s przez wybrane sources).
+              <div className="agent-working-card">
+                <div className="aw-spinner">
+                  <span className="aw-ring" />
+                </div>
+                <div className="aw-content">
+                  <div className="aw-title">
+                    <span className="dot-pulse" />
+                    {mode === 'manual' ? 'Agent szuka firm' : 'Agent wyrusza w teren'}
+                    <span className="working-dots" />
+                  </div>
+                  <div className="aw-sources">
+                    <SourceRotator sources={selectedSources} />
+                  </div>
+                  <div className="aw-progress">
+                    <div className="aw-progress-fill" />
+                  </div>
+                  <div className="aw-foot">
+                    {mode === 'manual'
+                      ? 'Pobieram listę firm bez palenia tokenów. Zajmie 10-30s zależnie od ilości źródeł.'
+                      : 'Tworzę zadanie w kolejce. Worker za chwilę podpie agenta.'}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <button type="submit" className="btn btn-primary btn-cta"
+                disabled={!!jobActive || selectedSources.length === 0}>
+                {mode === 'manual'
+                  ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
+                  : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
+              </button>
+            )}
           </form>
         </div>
 
@@ -860,6 +889,37 @@ export default function PozyskiwaniePage() {
     </>
   );
 }
+
+/**
+ * Cyclic-rotating display sources. Pokazuje aktualnie sprawdzane zrodlo
+ * podczas "agent szuka". Cycle co 1.5s przez wszystkie wybrane.
+ *
+ * Fake "co aktualnie robi" - backend tego nie zwraca w peek mode (peek
+ * jest synchroniczne). Ale wizualnie daje user'owi poczucie ze nie wisi.
+ */
+function SourceRotator({ sources }: { sources: string[] }) {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (sources.length === 0) return;
+    const t = setInterval(() => setIdx((i) => (i + 1) % sources.length), 1500);
+    return () => clearInterval(t);
+  }, [sources.length]);
+
+  if (sources.length === 0) return null;
+  const current = SOURCES.find((s) => s.key === sources[idx]);
+  return (
+    <div className="aw-source-row">
+      <span className="aw-source-label">Sprawdzam:</span>
+      <span className="aw-source-name" key={idx}>
+        <i className="ti ti-arrow-right" /> {current?.label || sources[idx]}
+      </span>
+      <span className="aw-source-count">
+        {idx + 1} / {sources.length}
+      </span>
+    </div>
+  );
+}
+
 
 function JobResult({ result }: { result: Record<string, unknown> }) {
   const items: Array<[string, string | number]> = [];
@@ -1180,7 +1240,8 @@ const CSS = `
 
 .form-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; align-items: flex-end; }
 .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 200px; }
-.field label { font-size: 11px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 500; }
+/* '>' = direct child only, zeby nie lapac <label class="source-card"> wewnatrz .source-grid */
+.field > label { font-size: 11px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 500; }
 .field input, .field select, .field textarea {
   padding: 8px 12px; border: 1px solid #E5E7EB; border-radius: 6px; font-family: inherit; font-size: 13.5px;
   background: #fff; color: #111;
@@ -1425,5 +1486,101 @@ table.tbl tr:hover td { background: #FAFAF7; }
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
+
+/* ============ AGENT WORKING CARD (zamiast disabled buttona "Szukam...") ============ */
+.agent-working-card {
+  display: flex; align-items: stretch; gap: 16px;
+  padding: 16px 18px; margin-top: 4px;
+  background: linear-gradient(135deg, #FDECED 0%, #FAFAF7 60%, #fff 100%);
+  border: 1.5px solid #FCA5A5;
+  border-radius: 12px;
+  animation: aw-pulse-bg 2.5s ease-in-out infinite;
+}
+@keyframes aw-pulse-bg {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212,33,44,0.0); }
+  50%      { box-shadow: 0 0 0 6px rgba(212,33,44,0.10); }
+}
+
+.aw-spinner {
+  display: flex; align-items: center; justify-content: center;
+  width: 52px; height: 52px;
+  background: #fff; border-radius: 50%;
+  border: 1px solid #FCD8DB;
+  flex-shrink: 0;
+  position: relative;
+}
+.aw-ring {
+  width: 32px; height: 32px;
+  border: 3px solid #FDECED;
+  border-top-color: #D4212C;
+  border-right-color: #D4212C;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.aw-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.aw-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; font-weight: 600; color: #111;
+}
+.aw-title .dot-pulse {
+  display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #D4212C;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+
+/* Source rotator - aktualnie sprawdzane zrodlo */
+.aw-sources {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px;
+}
+.aw-source-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.aw-source-label { color: #6B7280; font-size: 12px; }
+.aw-source-name {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-weight: 600; color: #8F1018;
+  /* Re-mount na zmiane idx wywoluje fade animation */
+  animation: fade-in 0.4s ease-out;
+}
+.aw-source-name i { font-size: 13px; }
+.aw-source-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: #9CA3AF;
+  background: #fff; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid #FCD8DB;
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Indeterminate progress - 'agent zyje' */
+.aw-progress {
+  height: 4px;
+  background: #fff;
+  border: 1px solid #FCD8DB;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.aw-progress-fill {
+  height: 100%; width: 30%;
+  background: linear-gradient(90deg, transparent, #D4212C 50%, transparent);
+  animation: aw-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes aw-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(333%); }
+}
+
+.aw-foot {
+  font-size: 11.5px;
+  color: #6B7280;
+  line-height: 1.4;
+}
+
 @keyframes spin { to { transform: rotate(360deg); } }
 `;

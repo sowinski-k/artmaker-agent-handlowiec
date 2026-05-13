@@ -1,0 +1,46 @@
+name: Frontend tests
+
+# Smoke testy Vitest dla Next.js frontendu. Lapie:
+# - Broken imports / TypeScript errors
+# - React render exceptions (komponent wybucha)
+# - Regression na auth helpers (lib/api)
+# - Regression na strukturze stron (login/leady/drafty/pozyskiwanie)
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-tests.yml'
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'frontend/**'
+  workflow_dispatch:
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install deps
+        run: npm install
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Run vitest
+        run: npm test
