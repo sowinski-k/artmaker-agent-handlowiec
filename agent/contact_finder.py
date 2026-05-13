@@ -17,6 +17,7 @@ last_enriched_at = now. Recheck po 90 dniach (firmy aktualizuja wizytowki).
 """
 from __future__ import annotations
 
+import html
 import logging
 import re
 from dataclasses import dataclass
@@ -31,8 +32,18 @@ log = logging.getLogger("ecombinat.contact_finder")
 # (firmy aktualizuja wizytowki, nowe podstrony, etc).
 RECHECK_DAYS = 90
 
-# Common contact paths to check
-CONTACT_PATHS = ["/", "/kontakt", "/contact", "/contact-us", "/o-nas", "/about"]
+# Common contact paths to check. Kolejnosc: najpierw najprawdopodobniejsze
+# (homepage, /kontakt PL, /contact EN), potem subkategorie.
+CONTACT_PATHS = [
+    "/",
+    "/kontakt", "/kontakt.html", "/kontakt/",
+    "/contact", "/contact-us", "/contact.html",
+    "/o-nas", "/o-nas.html",
+    "/about", "/about-us",
+    "/wspolpraca",      # B2B specific
+    "/dla-firm",
+    "/footer",          # niektore strony maja osobny endpoint dla stopki
+]
 # Cap na rozmiar pobieranego HTML (anti-bomb)
 MAX_HTML_SIZE = 500_000  # 500KB
 
@@ -96,17 +107,82 @@ def _normalize_phone(raw: str) -> str:
     return f"+48 {digits[0:3]} {digits[3:6]} {digits[6:9]}"
 
 
-def _extract_emails(html: str, domain_hint: str | None = None) -> list[str]:
-    """Wyciagnij sensowne emaile z HTML. Ranking: same domain > inny PL > inny."""
+# Wzorce obfuskacji emaila ktore widzimy na polskich stronach kontaktowych.
+# Lista NIE wyczerpujaca - to top-10 patternow.
+# (?:...) = non-capturing group, ([a-z0-9._%+-]+) = email local part
+# i ([a-z0-9.-]+\.[a-z]{2,}) = domena - po decode wracamy do EMAIL_RE.
+_OBFUSCATION_PATTERNS = [
+    # info [at] domena.pl / info[at]domena.pl / info @at@ domena.pl
+    r"([a-z0-9._%+-]+)\s*[\[\(]?\s*(?:at|AT|małpa|małpka)\s*[\]\)]?\s*([a-z0-9.-]+\.[a-z]{2,})",
+    # info ‒ at ‒ domena.pl (z roznymi myslnikami: -, –, —)
+    r"([a-z0-9._%+-]+)\s*[\-‒–—]\s*at\s*[\-‒–—]\s*([a-z0-9.-]+\.[a-z]{2,})",
+    # info(at)domena(dot)pl
+    r"([a-z0-9._%+-]+)\s*\(at\)\s*([a-z0-9.-]+)\s*\(dot\)\s*([a-z]{2,})",
+    # i n f o @ d o m e n a . p l (spaced for anti-scraper)
+    # (skomplikowany - pomijam, rzadko spotykany)
+]
+
+
+def _decode_cloudflare_emails(html_text: str) -> str:
+    """CloudFlare email-protection: <a data-cfemail="HEX">[email&#160;protected]</a>
+    gdzie HEX to base16 XOR z kluczem w pierwszym bajcie.
+
+    Decoduje wszystkie data-cfemail w HTML do plain email + wstawia je do
+    HTML zeby EMAIL_RE/mailto regex je znalazl.
+    """
+    def _decode_one(match: re.Match) -> str:
+        hex_str = match.group(1)
+        try:
+            data = bytes.fromhex(hex_str)
+            key = data[0]
+            decoded = ''.join(chr(b ^ key) for b in data[1:])
+            return f' {decoded} '  # spacje wokol = standalone email
+        except Exception:
+            return match.group(0)  # zostawcie jak jest
+
+    return re.sub(r'data-cfemail="([0-9a-fA-F]+)"', _decode_one, html_text)
+
+
+def _extract_emails(html_text: str, domain_hint: str | None = None) -> list[str]:
+    """Wyciagnij sensowne emaile z HTML. Ranking: same domain > inny PL > inny.
+
+    Obsluguje 3 typowe obfuscation patterns:
+    1. HTML entities (&#64; = @, &#105; = i) - html.unescape przed regex
+    2. CloudFlare email-protection (data-cfemail) - XOR base16 decode
+    3. "info [at] domena.pl" / "info (at) domena (dot) pl" / dash variants
+    """
     candidates = set()
 
+    # Step 1: HTML entity decode (`&#64;` -> `@`, `&#105;` -> `i` itp.)
+    decoded = html.unescape(html_text)
+
+    # Step 2: CloudFlare data-cfemail decode (top obfuscation w polsce 2024+)
+    decoded = _decode_cloudflare_emails(decoded)
+
     # mailto: links - najwiekszy sygnal
-    for m in re.finditer(r'mailto:\s*([^"\'\s<>?&]+)', html, re.IGNORECASE):
+    for m in re.finditer(r'mailto:\s*([^"\'\s<>?&]+)', decoded, re.IGNORECASE):
         candidates.add(m.group(1).strip().lower())
 
-    # Plain emails w tekscie
-    for m in EMAIL_RE.finditer(html):
+    # Plain emails w tekscie (po decode)
+    for m in EMAIL_RE.finditer(decoded):
         candidates.add(m.group(0).strip().lower())
+
+    # Step 3: obfuscation patterns - `info [at] domena.pl` etc.
+    decoded_lower = decoded.lower()
+    for pattern in _OBFUSCATION_PATTERNS:
+        for m in re.finditer(pattern, decoded_lower, re.IGNORECASE):
+            groups = m.groups()
+            if len(groups) == 2:
+                # local @ host
+                reconstructed = f"{groups[0]}@{groups[1]}"
+            elif len(groups) == 3:
+                # local (at) host (dot) tld
+                reconstructed = f"{groups[0]}@{groups[1]}.{groups[2]}"
+            else:
+                continue
+            # Walidacja - cofnij do EMAIL_RE
+            if EMAIL_RE.fullmatch(reconstructed):
+                candidates.add(reconstructed)
 
     # Filter junk
     clean = [e for e in candidates if not _is_junk_email(e)]
@@ -121,17 +197,19 @@ def _extract_emails(html: str, domain_hint: str | None = None) -> list[str]:
     return sorted(clean, key=_rank)
 
 
-def _extract_phones(html: str) -> list[str]:
+def _extract_phones(html_text: str) -> list[str]:
     """Wyciagnij polskie numery telefonow z HTML."""
     candidates = set()
+    # HTML entity decode dla numerow tez (rzadziej obfuscated ale dla pewnosci)
+    decoded = html.unescape(html_text)
 
     # tel: links - najpewniejsze
-    for m in re.finditer(r'tel:\s*([+\d\s\-.()]+)', html, re.IGNORECASE):
+    for m in re.finditer(r'tel:\s*([+\d\s\-.()]+)', decoded, re.IGNORECASE):
         norm = _normalize_phone(m.group(1))
         if norm: candidates.add(norm)
 
     # Tekstowe numery (znacznie więcej falsy positives, drugi priorytet)
-    for m in PHONE_RE.finditer(html):
+    for m in PHONE_RE.finditer(decoded):
         norm = _normalize_phone(m.group(0))
         if norm: candidates.add(norm)
 
@@ -175,10 +253,11 @@ def find_contacts_on_website(website: str, *, timeout_s: float = 10.0) -> Enrich
             try:
                 resp = client.get(url)
                 if resp.status_code != 200: continue
-                html = resp.text[:MAX_HTML_SIZE]
+                # 'page_html' nie 'html' bo `import html` (stdlib) wyzej w pliku
+                page_html = resp.text[:MAX_HTML_SIZE]
                 pages_ok += 1
-                emails.extend(_extract_emails(html, domain_hint))
-                phones.extend(_extract_phones(html))
+                emails.extend(_extract_emails(page_html, domain_hint))
+                phones.extend(_extract_phones(page_html))
                 # Wczesny exit jesli mamy dobre znalezisko
                 if emails and phones: break
             except Exception as exc:
