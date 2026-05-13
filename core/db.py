@@ -363,6 +363,49 @@ def init_db() -> None:
     Base.metadata.create_all(_engine)
     _migrate_workspace_columns()
     _ensure_default_workspace()
+    _backfill_lead_status()
+
+
+def _backfill_lead_status() -> None:
+    """One-shot backfill: leady ze statusem 'drafted'/'approved' ale BEZ
+    aktywnego (non-rejected) draftu wracaja do 'researched'.
+
+    Powod: do tego commita reject_draft NIE cofal lead.status. Wynik: leady
+    wisialy w 'drafted' mimo ze ich jedyny draft byl rejected -> UI mylil
+    + nie dawal generowac nowego draftu (bo "lead juz ma draft").
+
+    Idempotent: po backfille i fix endpoint'a nigdy nie znajdzie wiecej
+    leadow do cofniecia.
+    """
+    import logging
+    log = logging.getLogger("ecombinat.backfill")
+    from sqlalchemy import select, update, func as sa_func
+    try:
+        with SessionLocal() as session:
+            # Znajdz drafted/approved leady BEZ jakiegokolwiek non-rejected draftu.
+            # Subquery: lead_ids ktore MAJA aktywny draft.
+            active_lead_ids_sq = (
+                select(EmailDraft.lead_id).where(
+                    EmailDraft.status != "rejected",
+                ).distinct().subquery()
+            )
+            stmt = (
+                update(Lead)
+                .where(
+                    Lead.status.in_(["drafted", "approved"]),
+                    Lead.id.notin_(select(active_lead_ids_sq.c.lead_id)),
+                )
+                .values(status="researched")
+            )
+            result = session.execute(stmt)
+            session.commit()
+            if result.rowcount and result.rowcount > 0:
+                log.info(
+                    f"Backfill: cofnieto status do 'researched' dla "
+                    f"{result.rowcount} leadow (wszystkie ich drafty rejected)"
+                )
+    except Exception as exc:
+        log.warning(f"Backfill lead.status failed (non-critical): {exc}")
 
 
 def _migrate_workspace_columns() -> None:

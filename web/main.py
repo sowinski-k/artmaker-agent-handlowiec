@@ -995,6 +995,10 @@ def approve_draft(draft_id: int, cur: CurrentUser = Depends(get_current_user)) -
         ).scalar_one_or_none()
         if draft is None: raise HTTPException(status_code=404, detail="Draft nie istnieje.")
         draft.status = DraftStatus.APPROVED.value
+        # Lead status: drafted -> approved (sygnalizuje "gotowy do wyslania")
+        lead = session.get(Lead, draft.lead_id)
+        if lead is not None and lead.status in (LeadStatus.DRAFTED.value, LeadStatus.RESEARCHED.value):
+            lead.status = LeadStatus.APPROVED.value
         session.commit()
         _log_event(cur.workspace_id, cur.user_id, "INFO", "gui", "draft_approved",
                    f"Draft #{draft_id} approved")
@@ -1003,6 +1007,9 @@ def approve_draft(draft_id: int, cur: CurrentUser = Depends(get_current_user)) -
 
 @app.post("/api/drafts/{draft_id}/reject")
 def reject_draft(draft_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Odrzuc draft + cofnij lead.status do RESEARCHED jesli nie ma juz innych
+    non-rejected draftow (bug fix: lead zostawal w 'drafted' mimo ze wszystkie
+    drafty byly odrzucone -> blokowal generowanie nowego)."""
     with SessionLocal() as session:
         draft = session.execute(
             select(EmailDraft).where(
@@ -1010,11 +1017,34 @@ def reject_draft(draft_id: int, cur: CurrentUser = Depends(get_current_user)) ->
             )
         ).scalar_one_or_none()
         if draft is None: raise HTTPException(status_code=404, detail="Draft nie istnieje.")
+        lead_id = draft.lead_id
         draft.status = DraftStatus.REJECTED.value
+        session.flush()
+
+        # Czy lead ma JESZCZE jakikolwiek non-rejected draft?
+        active_count = int(session.scalar(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.lead_id == lead_id,
+                EmailDraft.workspace_id == cur.workspace_id,
+                EmailDraft.status != DraftStatus.REJECTED.value,
+            )
+        ) or 0)
+
+        if active_count == 0:
+            # Brak aktywnych draftow - lead wraca do "researched" (gotowy do
+            # nowej generacji). NIE ruszamy stanow finalnych (SENT/REPLIED/BOUNCED)
+            # bo to historyczne stany ktorych nie cofamy.
+            lead = session.get(Lead, lead_id)
+            if lead is not None and lead.status in (
+                LeadStatus.DRAFTED.value, LeadStatus.APPROVED.value,
+            ):
+                lead.status = LeadStatus.RESEARCHED.value
+                log.info(f"Lead #{lead_id} status cofniety do 'researched' (wszystkie drafty rejected)")
+
         session.commit()
         _log_event(cur.workspace_id, cur.user_id, "INFO", "gui", "draft_rejected",
                    f"Draft #{draft_id} rejected")
-        return {"ok": True}
+        return {"ok": True, "lead_id": lead_id, "active_drafts": active_count}
 
 
 class SendDraftIn(BaseModel):
