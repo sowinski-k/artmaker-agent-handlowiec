@@ -206,6 +206,52 @@ def validate_draft(payload: "EmailDraftPayload") -> list[str]:
             f"subject za dlugi ({len(payload.subject)} znakow, max {_MAX_SUBJECT_CHARS})"
         )
 
+    # Subject MUSI miec polskie znaki gdy zawiera polskie slowa.
+    # Regression dla drafta #15 GRIM: "Podobrazia do P.W. GRIM - wlasna marka?"
+    # (powinno byc 'własna'). LLM olewa rule polskich znakow w subjectach bo sa
+    # krotkie. Wykrywamy slowa typowe co maja polski znak.
+    if payload.subject:
+        # Slowa ktore w polskim NIE moga byc bez ogonkow (czesto w cold-mail subject)
+        # mapping ASCII -> kanoniczna pisownia
+        ascii_to_polish = {
+            r"\bwlasna\b": "własna", r"\bwlasnej\b": "własnej", r"\bwlasn\w*\b": "własn...",
+            r"\bwasn\w*\b": "Wasn... / Waszą",  # "Wasa marka" -> "Waszą marką"
+            r"\bmarka wlasn\w*\b": "marka własna",
+            r"\bwycen\w*\b": "(czesto OK ale sprawdz)",  # "wycena" jest OK
+            r"\bdla panst\w*\b": "Państwa",
+            r"\bbezposredni\w*\b": "bezpośredni",
+            r"\bdostep\w*\b": "dostęp",
+            r"\boszczednos\w*\b": "oszczędności",
+            r"\btaniej\b": "(OK, bez ogonka)",  # nie wymaga
+            r"\bopaszczen\w*\b": "opakowań",
+            r"\bzlot\w*\b": "złoty",  # "zl netto"
+            r"\bpaint\w*\b": "(OK angielskie)",
+            r"\bszybko\b": "(OK, bez ogonka)",
+        }
+        # Najczestsze realne pomylki: slowa bez ogonkow ktore wymagaja
+        critical_missing = [
+            (r"\bwlasn[aey]\b", "własn"),  # wlasna, wlasne, wlasny -> wlasn-
+            (r"\bwlasn\w+\b", "własn"),    # wlasna marka, wlasnej marki
+            (r"\bmarka wlasn\w*", "marka własna"),
+            (r"\bpanst\w*\b", "Państwa"),  # "panstwa" zamiast "Państwa"
+            (r"\bbezposredni\w*", "bezpośredni"),
+            (r"\bdostep\w*", "dostęp"),
+            (r"\boszczednosc\w*", "oszczędności"),
+            (r"\bopaszczen\w*", "opakowań"),
+            (r"\bproduckj\w*", "produkcji"),
+            (r"\boszczednos\w*", "oszczędności"),
+        ]
+        subject_lower = payload.subject.lower()
+        for pattern, correct in critical_missing:
+            m = re.search(pattern, subject_lower)
+            if m:
+                warnings.append(
+                    f"subject bez polskich znakow: '{m.group(0)}' -> powinno byc '{correct}...'. "
+                    "Cold-mail subject po polsku BEZ diakrytykow wyglada jak masowka "
+                    "z translatora - obniza open-rate i wpada w spam-classifiers."
+                )
+                break
+
     # Wszystkie snippet'y - check dlugosci zdan
     snippets = [
         ("snippet1", payload.snippet1),
@@ -496,13 +542,19 @@ def _build_user_prompt(lead: Lead) -> str:
         f"  Nigdy nie odwrotnie.\n\n"
         f"## KROK 2: Cold mail do {lead.company_name}\n\n"
         f"### Struktura snippetów (każdy = jeden akapit, każdy krótki):\n"
-        f"- subject: temat maila. Max 50 znaków. Format: pytanie/liczba/konkret. "
+        f"- subject: temat maila. Max 50 znaków. Format: pytanie/liczba/konkret.\n"
+        f"  **POLSKIE ZNAKI W SUBJECT OBOWIAZKOWE** (ą ć ę ł ń ó ś ź ż). "
+        f"  Cold-mail po polsku BEZ ogonkow wyglada jak masowka z translatora - "
+        f"  obniza open-rate i wpada w spam-classifiers. PISZESZ 'własna' NIE 'wlasna', "
+        f"  'Państwa' NIE 'Panstwa', 'bezpośredni' NIE 'bezposredni', 'oszczędności' "
+        f"  NIE 'oszczednosci'. Sprawdz dwa razy przed wyslaniem.\n"
         f"  Test: jesli zobaczylbys ten subject w skrzynce, otworzylbys bez wahania? "
-        f"  Przyklady mocnych subjectow z Track A flavorze:\n"
-        f"  * 'Produkcja farb pod {lead.company_name} - 35% taniej?'\n"
-        f"  * 'Wlasna marka materialow - mockup na 5 dni?'\n"
-        f"  * 'Wycenicie 500 sztuk plocien pod Wasza marka?'\n"
-        f"  * 'Importujecie sami z Chin czy przez posrednika?'\n"
+        f"  Przyklady mocnych subjectow Z POPRAWNYMI POLSKIMI ZNAKAMI:\n"
+        f"  * 'Produkcja farb pod {lead.company_name} - taniej?'\n"
+        f"  * 'Własna marka materiałów - ciekawe?'\n"
+        f"  * 'Wycenimy płótna pod Waszą markę?'\n"
+        f"  * 'Importujecie sami z Chin czy przez pośrednika?'\n"
+        f"  * 'Bezpośrednio z fabryki - chcecie porównać ceny?'\n"
         f"- snippet1: pierwsze zdanie/dwa. MUSI nawiazac do konkretnego haka. "
         f"  Bez 'Dzien dobry', bez 'Szanowni Panstwo'. Zacznij od miesa - "
         f"  pytania, obserwacji, konkretu z ich strony. Idealnie wciagnij od razu "

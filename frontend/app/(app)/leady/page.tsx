@@ -713,14 +713,20 @@ export default function LeadyPage() {
 
                   {/* Pracuje w tle - widac progress + status, mozna zamknac okno */}
                   {draftJobId !== null && (
-                    <div className="job-progress">
+                    <div className="job-progress active">
                       <div className="jp-spinner" />
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>
-                          Agent generuje draft <span className="mono" style={{ color: '#6B7280' }}>#{draftJobId}</span>
+                          <span className="jp-dot" />
+                          Agent generuje draft<span className="working-dots" />{' '}
+                          <span className="mono" style={{ color: '#6B7280' }}>#{draftJobId}</span>
                         </div>
-                        <div style={{ fontSize: 11, color: '#6B7280' }}>
+                        <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                           Status: <strong>{draftJobStatus || 'pending'}</strong>. Pracuje w tle - mozesz zamknac okno, status pojawi sie w Drafty.
+                        </div>
+                        {/* Indeterminate progress bar - 'agent zyje' visual */}
+                        <div className="jp-progress">
+                          <div className="jp-progress-fill" />
                         </div>
                       </div>
                     </div>
@@ -1000,8 +1006,75 @@ table.tbl .row-check input[type="checkbox"] {
 .flash-info { background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE; }
 
 /* Background job progress widget */
-.job-progress { display: flex; align-items: center; gap: 14px; padding: 12px 14px; background: #FAFAF7; border: 1px solid #E5E7EB; border-radius: 8px; }
-.jp-spinner { width: 22px; height: 22px; border: 3px solid #E5E7EB; border-top-color: #D4212C; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+.job-progress {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px; background: #FAFAF7;
+  border: 1px solid #E5E7EB; border-radius: 8px;
+}
+.job-progress.active {
+  border-color: #FCA5A5;
+  background: linear-gradient(135deg, #FDECED 0%, #FAFAF7 100%);
+  animation: pulse-bg 2.5s ease-in-out infinite;
+}
+@keyframes pulse-bg {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212,33,44,0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(212,33,44,0.08); }
+}
+
+.jp-spinner {
+  width: 22px; height: 22px;
+  border: 3px solid #E5E7EB; border-top-color: #D4212C;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* Pulsujaca kropka przed "Agent generuje" - dodatkowy 'zyje' signal */
+.jp-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #D4212C;
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { transform: scale(1);   opacity: 1;   }
+  50%      { transform: scale(1.5); opacity: 0.55; }
+}
+
+/* Indeterminate progress bar - generacja drafta nie ma znanej dlugosci,
+   wiec animujemy 'sliding' fragment od lewej do prawej w nieskonczonosc */
+.jp-progress {
+  margin-top: 8px;
+  height: 4px;
+  background: #fff;
+  border-radius: 2px;
+  overflow: hidden;
+  border: 1px solid #FCD8DB;
+}
+.jp-progress-fill {
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, #D4212C 50%, transparent);
+  animation: jp-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes jp-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+/* Working dots ellipsis - "Agent generuje..." z animacja kropek */
+.working-dots::after {
+  content: '';
+  animation: dots-ellipsis 1.5s steps(4, end) infinite;
+}
+@keyframes dots-ellipsis {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Warning box dla research warning_flags */
