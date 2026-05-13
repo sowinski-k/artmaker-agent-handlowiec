@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
 import { api, clearToken, isAuthenticated, logout } from '@/lib/api';
+import { ConfirmProvider } from '@/lib/confirm';
 
 const HANDLOWIEC_PAGES = [
   { href: '/handlowiec/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
@@ -83,7 +84,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     : 0;
 
   return (
-    <>
+    <ConfirmProvider>
       <style dangerouslySetInnerHTML={{ __html: APP_CSS }} />
       <div className="app">
         <aside className="sidebar">
@@ -178,7 +179,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
-    </>
+    </ConfirmProvider>
   );
 }
 

@@ -29,6 +29,7 @@ from core.db import (
     Job,
     JobStatus,
     JobType,
+    Lead,
     PatrolSchedule,
     SessionLocal,
     init_db,
@@ -39,6 +40,10 @@ JOB_TIMEOUT_S = float(os.getenv("JOB_TIMEOUT", "1800"))  # 30 min hard limit
 MAX_RETRIES = int(os.getenv("JOB_MAX_RETRIES", "3"))
 PATROL_TICK_S = float(os.getenv("PATROL_TICK_INTERVAL", "60"))  # check patrols co 60s
 HEARTBEAT_S = float(os.getenv("WORKER_HEARTBEAT_INTERVAL", "60"))  # heartbeat co 60s
+# Kosz: leady z deleted_at starszym niz RECYCLE_BIN_DAYS zostaja hard-deleted
+# (cascade na drafty). Tick co PURGE_TICK_S - default 1h zeby nie spamowac DB.
+RECYCLE_BIN_DAYS = int(os.getenv("RECYCLE_BIN_DAYS", "7"))
+PURGE_TICK_S = float(os.getenv("PURGE_TICK_INTERVAL", "3600"))  # co 1h
 
 from core.observability import init_sentry
 init_sentry("worker")
@@ -263,6 +268,7 @@ def handle_bulk_research_leads(session: Session, job: Job) -> dict:
                 segment_hint=p.get("segment_hint"),
                 city_hint=p.get("city_hint"),
                 workspace_id=job.workspace_id,
+                force_refresh=bool(p.get("force_refresh", False)),
             )
             if not was:
                 dups += 1
@@ -656,6 +662,58 @@ def _patrol_tick() -> int:
     return triggered
 
 
+def _purge_trash_tick() -> int:
+    """Auto-purge kosza: hard-delete leady z deleted_at starszym niz
+    RECYCLE_BIN_DAYS dni (default 7). Cascade na drafty (relationship cascade).
+
+    Wrap w try/except - failure nie blokuje worker loop. Audit log per workspace
+    z liczba usunietych - user widzi w timeline ze kosz sie sam wyczyscil.
+    """
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RECYCLE_BIN_DAYS)
+    deleted_count = 0
+    try:
+        with SessionLocal() as session:
+            stale = session.execute(
+                select(Lead).where(
+                    Lead.deleted_at.is_not(None),
+                    Lead.deleted_at < cutoff,
+                )
+            ).scalars().all()
+            if not stale:
+                return 0
+            # Grupuj po workspace_id do audit log
+            by_ws: dict[int | None, list[int]] = {}
+            for lead in stale:
+                by_ws.setdefault(lead.workspace_id, []).append(lead.id)
+                session.delete(lead)  # cascade -> drafty
+                deleted_count += 1
+            # Audit per workspace
+            for ws_id, ids in by_ws.items():
+                if ws_id is None:
+                    continue
+                session.add(Event(
+                    workspace_id=ws_id,
+                    type="trash.auto_purged",
+                    level="INFO",
+                    source="worker",
+                    message=f"Auto-purge kosza: {len(ids)} leadow usunietych po {RECYCLE_BIN_DAYS} dniach",
+                    payload={
+                        "deleted_count": len(ids),
+                        "lead_ids": ids[:50],  # cap zeby nie napuchla baza
+                        "recycle_bin_days": RECYCLE_BIN_DAYS,
+                    },
+                ))
+            session.commit()
+            log.info(
+                f"Trash auto-purge: removed {deleted_count} leads "
+                f"(deleted_at older than {RECYCLE_BIN_DAYS} days)"
+            )
+    except Exception as exc:
+        log.exception(f"Trash auto-purge failed (non-fatal): {exc}")
+    return deleted_count
+
+
 def _heartbeat() -> None:
     """Zapisz "pulse" do tabeli Event - pozwala backendowi sprawdzic czy worker zyje.
 
@@ -679,12 +737,18 @@ def _heartbeat() -> None:
 
 
 def loop_forever() -> None:
-    log.info(f"Worker starting (poll interval {POLL_INTERVAL_S}s, max retries {MAX_RETRIES})")
+    log.info(
+        f"Worker starting (poll {POLL_INTERVAL_S}s, max retries {MAX_RETRIES}, "
+        f"patrol tick {PATROL_TICK_S}s, trash purge {PURGE_TICK_S}s "
+        f"after {RECYCLE_BIN_DAYS} days)"
+    )
     init_db()
     _recover_zombie_jobs()
     _heartbeat()  # initial heartbeat zaraz po starcie
+    _purge_trash_tick()  # initial purge zaraz po starcie (cleanup po long downtime)
     last_patrol_tick = 0.0
     last_heartbeat = time.time()
+    last_purge_tick = time.time()
     while not _shutdown:
         try:
             # Patrol tick co PATROL_TICK_S - tworzy nowe DISCOVERY_PIPELINE
@@ -696,6 +760,11 @@ def loop_forever() -> None:
             if now_ts - last_heartbeat >= HEARTBEAT_S:
                 last_heartbeat = now_ts
                 _heartbeat()
+            # Auto-purge kosza co PURGE_TICK_S (default 1h) - hard delete starych
+            # leadow z trash (>RECYCLE_BIN_DAYS dni). Tani SELECT na partial index.
+            if now_ts - last_purge_tick >= PURGE_TICK_S:
+                last_purge_tick = now_ts
+                _purge_trash_tick()
 
             # Wyciagamy tylko pola ktorych potrzebujemy POZA scope sesji,
             # zeby nie miec DetachedInstanceError gdy session.close() rozlaczy obiekt.

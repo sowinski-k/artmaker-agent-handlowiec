@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { useConfirm } from '@/lib/confirm';
 
 interface LeadRow {
   id: number;
@@ -67,6 +68,28 @@ interface LeadDetail extends LeadRow {
   active_jobs: ActiveJobLite[];
 }
 
+interface TrashLeadRow {
+  id: number;
+  segment: string;
+  company_name: string;
+  contact_name: string | null;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  city: string | null;
+  status: string;
+  score: number | null;
+  deleted_at: string | null;
+  days_until_purge: number;
+  created_at: string | null;
+}
+
+interface TrashResponse {
+  total: number;
+  items: TrashLeadRow[];
+  recycle_bin_days: number;
+}
+
 interface LeadsResponse {
   total: number;
   items: LeadRow[];
@@ -88,7 +111,14 @@ type GlobalFlash = { kind: 'success' | 'error' | 'info'; text: string };
 
 export default function LeadyPage() {
   const router = useRouter();
+  const confirm = useConfirm();
+  // View toggle: 'all' (zwykla lista) vs 'trash' (kosz).
+  // Kosz pokazuje deleted_at != null leady + akcje przywroc/usun-permanentnie.
+  const [view, setView] = useState<'all' | 'trash'>('all');
   const [leads, setLeads] = useState<LeadRow[]>([]);
+  const [trash, setTrash] = useState<TrashLeadRow[]>([]);
+  const [trashTotal, setTrashTotal] = useState(0);
+  const [recycleBinDays, setRecycleBinDays] = useState(7);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [segment, setSegment] = useState('');
@@ -165,7 +195,41 @@ export default function LeadyPage() {
     }
   }
 
-  useEffect(() => { void load(); /* eslint-disable-next-line */ }, [segment, status, minScore, search, sort]);
+  async function loadTrash() {
+    setLoading(true);
+    try {
+      const res = await api<TrashResponse>('/api/leads/trash?limit=200');
+      setTrash(res.items);
+      setTrashTotal(res.total);
+      setRecycleBinDays(res.recycle_bin_days);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Header badge - liczba w koszu (do tab toggle). Ladowane raz przy mount
+  // + odswiezane po kazdej akcji (delete/restore/empty). Lekkie - tylko count.
+  async function refreshTrashCount() {
+    try {
+      const res = await api<TrashResponse>('/api/leads/trash?limit=1');
+      setTrashTotal(res.total);
+      setRecycleBinDays(res.recycle_bin_days);
+    } catch {/* ignore */}
+  }
+
+  useEffect(() => {
+    if (view === 'all') {
+      void load();
+    } else {
+      void loadTrash();
+    }
+    /* eslint-disable-next-line */
+  }, [view, segment, status, minScore, search, sort]);
+
+  // Trash count - laduje sie raz na mount + przy zmianie view (do badge w tab)
+  useEffect(() => { void refreshTrashCount(); }, []);
 
   // Auto-refresh listy CO 3s gdy chocaby 1 lead ma active_job_type
   // (cichy refresh - bez setLoading, zeby tabela nie migotala). Daje
@@ -367,22 +431,159 @@ export default function LeadyPage() {
 
   async function deleteLead() {
     if (!detail) return;
-    const ok = window.confirm(
-      `Usunąć lead "${detail.company_name}" (#${detail.id})?\n\n` +
-      `Operacja nieodwracalna - usuwa też wszystkie drafty (${detail.drafts.length}) ` +
-      `i historię tego leada.`
-    );
+    const ok = await confirm({
+      title: 'Przenieść do kosza?',
+      message: (
+        <>
+          Lead <strong>{detail.company_name}</strong> (#{detail.id}) trafi do kosza.
+          Możesz go przywrócić w ciągu <strong>{recycleBinDays} dni</strong> -
+          później auto-usunięcie wraz z draftami ({detail.drafts.length}).
+        </>
+      ),
+      confirmLabel: 'Przenieś do kosza',
+      cancelLabel: 'Anuluj',
+      destructive: true,
+      icon: 'trash',
+    });
     if (!ok) return;
     try {
       await api(`/api/leads/${detail.id}`, { method: 'DELETE' });
-      setFlash({ kind: 'success', text: `Lead "${detail.company_name}" usunięty.` });
+      setFlash({
+        kind: 'success',
+        text: `Lead "${detail.company_name}" przeniesiony do kosza (auto-usunięcie za ${recycleBinDays} dni).`,
+      });
       setSelectedId(null);
       setDetail(null);
       await load();
+      await refreshTrashCount();
     } catch (err) {
       setFlash({
         kind: 'error',
         text: err instanceof Error ? err.message : 'Nie udalo sie usunac',
+      });
+    }
+  }
+
+  // Bulk soft-delete z bulk-bar (button "Usun N").
+  async function bulkDeleteLeads() {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    const ok = await confirm({
+      title: ids.length === 1 ? 'Przenieść do kosza?' : `Przenieść ${ids.length} leadów do kosza?`,
+      message: (
+        <>
+          {ids.length === 1 ? 'Lead trafi' : `${ids.length} leadów trafi`} do kosza.
+          Możesz przywrócić każdy z nich w ciągu <strong>{recycleBinDays} dni</strong>.
+          Po tym czasie auto-usunięcie wraz z draftami.
+        </>
+      ),
+      confirmLabel: 'Przenieś do kosza',
+      cancelLabel: 'Anuluj',
+      destructive: true,
+      icon: 'trash',
+    });
+    if (!ok) return;
+    setBulkSubmitting(true);
+    try {
+      const res = await api<{
+        ok: boolean; requested: number; moved_to_trash: number; skipped: number;
+      }>('/api/leads/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify({ lead_ids: ids }),
+      });
+      setFlash({
+        kind: 'success',
+        text: `Przeniesione do kosza: ${res.moved_to_trash}${res.skipped > 0 ? ` (${res.skipped} pominięte - już w koszu)` : ''}. Auto-usunięcie za ${recycleBinDays} dni.`,
+      });
+      clearSelection();
+      await load();
+      await refreshTrashCount();
+    } catch (err) {
+      setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd' });
+    } finally {
+      setBulkSubmitting(false);
+    }
+  }
+
+  // Trash view actions
+  async function restoreLead(leadId: number, companyName: string) {
+    try {
+      await api(`/api/leads/${leadId}/restore`, { method: 'POST' });
+      setFlash({
+        kind: 'success',
+        text: `Lead "${companyName}" przywrócony do bazy.`,
+      });
+      await loadTrash();
+      await refreshTrashCount();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udało się przywrócić',
+      });
+    }
+  }
+
+  async function permanentDelete(leadId: number, companyName: string) {
+    const ok = await confirm({
+      title: 'Usunąć permanentnie?',
+      message: (
+        <>
+          Lead <strong>{companyName}</strong> (#{leadId}) zostanie usunięty
+          razem z draftami. <strong>Tej operacji nie można cofnąć.</strong>
+        </>
+      ),
+      confirmLabel: 'Usuń na zawsze',
+      cancelLabel: 'Anuluj',
+      destructive: true,
+      icon: 'trash-x',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/leads/${leadId}/permanent`, { method: 'DELETE' });
+      setFlash({
+        kind: 'success',
+        text: `Lead "${companyName}" usunięty permanentnie.`,
+      });
+      await loadTrash();
+      await refreshTrashCount();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udało się usunąć',
+      });
+    }
+  }
+
+  async function emptyTrash() {
+    if (trashTotal === 0) return;
+    const ok = await confirm({
+      title: 'Wyczyścić kosz?',
+      message: (
+        <>
+          Wszystkie <strong>{trashTotal}</strong> leadów w koszu zostanie usuniętych
+          permanentnie razem z draftami. <strong>Tej operacji nie można cofnąć.</strong>
+        </>
+      ),
+      confirmLabel: 'Wyczyść kosz',
+      cancelLabel: 'Anuluj',
+      destructive: true,
+      icon: 'trash-x',
+    });
+    if (!ok) return;
+    try {
+      const res = await api<{ ok: boolean; deleted_count: number }>(
+        '/api/leads/trash/empty', { method: 'POST' },
+      );
+      setFlash({
+        kind: 'success',
+        text: `Kosz wyczyszczony: ${res.deleted_count} leadów usuniętych permanentnie.`,
+      });
+      await loadTrash();
+      await refreshTrashCount();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udało się wyczyścić',
       });
     }
   }
@@ -538,8 +739,17 @@ export default function LeadyPage() {
           <div>
             <h1>Leady</h1>
             <p>
-              {total} {total === 1 ? 'firma' : total < 5 ? 'firmy' : 'firm'} w bazie
-              {search.trim() && ` · filtr: "${search.trim()}"`}
+              {view === 'all' ? (
+                <>
+                  {total} {total === 1 ? 'firma' : total < 5 ? 'firmy' : 'firm'} w bazie
+                  {search.trim() && ` · filtr: "${search.trim()}"`}
+                </>
+              ) : (
+                <>
+                  Kosz: {trashTotal} {trashTotal === 1 ? 'lead' : 'leadów'}.
+                  Auto-usunięcie po {recycleBinDays} dniach od daty usunięcia.
+                </>
+              )}
             </p>
           </div>
           <a href="/pozyskiwanie" className="btn btn-secondary">
@@ -547,6 +757,27 @@ export default function LeadyPage() {
           </a>
         </div>
 
+        {/* View toggle: Wszystkie vs Kosz */}
+        <div className="view-tabs">
+          <button
+            className={`view-tab ${view === 'all' ? 'active' : ''}`}
+            onClick={() => { setView('all'); setSelectedId(null); clearSelection(); }}
+          >
+            <i className="ti ti-users" /> Wszystkie
+            {total > 0 && <span className="vt-count">{total}</span>}
+          </button>
+          <button
+            className={`view-tab ${view === 'trash' ? 'active' : ''}`}
+            onClick={() => { setView('trash'); setSelectedId(null); clearSelection(); }}
+          >
+            <i className="ti ti-trash" /> Kosz
+            {trashTotal > 0 && <span className="vt-count vt-count-trash">{trashTotal}</span>}
+          </button>
+        </div>
+
+        {/* Toolbar/bulk-bar + lista tylko w view 'all'. Trash ma osobny renderer ponizej. */}
+        {view === 'all' && (
+        <>
         {/* Toolbar: search + filtry + sort - wszystko w jednym pasku */}
         <div className="toolbar">
           <div className="search-box">
@@ -599,6 +830,15 @@ export default function LeadyPage() {
             >
               <i className="ti ti-mail-plus" />
               {bulkSubmitting ? 'Zlecam...' : `Generuj drafty (${selectedIds.size})`}
+            </button>
+            <button
+              className="btn btn-bulk-delete btn-sm"
+              onClick={bulkDeleteLeads}
+              disabled={bulkSubmitting}
+              title={`Przeniesie ${selectedIds.size} leadów do kosza (przywracalne ${recycleBinDays} dni)`}
+            >
+              <i className="ti ti-trash" />
+              {bulkSubmitting ? 'Przenoszę...' : `Przenieś do kosza (${selectedIds.size})`}
             </button>
           </div>
         )}
@@ -758,6 +998,112 @@ export default function LeadyPage() {
             </table>
           )}
         </div>
+        </>
+        )}
+
+        {/* ============= VIEW: KOSZ ============= */}
+        {view === 'trash' && (
+          <>
+            <div className="trash-banner">
+              <i className="ti ti-info-circle" />
+              <div>
+                <strong>Kosz - leady oczekujące na auto-usunięcie</strong>
+                <div style={{ fontSize: 12.5, color: '#6B7280', marginTop: 2 }}>
+                  Każdy lead zostaje w koszu przez {recycleBinDays} dni od daty usunięcia.
+                  Po tym czasie znika permanentnie wraz z draftami. Możesz przywrócić
+                  go w każdej chwili lub usunąć od razu permanentnie.
+                </div>
+              </div>
+              {trashTotal > 0 && (
+                <button
+                  className="btn btn-bulk-delete btn-sm"
+                  onClick={emptyTrash}
+                  title={`Permanentnie usun wszystkie ${trashTotal} leadow z kosza`}
+                >
+                  <i className="ti ti-trash-x" /> Wyczyść kosz ({trashTotal})
+                </button>
+              )}
+            </div>
+
+            <div className="card" style={{ marginTop: 12 }}>
+              <div className="card-head">
+                <div className="card-title">
+                  <i className="ti ti-trash" /> Kosz ({trashTotal})
+                </div>
+              </div>
+              {loading ? (
+                <div style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>
+                  Ładowanie...
+                </div>
+              ) : trash.length === 0 ? (
+                <div className="empty-state">
+                  <i className="ti ti-trash-off" />
+                  <h3>Kosz jest pusty</h3>
+                  <p>Nie ma żadnych leadów oczekujących na auto-usunięcie.</p>
+                </div>
+              ) : (
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th className="num">Score</th>
+                      <th>Firma</th>
+                      <th>Segment</th>
+                      <th>Email</th>
+                      <th>Usunięty</th>
+                      <th>Auto-usunięcie za</th>
+                      <th style={{ textAlign: 'right' }}>Akcje</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trash.map((l) => {
+                      const days = l.days_until_purge;
+                      const urgent = days <= 1;
+                      return (
+                        <tr key={l.id}>
+                          <td className="num">{scoreBadge(l.score)}</td>
+                          <td>
+                            <strong>{l.company_name}</strong>
+                            {l.contact_name && <div className="contact-sub">{l.contact_name}</div>}
+                          </td>
+                          <td><span className="seg-badge">{l.segment}</span></td>
+                          <td className="email-cell">{l.email || <span className="muted">brak</span>}</td>
+                          <td className="muted">
+                            {l.deleted_at ? formatTimeAgo(l.deleted_at) : '-'}
+                          </td>
+                          <td>
+                            <span className={`purge-pill ${urgent ? 'urgent' : ''}`}>
+                              <i className="ti ti-clock" />
+                              {days < 1
+                                ? `${Math.round(days * 24)}h`
+                                : `${Math.ceil(days)} ${Math.ceil(days) === 1 ? 'dzień' : 'dni'}`}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => restoreLead(l.id, l.company_name)}
+                              title="Przywróć lead z kosza"
+                            >
+                              <i className="ti ti-arrow-back-up" /> Przywróć
+                            </button>
+                            <button
+                              className="btn-icon-mini btn-icon-danger"
+                              onClick={() => permanentDelete(l.id, l.company_name)}
+                              title="Usuń permanentnie (nieodwracalne)"
+                              style={{ marginLeft: 6 }}
+                            >
+                              <i className="ti ti-trash-x" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       {selectedId && (
@@ -1116,13 +1462,14 @@ export default function LeadyPage() {
                     </span>
                   )}
 
-                  {/* Destrukcyjna akcja - na samym dole, dyskretna */}
+                  {/* Destrukcyjna akcja - na samym dole, dyskretna.
+                      Soft-delete: lead trafia do kosza (przywracalny przez {recycleBinDays} dni). */}
                   <button
                     className="btn-delete-lead"
                     onClick={deleteLead}
-                    title="Usuń lead z bazy (nieodwracalne)"
+                    title={`Przenieś lead do kosza (przywracalny przez ${recycleBinDays} dni)`}
                   >
-                    <i className="ti ti-trash" /> Usuń lead z bazy
+                    <i className="ti ti-trash" /> Przenieś do kosza
                   </button>
                 </div>
               </div>
@@ -1258,6 +1605,78 @@ const CSS = `
 .empty-state h3 { font-size: 16px; font-weight: 600; color: #111; margin: 0 0 8px; }
 .empty-state p { color: #6B7280; font-size: 13.5px; margin: 0; }
 .empty-state a { color: #D4212C; text-decoration: underline; }
+
+/* ===== VIEW TABS (Wszystkie / Kosz) ===== */
+.view-tabs {
+  display: flex; gap: 4px; margin-bottom: 12px;
+  border-bottom: 1px solid #E5E7EB;
+  padding: 0 0 0 4px;
+}
+.view-tab {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 16px;
+  background: none; border: none; cursor: pointer;
+  font-family: inherit; font-size: 13.5px; font-weight: 500;
+  color: #6B7280;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.view-tab:hover { color: #111; }
+.view-tab.active { color: #D4212C; border-bottom-color: #D4212C; }
+.view-tab i { font-size: 16px; }
+.vt-count {
+  font-size: 11px; font-weight: 600;
+  padding: 2px 7px; border-radius: 10px;
+  background: #F3F4F6; color: #6B7280;
+}
+.view-tab.active .vt-count { background: #FDECED; color: #8F1018; }
+.vt-count-trash { background: #FEF3C7; color: #92400E; }
+.view-tab.active .vt-count-trash { background: #FDECED; color: #8F1018; }
+
+/* Bulk-delete button - czerwonawy, dyskretny w bulk-bar */
+.btn-bulk-delete {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; font-size: 12.5px; font-weight: 500;
+  background: #fff; color: #8F1018; border: 1px solid #FCA5A5;
+  border-radius: 6px; cursor: pointer; font-family: inherit;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.btn-bulk-delete:hover:not(:disabled) {
+  background: #D4212C; color: #fff; border-color: #D4212C;
+}
+.btn-bulk-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-bulk-delete i { font-size: 14px; }
+
+/* ===== TRASH VIEW ===== */
+.trash-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: #FEF3C7; border: 1px solid #FDE68A; border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 12px;
+}
+.trash-banner > i {
+  font-size: 22px; color: #92400E; flex-shrink: 0;
+}
+.trash-banner > div { flex: 1; font-size: 13.5px; color: #78350F; }
+.trash-banner strong { color: #78350F; font-weight: 600; }
+
+.purge-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 500;
+  background: #F3F4F6; color: #4B5563;
+}
+.purge-pill i { font-size: 12px; }
+.purge-pill.urgent { background: #FEE2E2; color: #991B1B; }
+
+.btn-icon-danger {
+  width: 28px; height: 28px; border-radius: 6px;
+  border: 1px solid #FCA5A5; background: #fff;
+  color: #8F1018; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; transition: background 0.12s, color 0.12s;
+}
+.btn-icon-danger:hover { background: #D4212C; color: #fff; border-color: #D4212C; }
 
 .card { background: #fff; border: 1px solid #E5E7EB; border-radius: 8px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid #E5E7EB; }

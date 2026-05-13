@@ -515,6 +515,9 @@ def mark_existing_in_db(places: list[DiscoveredPlace], workspace_id: int | None 
             conditions = [Lead.website.ilike(f"%{h}%") for h in chunk]
             q = select(Lead.id, Lead.website, Lead.score).where(
                 Lead.website.isnot(None),
+                # Pomijaj soft-deleted - user usunal lead -> moze go pozyskac
+                # ponownie bez "duplikat" flag w wynikach.
+                Lead.deleted_at.is_(None),
                 or_(*conditions),
             )
             if workspace_id is not None:

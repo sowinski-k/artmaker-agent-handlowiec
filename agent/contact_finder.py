@@ -364,6 +364,7 @@ def find_leads_to_enrich(
             Lead.email.is_(None),
             Lead.phone.is_(None),
             Lead.website.isnot(None),
+            Lead.deleted_at.is_(None),  # nie enrichuj leadow w koszu
             or_(Lead.last_enriched_at.is_(None), Lead.last_enriched_at < cutoff),
         )
         if not include_dead_end:

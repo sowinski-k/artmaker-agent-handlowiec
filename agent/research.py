@@ -112,8 +112,13 @@ def find_existing_lead(url: str) -> int | None:
     if not host:
         return None
     with SessionLocal() as session:
+        # Pomijaj soft-deleted (kosz). User usunal lead -> chce go pozyskac
+        # ponownie -> nowy lead. Stary zostaje w trash do auto-purge.
         rows = session.execute(
-            select(Lead.id, Lead.website).where(Lead.website.ilike(f"%{host}%"))
+            select(Lead.id, Lead.website).where(
+                Lead.website.ilike(f"%{host}%"),
+                Lead.deleted_at.is_(None),
+            )
         ).all()
     for lead_id, website in rows:
         if normalize_url(website) == target:
