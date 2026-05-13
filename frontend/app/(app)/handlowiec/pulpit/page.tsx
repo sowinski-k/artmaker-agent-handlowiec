@@ -24,6 +24,27 @@ interface DashboardData {
     reply_rate: number;
     bounced: number;
   };
+  roi?: {
+    hours_saved: number;
+    minutes_saved: number;
+    saved_pln: {
+      min_wage_brutto: number;
+      min_wage_employer_cost: number;
+      sales_rate: number;
+    };
+    breakdown: Array<{
+      label: string;
+      count: number;
+      min_each: number;
+      total_min: number;
+    }>;
+    rates: {
+      min_wage_pln_per_h: number;
+      min_wage_employer_pln_per_h: number;
+      employer_cost_multiplier: number;
+      sales_rate_pln_per_h: number;
+    };
+  };
   sparklines: Record<string, number[]>;
   funnel: Array<{ label: string; value: number; percent: number; icon: string }>;
   system: Array<{ label: string; value: string; status: 'ok' | 'warn' | 'err' }>;
@@ -131,6 +152,82 @@ export default function PulpitPage() {
           <StatCard label="Średni score" value={stats.avg_score.toFixed(1)} unit="/ 10" icon="chart-bar"
             sparkline={data.sparklines.replies} sparkColor="#6B7280" />
         </div>
+
+        {/* ROI WIDGET - Ile agent zaoszczedzil vs reczna praca.
+            Wyswietla tylko gdy hours_saved > 0 (nie pokazujemy 0 zl). */}
+        {data.roi && data.roi.hours_saved > 0 && (
+          <div className="roi-card">
+            <div className="roi-head">
+              <div className="roi-title">
+                <i className="ti ti-coin"></i>
+                <span>Agent zaoszczędził Ci do tej pory</span>
+              </div>
+              <div className="roi-time">
+                <i className="ti ti-clock"></i>
+                <strong>{data.roi.hours_saved}h</strong> roboczogodzin
+              </div>
+            </div>
+
+            {/* 3 stawki - od konserwatywnej do realistycznej */}
+            <div className="roi-amounts roi-amounts-3">
+              <div className="roi-amount-block">
+                <div className="ra-label">Najniższa krajowa (brutto pracownika)</div>
+                <div className="ra-value">
+                  <strong>{data.roi.saved_pln.min_wage_brutto.toLocaleString('pl-PL')}</strong>
+                  <span className="ra-unit"> zł</span>
+                </div>
+                <div className="ra-rate">
+                  {data.roi.rates.min_wage_pln_per_h.toFixed(1)} zł/h
+                </div>
+              </div>
+              <div className="roi-amount-block">
+                <div className="ra-label">Realny koszt pracodawcy (z ZUS)</div>
+                <div className="ra-value">
+                  <strong>{data.roi.saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')}</strong>
+                  <span className="ra-unit"> zł</span>
+                </div>
+                <div className="ra-rate">
+                  {data.roi.rates.min_wage_employer_pln_per_h.toFixed(1)} zł/h
+                  {' '}({data.roi.rates.employer_cost_multiplier}× brutto)
+                </div>
+              </div>
+              <div className="roi-amount-block primary">
+                <div className="ra-label">Stawka handlowca B2B (rynek)</div>
+                <div className="ra-value">
+                  <strong>{data.roi.saved_pln.sales_rate.toLocaleString('pl-PL')}</strong>
+                  <span className="ra-unit"> zł</span>
+                </div>
+                <div className="ra-rate">
+                  {data.roi.rates.sales_rate_pln_per_h.toFixed(0)} zł/h netto
+                </div>
+              </div>
+            </div>
+
+            {/* Breakdown - co skladalo sie na ten ROI */}
+            <div className="roi-breakdown-list">
+              <div className="rbl-head">
+                <i className="ti ti-list-details" /> Co agent zrobił:
+              </div>
+              {data.roi.breakdown.filter(b => b.count > 0).map((b) => (
+                <div className="rbl-row" key={b.label}>
+                  <span className="rbl-label">{b.label}</span>
+                  <span className="rbl-formula">
+                    <strong>{b.count}</strong> × {b.min_each} min
+                  </span>
+                  <span className="rbl-total">
+                    = {Math.round(b.total_min / 60 * 10) / 10}h
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="roi-footer-note">
+              <i className="ti ti-info-circle" />
+              Stawki konfigurowalne przez env vars (LABOR_MIN_WAGE_PLN_PER_H,
+              LABOR_MIN_PER_RESEARCH itp.) - łatwa aktualizacja gdy zmieni się
+              minimalna albo Twoja oferta.
+            </div>
+          </div>
+        )}
 
         {/* ROW 1: CHART + ACTIVITY */}
         <div className="grid">
@@ -476,6 +573,119 @@ const PULPIT_CSS = `
 .card-title i { color: var(--red); font-size: 15px; }
 .card-actions { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
 .card-body { padding: 16px; }
+
+/* ============ ROI WIDGET ============ */
+.roi-card {
+  background: linear-gradient(135deg, #1C1C1C 0%, #2A2A2A 50%, #1C1C1C 100%);
+  border: 1px solid #2A2A2A;
+  border-radius: 14px;
+  padding: 20px 24px;
+  margin-bottom: 24px;
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+}
+.roi-card::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at top right, rgba(212,33,44,0.18), transparent 50%);
+  pointer-events: none;
+}
+.roi-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px; gap: 12px; flex-wrap: wrap;
+  position: relative;
+}
+.roi-title {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 14px; color: #D1D5DB;
+}
+.roi-title i {
+  font-size: 22px; color: #D4212C;
+  background: rgba(212,33,44,0.15);
+  padding: 8px; border-radius: 50%;
+}
+.roi-time {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: #9CA3AF;
+}
+.roi-time i { color: #D4212C; font-size: 14px; }
+.roi-time strong { color: #fff; font-size: 16px; font-family: 'JetBrains Mono', monospace; }
+
+.roi-amounts {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+  margin-bottom: 14px; position: relative;
+}
+.roi-amounts-3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 900px) {
+  .roi-amounts-3 { grid-template-columns: 1fr; }
+}
+.roi-amount-block {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.roi-amount-block.primary {
+  background: linear-gradient(135deg, rgba(212,33,44,0.18) 0%, rgba(212,33,44,0.08) 100%);
+  border-color: rgba(212,33,44,0.35);
+}
+.ra-label {
+  font-size: 11px; color: #9CA3AF;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  margin-bottom: 8px;
+}
+.ra-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 28px; color: #fff; line-height: 1;
+  margin-bottom: 4px;
+}
+.ra-value strong { font-weight: 700; }
+.roi-amount-block.primary .ra-value strong { color: #FCA5A5; }
+.ra-unit { font-size: 16px; color: #6B7280; }
+.ra-rate {
+  font-size: 11px; color: #6B7280;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.roi-breakdown-list {
+  padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  position: relative;
+  margin-bottom: 10px;
+}
+.rbl-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: #6B7280;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  margin-bottom: 8px;
+}
+.rbl-head i { font-size: 13px; }
+.rbl-row {
+  display: grid; grid-template-columns: 1fr auto auto;
+  gap: 12px; align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-size: 12.5px;
+}
+.rbl-row:last-child { border-bottom: none; }
+.rbl-label { color: #D1D5DB; }
+.rbl-formula { color: #9CA3AF; font-family: 'JetBrains Mono', monospace; }
+.rbl-formula strong { color: #fff; }
+.rbl-total {
+  color: #FCA5A5; font-family: 'JetBrains Mono', monospace;
+  font-weight: 600; min-width: 50px; text-align: right;
+}
+.roi-footer-note {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 10.5px; color: #6B7280;
+  line-height: 1.4;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  position: relative;
+  font-style: italic;
+}
+.roi-footer-note i { color: #6B7280; flex-shrink: 0; margin-top: 1px; font-size: 12px; }
 
 .funnel { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
 .funnel-row {
