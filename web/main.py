@@ -95,34 +95,70 @@ MAX_CONCURRENT_HEAVY_JOBS = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS") or 3)
 # - Stawka handlowca B2B: średni rynek 2025/2026, junior 50, mid 70, senior 100
 #   Bierzemy mid jako fair estymata średniego rynku.
 
-# Minimum wage history + future projections (4806 zł brutto 2026)
+# Minimalne wynagrodzenie miesięczne brutto - źródło: Rozporządzenie Rady Ministrów
 MIN_WAGE_BY_YEAR: dict[int, float] = {
-    2024: 4242.0,  # styczeń-czerwiec
-    2025: 4666.0,  # od stycznia 2025
-    2026: 4806.0,  # od stycznia 2026 (ogłoszone)
-    # 2027+: aktualizuj gdy GUS ogłosi
+    2024: 4242.0,  # styczeń-czerwiec; lipiec-grudzień było 4300
+    2025: 4666.0,  # od 1 stycznia 2025 (RRM 12.09.2024)
+    2026: 4806.0,  # od 1 stycznia 2026 (RRM 11.09.2025)
 }
 
-# Stawka handlowca B2B per rok (rynek - subiektywne, można dostosować)
+# Minimalna stawka godzinowa BRUTTO - źródło: ta sama RRM, OSOBNY wskaźnik
+# (NIE jest = miesieczna/168, tylko ustanawiany niezaleznie. Dotyczy umow
+# zlecenie/dzielo. Lepsza referencja do ROI niz dzielenie miesięcznej bo
+# realnie mały biznes zatrudnia na zlecenie nie etat - 31.40/h to ROZSZERZONE
+# minimum ustawowe).
+MIN_HOURLY_BY_YEAR: dict[int, float] = {
+    2024: 27.70,
+    2025: 30.50,
+    2026: 31.40,  # od 1 stycznia 2026 (oficjalna)
+}
+
+# Stawka handlowca B2B per rok (rynek 2024-2026 - dane z portali pracy
+# dla mid-level B2B sales/cold-email speca)
 SALES_RATE_BY_YEAR: dict[int, float] = {
     2024: 55.0,
-    2025: 58.0,
-    2026: 60.0,
-    # 2027+: aktualizuj wedle rynku
+    2025: 65.0,
+    2026: 70.0,  # mid-level B2B handlowiec, rynek 2026 (junior 50-60, senior 90+)
 }
 
-# Mnożnik koszt pracodawcy brutto -> realny koszt etatu (z ZUS pracodawcy)
-EMPLOYER_COST_MULTIPLIER = 1.33
+# Mnożnik brutto -> realny koszt pracodawcy (umowa o prace).
+# Skladniki:
+#   - ZUS pracodawcy: emerytalna 9.76% + rentowa 6.5% + wypadkowa ~1.67%
+#     + Fundusz Pracy 2.45% + FGŚP 0.1% = ~20.5%
+#   - rezerwa urlopowa: 26 dni urlopu / 252 dni roboczych = ~10%
+#   - benefits (medyczne, kawa, sprzet) ~5%
+# Suma: brutto * 1.35 jako konserwatywny realny koszt etatu.
+EMPLOYER_COST_MULTIPLIER = 1.35
 
-# Hours per month (Kodeks Pracy)
+# Hours per month (Kodeks Pracy art. 130 - 21 dni × 8h ~= 168h)
+# Uzywane TYLKO do konwersji miesiecznej -> godzinowa gdyby user chcial
+# alternatywnej referencji. Glowna wartosc to MIN_HOURLY_BY_YEAR (oficjalna).
 HOURS_PER_MONTH = 168
 
-# Czasy ręcznej pracy per zadanie (z praktyki - relatywnie stabilne między latami)
+# Czasy reczny pracy per zadanie - praktyczne estymaty z branzy (relatywnie
+# stabilne miedzy latami, bo to praca z natury wymaga tego samego czasu).
 LABOR_TIME_MINUTES: dict[str, float] = {
-    "research": 8.0,        # analiza strony + scoring + hooks
-    "enrich_success": 2.0,  # dodatkowe minuty na szukanie kontaktu (tylko gdy znaleziony)
-    "draft": 15.0,          # napisanie spersonalizowanego cold maila
-    "sent": 1.0,            # klik wyślij + log w arkuszu
+    # Discovery: znalezienie firmy w Google Maps/Apify, scroll wynikow,
+    # klikniecie w wizytowke, sprawdzenie czy istnieje strona, skopiowanie URL.
+    "discovery": 1.5,
+    # Pre-screening: szybka decyzja "to nasz target czy nie" na bazie
+    # nazwy/kategorii. Czesc firm odpada w 5s, czesc wymaga 1-2 min.
+    "screening": 0.5,
+    # Wpisanie do arkusza/CRM: po znalezieniu i scoringu trzeba zapisac
+    # gdzies konteksty (Excel, Notion, HubSpot, Pipedrive). Realnie 30s.
+    "crm_log": 0.5,
+    # Research strony: wejscie, czytanie oferty, znalezienie hookow do
+    # personalizacji, ocena fit/scale.
+    "research": 8.0,
+    # Enrich: dodatkowe minuty na szukanie maila w stopce/zakladce kontakt
+    # (tylko gdy research nie wyciagnal). Liczone na sukcesy, bo nieudane
+    # proby tez kosztowaly czas ale to fair-pricing.
+    "enrich_success": 2.0,
+    # Draft: napisanie spersonalizowanego cold maila pod konkretna firme
+    # (ze hookami, segmentacja, A/B subject). 15 min to konserwatywnie.
+    "draft": 15.0,
+    # Sent: klik wyslij + log w arkuszu/CRM.
+    "sent": 1.0,
 }
 
 
@@ -139,6 +175,12 @@ def _get_roi_rates_for_today() -> dict[str, float]:
         current_year,
         MIN_WAGE_BY_YEAR[max(MIN_WAGE_BY_YEAR.keys())],
     )
+    # OFICJALNA stawka godzinowa (lepsza referencja niz miesieczna/168
+    # bo to ustawowo ustanowione minimum dla zlecenia/dziela tez).
+    min_hourly = MIN_HOURLY_BY_YEAR.get(
+        current_year,
+        MIN_HOURLY_BY_YEAR[max(MIN_HOURLY_BY_YEAR.keys())],
+    )
     sales_rate = SALES_RATE_BY_YEAR.get(
         current_year,
         SALES_RATE_BY_YEAR[max(SALES_RATE_BY_YEAR.keys())],
@@ -146,9 +188,12 @@ def _get_roi_rates_for_today() -> dict[str, float]:
     return {
         "year": current_year,
         "min_wage_monthly": min_wage_monthly,
-        "min_wage_h": round(min_wage_monthly / HOURS_PER_MONTH, 2),
+        "min_wage_h": min_hourly,  # uzywamy oficjalnej godzinowej, nie miesieczna/168
         "employer_mult": EMPLOYER_COST_MULTIPLIER,
         "sales_rate_h": sales_rate,
+        "min_per_discovery": LABOR_TIME_MINUTES["discovery"],
+        "min_per_screening": LABOR_TIME_MINUTES["screening"],
+        "min_per_crm_log": LABOR_TIME_MINUTES["crm_log"],
         "min_per_research": LABOR_TIME_MINUTES["research"],
         "min_per_enrich": LABOR_TIME_MINUTES["enrich_success"],
         "min_per_draft": LABOR_TIME_MINUTES["draft"],
@@ -732,6 +777,9 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
     min_wage_h = rates["min_wage_h"]
     employer_mult = rates["employer_mult"]
     sales_rate_h = rates["sales_rate_h"]
+    min_per_discovery = rates["min_per_discovery"]
+    min_per_screening = rates["min_per_screening"]
+    min_per_crm_log = rates["min_per_crm_log"]
     min_per_research = rates["min_per_research"]
     min_per_enrich = rates["min_per_enrich"]
     min_per_draft = rates["min_per_draft"]
@@ -778,12 +826,23 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
         "drafts_total": 0, "sent_drafts": 0,
     }, "roi_counts")
 
-    # Minuty per komponent (kazdy moze byc 0 jak nic sie nie wydarzylo)
+    # Minuty per komponent.
+    # Discovery + screening + crm_log liczone od liczby leadow w bazie -
+    # kazdy lead ktory tu jest, byl kiedys ZNALEZIONY + OCENIONY (pasuje?)
+    # + ZAPISANY. Konserwatywne (realnie agent przelial tez sporo firm
+    # ktore odpadly - nie liczone).
+    discovered_count = leads_total
+    min_discovery = discovered_count * min_per_discovery
+    min_screening = discovered_count * min_per_screening
+    min_crm_log = discovered_count * min_per_crm_log
     min_research = roi_c["researched"] * min_per_research
     min_enrich = roi_c["enriched_success"] * min_per_enrich
     min_drafts = roi_c["drafts_total"] * min_per_draft
     min_sent = roi_c["sent_drafts"] * min_per_sent
-    minutes_saved = min_research + min_enrich + min_drafts + min_sent
+    minutes_saved = (
+        min_discovery + min_screening + min_crm_log
+        + min_research + min_enrich + min_drafts + min_sent
+    )
 
     hours_saved = round(minutes_saved / 60, 1)
 
@@ -817,11 +876,29 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
                 "min_wage_employer_cost": int(saved_min_wage_employer),
                 "sales_rate": int(saved_sales),
             },
-            # Breakdown w jezyku ludzkim - tak jakby tlumaczyl to kolezance:
-            # "kazda firma sprawdzona, do tylu napisane spersonalizowane maile..."
+            # Breakdown w jezyku ludzkim, user-friendly (zero jargonu).
+            # Kategorie ulozone w kolejnosci faktycznej pracy handlowca.
             "breakdown": [
                 {
-                    "label": "Sprawdzenie firmy (kto to jest, czym sie zajmuje, czy pasuje)",
+                    "label": "Znalezienie firmy z branży w internecie",
+                    "count": discovered_count,
+                    "min_each": min_per_discovery,
+                    "total_min": min_discovery,
+                },
+                {
+                    "label": "Sprawdzenie czy firma to dobry kandydat",
+                    "count": discovered_count,
+                    "min_each": min_per_screening,
+                    "total_min": min_screening,
+                },
+                {
+                    "label": "Wpisanie firmy do listy klientów",
+                    "count": discovered_count,
+                    "min_each": min_per_crm_log,
+                    "total_min": min_crm_log,
+                },
+                {
+                    "label": "Dokładny research firmy (oferta, skala, decydenci)",
                     "count": roi_c["researched"],
                     "min_each": min_per_research,
                     "total_min": min_research,
@@ -833,7 +910,7 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
                     "total_min": min_enrich,
                 },
                 {
-                    "label": "Napisanie maila pod konkretną firmę (personalizacja)",
+                    "label": "Napisanie maila pod konkretną firmę",
                     "count": roi_c["drafts_total"],
                     "min_each": min_per_draft,
                     "total_min": min_drafts,
@@ -845,6 +922,15 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
                     "total_min": min_sent,
                 },
             ],
+            # Roczna projekcja przy biezacym tempie - psychologia "skala"
+            # ROI jest liczony z aktualnego stanu DB (np. ostatnie 30d aktywnosci).
+            # Mnozymy x12 zeby pokazac ile by bylo rocznie przy stalym tempie.
+            # Pomocne dla user'a "czy to sie oplaca w skali roku".
+            "yearly_projection": {
+                "min_wage_brutto": int(saved_min_wage_brutto * 12),
+                "min_wage_employer_cost": int(saved_min_wage_employer * 12),
+                "sales_rate": int(saved_sales * 12),
+            },
             # Stawki uzyte (auto-pick z current year)
             "rates": {
                 "year": rates["year"],

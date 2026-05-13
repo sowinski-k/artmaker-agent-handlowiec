@@ -78,9 +78,30 @@ def test_labor_time_minutes_positive():
     assert LABOR_TIME_MINUTES["sent"] >= 0  # 0 dozwolone (drobnoska)
 
 
-def test_roi_rates_h_calculation():
-    """min_wage_h = min_wage_monthly / 168 - sprawdz math."""
-    from web.main import _get_roi_rates_for_today
+def test_roi_rates_uses_official_hourly():
+    """min_wage_h = oficjalna ustawowa stawka godzinowa (NIE miesieczna/168).
+    To zmienione w ROI v4 - 31.40 zl/h dla 2026 (rzadowa) zamiast 28.6
+    (ktore bylo 4806/168). Oficjalna jest WAZNIEJSZA bo ustawowo wiążąca
+    dla zlecen/dziel - lepsza referencja do ROI."""
+    from web.main import _get_roi_rates_for_today, MIN_HOURLY_BY_YEAR
     rates = _get_roi_rates_for_today()
-    expected_h = round(rates["min_wage_monthly"] / 168, 2)
-    assert rates["min_wage_h"] == expected_h
+    # Powinna byc z MIN_HOURLY_BY_YEAR mappingu, nie miesieczna/168
+    latest_hourly = MIN_HOURLY_BY_YEAR[max(MIN_HOURLY_BY_YEAR.keys())]
+    assert rates["min_wage_h"] in MIN_HOURLY_BY_YEAR.values() or rates["min_wage_h"] == latest_hourly
+
+
+def test_min_hourly_2026_correct():
+    """Sanity: oficjalna stawka godzinowa 2026 = 31.40 zl
+    (Rozporządzenie Rady Ministrów z 11.09.2025)."""
+    from web.main import MIN_HOURLY_BY_YEAR
+    assert MIN_HOURLY_BY_YEAR[2026] == 31.40
+
+
+def test_breakdown_zawiera_discovery():
+    """Roi v4: musi byc kategoria 'discovery' w LABOR_TIME_MINUTES.
+    Wczesniej brakowalo - user wytknal."""
+    from web.main import LABOR_TIME_MINUTES
+    assert "discovery" in LABOR_TIME_MINUTES
+    assert "screening" in LABOR_TIME_MINUTES
+    assert "crm_log" in LABOR_TIME_MINUTES
+    assert LABOR_TIME_MINUTES["discovery"] > 0

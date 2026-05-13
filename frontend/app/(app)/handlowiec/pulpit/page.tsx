@@ -34,6 +34,11 @@ interface DashboardData {
       min_wage_employer_cost: number;
       sales_rate: number;
     };
+    yearly_projection?: {
+      min_wage_brutto: number;
+      min_wage_employer_cost: number;
+      sales_rate: number;
+    };
     breakdown: Array<{
       label: string;
       count: number;
@@ -170,7 +175,8 @@ export default function PulpitPage() {
               </div>
             </div>
 
-            {/* 3 stawki - od konserwatywnej do realistycznej */}
+            {/* 3 stawki - od konserwatywnej do realistycznej.
+                Pod kazda kwota: roczna projekcja (psychology of scale). */}
             <div className="roi-amounts roi-amounts-3">
               <div className="roi-amount-block">
                 <div className="ra-label">Gdybyś zatrudnił kogoś na najniższą krajową</div>
@@ -179,8 +185,14 @@ export default function PulpitPage() {
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
-                  {data.roi.rates.min_wage_pln_per_h.toFixed(1)} zł/h brutto
+                  {data.roi.rates.min_wage_pln_per_h.toFixed(2)} zł/h brutto · ustawowa stawka
                 </div>
+                {data.roi.yearly_projection && (
+                  <div className="ra-yearly">
+                    <i className="ti ti-trending-up" />
+                    <strong>{data.roi.yearly_projection.min_wage_brutto.toLocaleString('pl-PL')} zł</strong> rocznie przy tym tempie
+                  </div>
+                )}
               </div>
               <div className="roi-amount-block">
                 <div className="ra-label">Realny koszt etatu (z ZUS pracodawcy)</div>
@@ -189,19 +201,30 @@ export default function PulpitPage() {
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
-                  {data.roi.rates.min_wage_employer_pln_per_h.toFixed(1)} zł/h
-                  {' '}(brutto +33% na ZUS)
+                  {data.roi.rates.min_wage_employer_pln_per_h.toFixed(2)} zł/h · brutto +35% (ZUS, urlop, sprzęt)
                 </div>
+                {data.roi.yearly_projection && (
+                  <div className="ra-yearly">
+                    <i className="ti ti-trending-up" />
+                    <strong>{data.roi.yearly_projection.min_wage_employer_cost.toLocaleString('pl-PL')} zł</strong> rocznie
+                  </div>
+                )}
               </div>
               <div className="roi-amount-block primary">
-                <div className="ra-label">Gdybyś wynajął dobrego handlowca</div>
+                <div className="ra-label">Gdybyś wynajął dobrego handlowca B2B</div>
                 <div className="ra-value">
                   <strong>{data.roi.saved_pln.sales_rate.toLocaleString('pl-PL')}</strong>
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
-                  {data.roi.rates.sales_rate_pln_per_h.toFixed(0)} zł/h netto
+                  {data.roi.rates.sales_rate_pln_per_h.toFixed(0)} zł/h netto · rynkowa średnia mid-level
                 </div>
+                {data.roi.yearly_projection && (
+                  <div className="ra-yearly">
+                    <i className="ti ti-trending-up" />
+                    <strong>{data.roi.yearly_projection.sales_rate.toLocaleString('pl-PL')} zł</strong> rocznie
+                  </div>
+                )}
               </div>
             </div>
 
@@ -649,6 +672,22 @@ const PULPIT_CSS = `
   font-size: 11px; color: #6B7280;
   font-family: 'JetBrains Mono', monospace;
 }
+
+/* Roczna projekcja - eyecatch z ikoną trendu, mocniejsze wrażenie skali */
+.ra-yearly {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: #9CA3AF;
+}
+.ra-yearly i { color: #FCA5A5; font-size: 13px; }
+.ra-yearly strong {
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+}
+.roi-amount-block.primary .ra-yearly strong { color: #FCA5A5; }
 
 .roi-breakdown-list {
   padding-top: 14px;
