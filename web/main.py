@@ -79,6 +79,83 @@ from web.jobs_dispatcher import count_active_jobs, create_job, find_active_job, 
 MAX_CONCURRENT_HEAVY_JOBS = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS") or 3)
 
 
+# ─── ROI: stawki i czasy ręcznej pracy per rok ──────────────────────────
+#
+# AUTOMATYKA: backend sam wybiera kwoty na podstawie current year.
+# Brak env vars do konfiguracji - user nic nie ustawia.
+# Co rok aktualizujemy ten dict (1 linijka + deploy) gdy GUS ogłosi
+# nową kwotę minimalną.
+#
+# Źródła:
+# - Minimalna 2026: ustawa o minimalnym wynagrodzeniu, ogłoszenie sierpnia 2025
+# - 168h/mies = 21 dni roboczych × 8h (Kodeks Pracy art. 130)
+# - Employer cost mult 1.33: brutto + ZUS pracodawcy (emerytalna 9.76%,
+#   rentowa 6.5%, wypadkowa ~1.67%, FP 2.45%, FGŚP 0.1%) ≈ 20.5% na top
+#   ALE plus rezerwa urlopowa + chorobowe + benefits = praktycznie 1.33×
+# - Stawka handlowca B2B: średni rynek 2025/2026, junior 50, mid 70, senior 100
+#   Bierzemy mid jako fair estymata średniego rynku.
+
+# Minimum wage history + future projections (4806 zł brutto 2026)
+MIN_WAGE_BY_YEAR: dict[int, float] = {
+    2024: 4242.0,  # styczeń-czerwiec
+    2025: 4666.0,  # od stycznia 2025
+    2026: 4806.0,  # od stycznia 2026 (ogłoszone)
+    # 2027+: aktualizuj gdy GUS ogłosi
+}
+
+# Stawka handlowca B2B per rok (rynek - subiektywne, można dostosować)
+SALES_RATE_BY_YEAR: dict[int, float] = {
+    2024: 55.0,
+    2025: 58.0,
+    2026: 60.0,
+    # 2027+: aktualizuj wedle rynku
+}
+
+# Mnożnik koszt pracodawcy brutto -> realny koszt etatu (z ZUS pracodawcy)
+EMPLOYER_COST_MULTIPLIER = 1.33
+
+# Hours per month (Kodeks Pracy)
+HOURS_PER_MONTH = 168
+
+# Czasy ręcznej pracy per zadanie (z praktyki - relatywnie stabilne między latami)
+LABOR_TIME_MINUTES: dict[str, float] = {
+    "research": 8.0,        # analiza strony + scoring + hooks
+    "enrich_success": 2.0,  # dodatkowe minuty na szukanie kontaktu (tylko gdy znaleziony)
+    "draft": 15.0,          # napisanie spersonalizowanego cold maila
+    "sent": 1.0,            # klik wyślij + log w arkuszu
+}
+
+
+def _get_roi_rates_for_today() -> dict[str, float]:
+    """Auto-pick stawki na bieżący rok. Bez env, bez konfiguracji u user'a.
+
+    Jak rok nie jest w mappingu (np. uruchamiamy w 2028 a ostatnio
+    dodaliśmy 2026), bierzemy ostatni dostępny rok (fallback do
+    'najlepszej znanej wartości').
+    """
+    current_year = datetime.now(timezone.utc).year
+    # Min wage - pick year (fallback: latest available)
+    min_wage_monthly = MIN_WAGE_BY_YEAR.get(
+        current_year,
+        MIN_WAGE_BY_YEAR[max(MIN_WAGE_BY_YEAR.keys())],
+    )
+    sales_rate = SALES_RATE_BY_YEAR.get(
+        current_year,
+        SALES_RATE_BY_YEAR[max(SALES_RATE_BY_YEAR.keys())],
+    )
+    return {
+        "year": current_year,
+        "min_wage_monthly": min_wage_monthly,
+        "min_wage_h": round(min_wage_monthly / HOURS_PER_MONTH, 2),
+        "employer_mult": EMPLOYER_COST_MULTIPLIER,
+        "sales_rate_h": sales_rate,
+        "min_per_research": LABOR_TIME_MINUTES["research"],
+        "min_per_enrich": LABOR_TIME_MINUTES["enrich_success"],
+        "min_per_draft": LABOR_TIME_MINUTES["draft"],
+        "min_per_sent": LABOR_TIME_MINUTES["sent"],
+    }
+
+
 # ─── Config ──────────────────────────────────────────────────────────────
 
 _origins_env = (os.getenv("FRONTEND_ORIGINS") or "http://localhost:3000").strip()
@@ -637,7 +714,7 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
     safe_total = max(leads_total, 1)
 
     # ROI - 'ile agent zaoszczedzil vs reczna praca'.
-    # === FILOZOFIA LICZENIA (przemyslana, na przyszlosc): ===
+    # === FILOZOFIA LICZENIA ===
     #
     # Liczymy z BAZY DANYCH (nie z statusow leadow ktore moga sie zmieniac):
     #   - researched = liczba leadow z research_data != NULL
@@ -648,41 +725,17 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
     #     wlozyl prace, user moze odrzucic ale agent zrobil swoje)
     #   - sent_total = liczba EmailDraft.status='sent'
     #
-    # Stawki + czasy z env vars (NA PRZYSZLOSC - jak najnizsza krajowa zmieni
-    # sie w 2027/2028, podbijasz env bez redeploy kodu):
-    #
-    #   LABOR_MIN_WAGE_PLN_PER_H     - najnizsza krajowa brutto / h
-    #                                  default 28.6 (4806 zl / 168h 2026)
-    #   LABOR_EMPLOYER_COST_MULT     - mnoznik koszt pracodawcy (brutto+ZUS)
-    #                                  default 1.33 (typowy w PL)
-    #   LABOR_SALES_PLN_PER_H        - realistyczna stawka handlowca B2B
-    #                                  default 60.0 (rynek 2026)
-    #
-    #   LABOR_MIN_PER_RESEARCH       - ile minut zajeloby recznie zbadac
-    #                                  firmę (analiza strony, scoring,
-    #                                  znalezienie hookow). default 8.
-    #   LABOR_MIN_PER_ENRICH_SUCCESS - dodatkowe minuty na znalezienie
-    #                                  emaila w stopce/zakladce kontakt.
-    #                                  Liczone TYLKO gdy enrich znalazl.
-    #                                  default 2.
-    #   LABOR_MIN_PER_DRAFT          - ile minut zajmuje napisanie
-    #                                  spersonalizowanego cold maila pod
-    #                                  konkretna firme. default 15.
-    #   LABOR_MIN_PER_SENT           - klik 'wyslij' + log w arkuszu.
-    #                                  default 1.
-    def _env_float(key: str, default: float) -> float:
-        try:
-            return float(os.getenv(key) or default)
-        except (ValueError, TypeError):
-            return default
-
-    min_wage_h = _env_float("LABOR_MIN_WAGE_PLN_PER_H", 28.6)
-    employer_mult = _env_float("LABOR_EMPLOYER_COST_MULT", 1.33)
-    sales_rate_h = _env_float("LABOR_SALES_PLN_PER_H", 60.0)
-    min_per_research = _env_float("LABOR_MIN_PER_RESEARCH", 8.0)
-    min_per_enrich = _env_float("LABOR_MIN_PER_ENRICH_SUCCESS", 2.0)
-    min_per_draft = _env_float("LABOR_MIN_PER_DRAFT", 15.0)
-    min_per_sent = _env_float("LABOR_MIN_PER_SENT", 1.0)
+    # Stawki + czasy AUTOMATYCZNIE pobierane z mapping per rok (poniżej).
+    # Co rok aktualizujemy 1 linijke w MIN_WAGE_BY_YEAR i deploy. Bez env,
+    # bez konfiguracji uzytkownika.
+    rates = _get_roi_rates_for_today()
+    min_wage_h = rates["min_wage_h"]
+    employer_mult = rates["employer_mult"]
+    sales_rate_h = rates["sales_rate_h"]
+    min_per_research = rates["min_per_research"]
+    min_per_enrich = rates["min_per_enrich"]
+    min_per_draft = rates["min_per_draft"]
+    min_per_sent = rates["min_per_sent"]
 
     def _roi_counts():
         """Kanoniczne counts dla ROI - stabilne na przyszlosc bo NIE
@@ -764,19 +817,38 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
                 "min_wage_employer_cost": int(saved_min_wage_employer),
                 "sales_rate": int(saved_sales),
             },
-            # Breakdown - co konkretnie zostalo policzone + ile minut
+            # Breakdown w jezyku ludzkim - tak jakby tlumaczyl to kolezance:
+            # "kazda firma sprawdzona, do tylu napisane spersonalizowane maile..."
             "breakdown": [
-                {"label": "Researchowane leady", "count": roi_c["researched"],
-                 "min_each": min_per_research, "total_min": min_research},
-                {"label": "Email znaleziony przez enrich", "count": roi_c["enriched_success"],
-                 "min_each": min_per_enrich, "total_min": min_enrich},
-                {"label": "Spersonalizowane drafty", "count": roi_c["drafts_total"],
-                 "min_each": min_per_draft, "total_min": min_drafts},
-                {"label": "Wysyłka maili (klik + log)", "count": roi_c["sent_drafts"],
-                 "min_each": min_per_sent, "total_min": min_sent},
+                {
+                    "label": "Sprawdzenie firmy (kto to jest, czym sie zajmuje, czy pasuje)",
+                    "count": roi_c["researched"],
+                    "min_each": min_per_research,
+                    "total_min": min_research,
+                },
+                {
+                    "label": "Znalezienie adresu mailowego na stronie",
+                    "count": roi_c["enriched_success"],
+                    "min_each": min_per_enrich,
+                    "total_min": min_enrich,
+                },
+                {
+                    "label": "Napisanie maila pod konkretną firmę (personalizacja)",
+                    "count": roi_c["drafts_total"],
+                    "min_each": min_per_draft,
+                    "total_min": min_drafts,
+                },
+                {
+                    "label": "Wysłanie maila i zapisanie w historii",
+                    "count": roi_c["sent_drafts"],
+                    "min_each": min_per_sent,
+                    "total_min": min_sent,
+                },
             ],
-            # Stawki uzyte (do tooltip'a) - configurable przez env vars
+            # Stawki uzyte (auto-pick z current year)
             "rates": {
+                "year": rates["year"],
+                "min_wage_monthly": rates["min_wage_monthly"],
                 "min_wage_pln_per_h": min_wage_h,
                 "min_wage_employer_pln_per_h": round(min_wage_h * employer_mult, 2),
                 "employer_cost_multiplier": employer_mult,
