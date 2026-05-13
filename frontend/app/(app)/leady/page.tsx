@@ -104,6 +104,21 @@ export default function LeadyPage() {
   // Enrich (re-scrape kontakt) state - osobne, bo to inny job type niz draft
   const [enrichJobId, setEnrichJobId] = useState<number | null>(null);
   const [enrichJobStatus, setEnrichJobStatus] = useState<string | null>(null);
+  // Manual edit state - tryb edycji leada w drawer'ze (email/telefon/kontakt)
+  const [editMode, setEditMode] = useState(false);
+  const [editValues, setEditValues] = useState<{
+    contact_name: string;
+    email: string;
+    phone: string;
+    website: string;
+    city: string;
+    segment: string;
+    notes: string;
+  }>({
+    contact_name: '', email: '', phone: '', website: '',
+    city: '', segment: '', notes: '',
+  });
+  const [editSubmitting, setEditSubmitting] = useState(false);
   // Ref do anulowania pollingu jak user zmienia drawer / unmount
   const pollAbortRef = useRef<{ cancelled: boolean } | null>(null);
 
@@ -213,16 +228,66 @@ export default function LeadyPage() {
   }
 
   async function openDetail(id: number) {
-    // Reset draft + enrich state przy zmianie leada
+    // Reset wszystkich state'ow przy zmianie leada
     if (pollAbortRef.current) pollAbortRef.current.cancelled = true;
     setDraftFlash(null);
     setDraftJobId(null);
     setDraftJobStatus(null);
     setEnrichJobId(null);
     setEnrichJobStatus(null);
+    setEditMode(false);
     setSelectedId(id);
     setDetail(null);
     await refreshDetail(id);
+  }
+
+  function startEdit() {
+    if (!detail) return;
+    setEditValues({
+      contact_name: detail.contact_name || '',
+      email: detail.email || '',
+      phone: detail.phone || '',
+      website: detail.website || '',
+      city: detail.city || '',
+      segment: detail.segment || '',
+      notes: detail.notes || '',
+    });
+    setEditMode(true);
+  }
+
+  function cancelEdit() {
+    setEditMode(false);
+  }
+
+  async function saveEdit() {
+    if (!detail) return;
+    setEditSubmitting(true);
+    try {
+      const res = await api<{
+        ok: boolean; changed_fields: string[];
+      }>(`/api/leads/${detail.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(editValues),
+      });
+      if (res.changed_fields.length === 0) {
+        setDraftFlash({ kind: 'info', text: 'Nic się nie zmieniło.' });
+      } else {
+        setDraftFlash({
+          kind: 'success',
+          text: `Zaktualizowano: ${res.changed_fields.join(', ')}.`,
+        });
+      }
+      setEditMode(false);
+      await refreshDetail(detail.id);
+      await load();
+    } catch (err) {
+      setDraftFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udało się zapisać',
+      });
+    } finally {
+      setEditSubmitting(false);
+    }
   }
 
   /**
@@ -638,12 +703,126 @@ export default function LeadyPage() {
           <div className="drawer" onClick={(e) => e.stopPropagation()}>
             <div className="drawer-head">
               <h2>Lead #{selectedId}</h2>
-              <button className="close-btn" onClick={() => setSelectedId(null)}>
-                <i className="ti ti-x" />
-              </button>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                {detail && !editMode && (
+                  <button
+                    className="btn-icon-mini"
+                    onClick={startEdit}
+                    title="Edytuj ręcznie email/telefon/kontakt/segment"
+                  >
+                    <i className="ti ti-edit" />
+                  </button>
+                )}
+                <button className="close-btn" onClick={() => setSelectedId(null)}>
+                  <i className="ti ti-x" />
+                </button>
+              </div>
             </div>
             {!detail ? (
               <div style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>Ładowanie…</div>
+            ) : editMode ? (
+              <div className="drawer-body">
+                <div className="edit-banner">
+                  <i className="ti ti-edit" />
+                  <div>
+                    <strong>Edytujesz ręcznie</strong>
+                    <div style={{ fontSize: 12, color: '#6B7280', marginTop: 2 }}>
+                      Tylko pola które chcesz poprawić. Zmiany zapisują się od razu po kliknięciu "Zapisz".
+                    </div>
+                  </div>
+                </div>
+
+                <div className="edit-grid">
+                  <div className="edit-field">
+                    <label>Kontakt (imię + nazwisko)</label>
+                    <input
+                      type="text"
+                      value={editValues.contact_name}
+                      onChange={(e) => setEditValues({ ...editValues, contact_name: e.target.value })}
+                      placeholder="np. Jan Kowalski"
+                    />
+                  </div>
+                  <div className="edit-field">
+                    <label>Email</label>
+                    <input
+                      type="email"
+                      value={editValues.email}
+                      onChange={(e) => setEditValues({ ...editValues, email: e.target.value })}
+                      placeholder="np. info@firma.pl"
+                    />
+                  </div>
+                  <div className="edit-field">
+                    <label>Telefon</label>
+                    <input
+                      type="tel"
+                      value={editValues.phone}
+                      onChange={(e) => setEditValues({ ...editValues, phone: e.target.value })}
+                      placeholder="np. +48 22 123 45 67"
+                    />
+                  </div>
+                  <div className="edit-field">
+                    <label>Strona</label>
+                    <input
+                      type="url"
+                      value={editValues.website}
+                      onChange={(e) => setEditValues({ ...editValues, website: e.target.value })}
+                      placeholder="np. https://firma.pl"
+                    />
+                  </div>
+                  <div className="edit-field">
+                    <label>Miasto</label>
+                    <input
+                      type="text"
+                      value={editValues.city}
+                      onChange={(e) => setEditValues({ ...editValues, city: e.target.value })}
+                      placeholder="np. Warszawa"
+                    />
+                  </div>
+                  <div className="edit-field">
+                    <label>Segment</label>
+                    <select
+                      value={editValues.segment}
+                      onChange={(e) => setEditValues({ ...editValues, segment: e.target.value })}
+                    >
+                      <option value="sklep_plastyczny">sklep_plastyczny</option>
+                      <option value="sklep_papierniczy">sklep_papierniczy</option>
+                      <option value="paint_and_sip">paint_and_sip</option>
+                      <option value="warsztaty_dzieci">warsztaty_dzieci</option>
+                      <option value="animatorzy_eventy">animatorzy_eventy</option>
+                      <option value="szkola_artystyczna">szkola_artystyczna</option>
+                      <option value="marka_wlasna">marka_wlasna</option>
+                      <option value="inne">inne</option>
+                    </select>
+                  </div>
+                  <div className="edit-field" style={{ gridColumn: '1 / -1' }}>
+                    <label>Notatki (tylko Ty widzisz)</label>
+                    <textarea
+                      value={editValues.notes}
+                      onChange={(e) => setEditValues({ ...editValues, notes: e.target.value })}
+                      placeholder="np. 'Rozmawiałem z Piotrkiem na targach, w czerwcu wracać'"
+                      rows={3}
+                    />
+                  </div>
+                </div>
+
+                <div className="edit-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={saveEdit}
+                    disabled={editSubmitting}
+                  >
+                    <i className="ti ti-device-floppy" />
+                    {editSubmitting ? 'Zapisuję…' : 'Zapisz zmiany'}
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={cancelEdit}
+                    disabled={editSubmitting}
+                  >
+                    Anuluj
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="drawer-body">
                 <div className="kv">
@@ -1209,6 +1388,54 @@ table.tbl .row-check input[type="checkbox"] {
 .warn-box { background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #9A3412; margin-bottom: 12px; }
 
 .mono { font-family: 'JetBrains Mono', monospace; }
+
+/* Manualna edycja leadu (w drawer'ze) */
+.btn-icon-mini {
+  background: none; border: 1px solid #E5E7EB;
+  width: 32px; height: 32px; border-radius: 6px;
+  cursor: pointer; color: #6B7280;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+}
+.btn-icon-mini:hover { color: #D4212C; border-color: #D4212C; background: #FDECED; }
+
+.edit-banner {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 12px 14px;
+  background: #EFF6FF; border: 1px solid #BFDBFE;
+  border-radius: 8px; margin-bottom: 16px;
+  font-size: 13px; color: #1E40AF;
+}
+.edit-banner i { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+
+.edit-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  margin-bottom: 16px;
+}
+@media (max-width: 600px) {
+  .edit-grid { grid-template-columns: 1fr; }
+}
+.edit-field { display: flex; flex-direction: column; gap: 4px; }
+.edit-field label {
+  font-size: 11px; color: #6B7280;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  font-weight: 600;
+}
+.edit-field input, .edit-field select, .edit-field textarea {
+  padding: 8px 12px; border: 1px solid #E5E7EB;
+  border-radius: 6px; font-family: inherit;
+  font-size: 13.5px; background: #fff; color: #111;
+  resize: vertical;
+}
+.edit-field input:focus, .edit-field select:focus, .edit-field textarea:focus {
+  outline: none; border-color: #D4212C;
+  box-shadow: 0 0 0 3px rgba(212,33,44,0.08);
+}
+
+.edit-actions {
+  display: flex; gap: 8px; padding-top: 12px;
+  border-top: 1px solid #E5E7EB;
+}
 
 /* Brak emaila - box z CTA "Sprawdz ponownie" */
 .missing-email-box {

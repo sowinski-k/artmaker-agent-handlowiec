@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -50,6 +51,7 @@ from core.db import (
     JobStatus,
     JobType,
     Lead,
+    LeadSegment,
     LeadStatus,
     PatrolSchedule,
     SessionLocal,
@@ -634,6 +636,113 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
     reply_rate = (c["replied"] / max(sent_total, 1)) * 100 if sent_total else 0.0
     safe_total = max(leads_total, 1)
 
+    # ROI - 'ile agent zaoszczedzil vs reczna praca'.
+    # === FILOZOFIA LICZENIA (przemyslana, na przyszlosc): ===
+    #
+    # Liczymy z BAZY DANYCH (nie z statusow leadow ktore moga sie zmieniac):
+    #   - researched = liczba leadow z research_data != NULL
+    #     (stabilne - jak user edytuje/odrzuca, research juz byl zrobiony)
+    #   - enriched_success = liczba leadow z last_enriched_at != NULL AND email != NULL
+    #     (enrich nie zawsze sie udaje - liczymy tylko sukcesy zeby fair)
+    #   - drafts_total = liczba EmailDraft (INCLUDING rejected - agent
+    #     wlozyl prace, user moze odrzucic ale agent zrobil swoje)
+    #   - sent_total = liczba EmailDraft.status='sent'
+    #
+    # Stawki + czasy z env vars (NA PRZYSZLOSC - jak najnizsza krajowa zmieni
+    # sie w 2027/2028, podbijasz env bez redeploy kodu):
+    #
+    #   LABOR_MIN_WAGE_PLN_PER_H     - najnizsza krajowa brutto / h
+    #                                  default 28.6 (4806 zl / 168h 2026)
+    #   LABOR_EMPLOYER_COST_MULT     - mnoznik koszt pracodawcy (brutto+ZUS)
+    #                                  default 1.33 (typowy w PL)
+    #   LABOR_SALES_PLN_PER_H        - realistyczna stawka handlowca B2B
+    #                                  default 60.0 (rynek 2026)
+    #
+    #   LABOR_MIN_PER_RESEARCH       - ile minut zajeloby recznie zbadac
+    #                                  firmę (analiza strony, scoring,
+    #                                  znalezienie hookow). default 8.
+    #   LABOR_MIN_PER_ENRICH_SUCCESS - dodatkowe minuty na znalezienie
+    #                                  emaila w stopce/zakladce kontakt.
+    #                                  Liczone TYLKO gdy enrich znalazl.
+    #                                  default 2.
+    #   LABOR_MIN_PER_DRAFT          - ile minut zajmuje napisanie
+    #                                  spersonalizowanego cold maila pod
+    #                                  konkretna firme. default 15.
+    #   LABOR_MIN_PER_SENT           - klik 'wyslij' + log w arkuszu.
+    #                                  default 1.
+    def _env_float(key: str, default: float) -> float:
+        try:
+            return float(os.getenv(key) or default)
+        except (ValueError, TypeError):
+            return default
+
+    min_wage_h = _env_float("LABOR_MIN_WAGE_PLN_PER_H", 28.6)
+    employer_mult = _env_float("LABOR_EMPLOYER_COST_MULT", 1.33)
+    sales_rate_h = _env_float("LABOR_SALES_PLN_PER_H", 60.0)
+    min_per_research = _env_float("LABOR_MIN_PER_RESEARCH", 8.0)
+    min_per_enrich = _env_float("LABOR_MIN_PER_ENRICH_SUCCESS", 2.0)
+    min_per_draft = _env_float("LABOR_MIN_PER_DRAFT", 15.0)
+    min_per_sent = _env_float("LABOR_MIN_PER_SENT", 1.0)
+
+    def _roi_counts():
+        """Kanoniczne counts dla ROI - stabilne na przyszlosc bo NIE
+        zaleza od bieżących statusów leada (ktore moga byc cofniete)."""
+        with SessionLocal() as session:
+            researched = int(session.scalar(
+                select(func.count(Lead.id)).where(
+                    Lead.workspace_id == ws_id,
+                    Lead.research_data.isnot(None),
+                )
+            ) or 0)
+            enriched_success = int(session.scalar(
+                select(func.count(Lead.id)).where(
+                    Lead.workspace_id == ws_id,
+                    Lead.last_enriched_at.isnot(None),
+                    Lead.email.isnot(None),
+                    Lead.email != "",
+                )
+            ) or 0)
+            drafts_total = int(session.scalar(
+                select(func.count(EmailDraft.id)).where(
+                    EmailDraft.workspace_id == ws_id,
+                )
+            ) or 0)
+            sent_drafts = int(session.scalar(
+                select(func.count(EmailDraft.id)).where(
+                    EmailDraft.workspace_id == ws_id,
+                    EmailDraft.status == DraftStatus.SENT.value,
+                )
+            ) or 0)
+            return {
+                "researched": researched,
+                "enriched_success": enriched_success,
+                "drafts_total": drafts_total,
+                "sent_drafts": sent_drafts,
+            }
+
+    roi_c = _safe(_roi_counts, {
+        "researched": 0, "enriched_success": 0,
+        "drafts_total": 0, "sent_drafts": 0,
+    }, "roi_counts")
+
+    # Minuty per komponent (kazdy moze byc 0 jak nic sie nie wydarzylo)
+    min_research = roi_c["researched"] * min_per_research
+    min_enrich = roi_c["enriched_success"] * min_per_enrich
+    min_drafts = roi_c["drafts_total"] * min_per_draft
+    min_sent = roi_c["sent_drafts"] * min_per_sent
+    minutes_saved = min_research + min_enrich + min_drafts + min_sent
+
+    hours_saved = round(minutes_saved / 60, 1)
+
+    # 3 stawki:
+    #   1. min_wage_brutto - sama placa pracownika (najczestsza referencja)
+    #   2. min_wage_employer - REALNY koszt pracodawcy (brutto + ZUS)
+    #   3. sales_rate - realistyczna stawka handlowca B2B (najtrafniejsza
+    #      bo to wlasnie ten zawod agent zastapuje)
+    saved_min_wage_brutto = round((minutes_saved / 60) * min_wage_h, 0)
+    saved_min_wage_employer = round((minutes_saved / 60) * min_wage_h * employer_mult, 0)
+    saved_sales = round((minutes_saved / 60) * sales_rate_h, 0)
+
     return {
         "workspace": {"id": ws_id, "name": cur.workspace_name, "plan": cur.workspace_plan},
         "stats": {
@@ -642,6 +751,37 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
             "researched": c["researched"], "sent_today": c["sent_today"],
             "replied": c["replied"], "reply_rate": round(reply_rate, 1),
             "bounced": c["bounced"], "running_jobs": running_jobs,
+        },
+        # ROI - "ile agent juz zaoszczedzil" widget na pulpicie.
+        # Wszystko configurable przez env (LABOR_*) zeby latwo dostosowac
+        # na przyszlosc (zmiana najnizszej krajowej, inna stawka handlowca).
+        "roi": {
+            "hours_saved": hours_saved,
+            "minutes_saved": minutes_saved,
+            # 3 stawki dla full picture - od konserwatywnej do realistycznej
+            "saved_pln": {
+                "min_wage_brutto": int(saved_min_wage_brutto),
+                "min_wage_employer_cost": int(saved_min_wage_employer),
+                "sales_rate": int(saved_sales),
+            },
+            # Breakdown - co konkretnie zostalo policzone + ile minut
+            "breakdown": [
+                {"label": "Researchowane leady", "count": roi_c["researched"],
+                 "min_each": min_per_research, "total_min": min_research},
+                {"label": "Email znaleziony przez enrich", "count": roi_c["enriched_success"],
+                 "min_each": min_per_enrich, "total_min": min_enrich},
+                {"label": "Spersonalizowane drafty", "count": roi_c["drafts_total"],
+                 "min_each": min_per_draft, "total_min": min_drafts},
+                {"label": "Wysyłka maili (klik + log)", "count": roi_c["sent_drafts"],
+                 "min_each": min_per_sent, "total_min": min_sent},
+            ],
+            # Stawki uzyte (do tooltip'a) - configurable przez env vars
+            "rates": {
+                "min_wage_pln_per_h": min_wage_h,
+                "min_wage_employer_pln_per_h": round(min_wage_h * employer_mult, 2),
+                "employer_cost_multiplier": employer_mult,
+                "sales_rate_pln_per_h": sales_rate_h,
+            },
         },
         "sparklines": sparklines,
         "funnel": [
@@ -911,6 +1051,116 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
 
 
 # ─── Drafts ──────────────────────────────────────────────────────────────
+
+class LeadUpdate(BaseModel):
+    """Reczna edycja leada przez user'a w drawer'ze.
+
+    Tylko pola ktore user moze sensownie poprawic. NIE company_name (to
+    identyfikator) ani score (to LLM assessment) ani research_data
+    (to history of LLM call).
+
+    Wszystkie optional - PATCH semantyka, tylko podane pola updatowane.
+    """
+    contact_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    website: str | None = None
+    city: str | None = None
+    segment: str | None = None
+    notes: str | None = None
+
+
+@app.patch("/api/leads/{lead_id}")
+def update_lead(
+    lead_id: int, payload: LeadUpdate,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Manualna edycja leada. Pozwala uzytkownikowi poprawic email/telefon/
+    kontakt itp. ktorych agent nie znalazl albo wyciagnal zle.
+
+    Side-effects:
+    - Po dodaniu emaila do leada ze status=DEAD_END -> status cofany do
+      RESEARCHED (jak w enrich endpoint - lead odblokowuje sie do draftowania).
+    - Update Lead.updated_at (auto przez SQLAlchemy onupdate).
+    - Event log "lead.manually_edited" z lead_id + lista zmienionych pol.
+    """
+    update_data = payload.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Nic do zaktualizowania.")
+
+    # Walidacja segmentu - musi byc znana wartosc
+    if "segment" in update_data and update_data["segment"]:
+        valid_segments = {s.value for s in LeadSegment}
+        if update_data["segment"] not in valid_segments:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Nieprawidlowy segment. Dozwolone: {sorted(valid_segments)}",
+            )
+
+    # Walidacja emaila - prosty regex jak dla bezpieczenstwa
+    if "email" in update_data and update_data["email"]:
+        email = update_data["email"].strip()
+        if email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            raise HTTPException(status_code=422, detail="Nieprawidlowy format email.")
+        update_data["email"] = email or None
+
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+
+        # Normalizuj puste stringi do None (zgodnie z _clean() w save_lead)
+        for k, v in list(update_data.items()):
+            if isinstance(v, str):
+                s = v.strip()
+                update_data[k] = s if s else None
+
+        changed_fields: list[str] = []
+        for field, value in update_data.items():
+            old = getattr(lead, field, None)
+            if old != value:
+                setattr(lead, field, value)
+                changed_fields.append(field)
+
+        # Side-effect: dodanie emaila do DEAD_END leada -> cofnij na RESEARCHED
+        if (
+            "email" in update_data and update_data["email"]
+            and lead.status == LeadStatus.DEAD_END.value
+        ):
+            lead.status = LeadStatus.RESEARCHED.value
+            changed_fields.append("status (auto: dead_end -> researched)")
+
+        if changed_fields:
+            session.add(Event(
+                workspace_id=cur.workspace_id,
+                user_id=cur.user_id,
+                lead_id=lead.id,
+                type="lead.manually_edited",
+                level="INFO",
+                source="user",
+                message=f"User zedytowal recznie: {', '.join(changed_fields)}",
+                payload={"fields": changed_fields},
+            ))
+        session.commit()
+        session.refresh(lead)
+
+        return {
+            "ok": True,
+            "changed_fields": changed_fields,
+            "lead": {
+                "id": lead.id, "segment": lead.segment,
+                "company_name": lead.company_name,
+                "contact_name": lead.contact_name,
+                "email": lead.email, "phone": lead.phone,
+                "website": lead.website, "city": lead.city,
+                "status": lead.status, "notes": lead.notes,
+            },
+        }
+
 
 @app.get("/api/drafts")
 def list_drafts(
