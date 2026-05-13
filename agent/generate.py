@@ -287,6 +287,37 @@ def validate_draft(payload: "EmailDraftPayload") -> list[str]:
             "w Chinach / private label / wlasna marka / pod ich specyfikacje."
         )
 
+    # ANTI-HALUCYNACJA: konkretne MOQ / lead-time w cold mailu = obietnica
+    # ktorej nie mozemy dotrzymac. MOQ realnie zalezy od produktu/fabryki/
+    # personalizacji - od kilku sztuk do kilku tysiecy. Lead time tak samo.
+    # Lapie: "MOQ 500", "MOQ od 300", "minimum produkcyjne 1000 sztuk",
+    # "minimum produkcyjne to ... 500 sztuk", "lead time 4-8 tygodni",
+    # "termin realizacji 6 tygodni", "produkcja w X tygodni"
+    hallucination_patterns = [
+        # MOQ z liczba
+        r"\bmoq[\s:]*(?:od|min(?:imum)?|to|wynosi)?[\s:]*\d{2,}\b",
+        r"\bmoq[\s:]*\d{2,}[\s-]*\d*\s*(?:szt|sztuk)",
+        # Minimum produkcyjne / zamowienia + liczba
+        r"\bminim(?:um|alne)\s+(?:produkc\w*|zam[oó]w\w*)\s+(?:to\s+)?(?:zwykle\s+)?(?:wynosi\s+)?\d{2,}\b",
+        r"\bminim(?:um|alne)\s+(?:produkc\w*|zam[oó]w\w*)\s+(?:to\s+)?(?:zwykle\s+)?(?:wynosi\s+)?[a-zżźć]*\s*\d{2,}\s*(?:szt|sztuk)",
+        # "od X sztuk" - bez kontekstu wycenowego, sam fakt
+        r"\bod\s+\d{2,}\s+(?:szt|sztuk)\b",
+        # Lead time z konkretna liczba tygodni/miesiecy
+        r"\b(?:lead\s*time|termin\s+realizacji|czas\s+(?:produkcji|realizacji)|produkcja)[\s:]+(?:to\s+)?(?:od\s+)?\d+[\s-]*\d*\s*(?:tygod|tyg|miesi[ąa]c)",
+        r"\b\d+[\s-]*\d*\s*tygod(?:ni|niow)?\s+(?:produkc|na\s+produkc)",
+    ]
+    for pattern in hallucination_patterns:
+        m = re.search(pattern, full_body, re.IGNORECASE)
+        if m:
+            warnings.append(
+                f"HALUCYNACJA liczby produkcyjnej: '{m.group(0)}'. "
+                "MOQ i lead time realnie zaleza od produktu/fabryki/personalizacji "
+                "(od kilku sztuk do kilku tysiecy). NIE podawaj konkretnych liczb "
+                "w cold mailu - to obietnica ktorej nie mozemy dotrzymac. Napisz "
+                "'MOQ i terminy ustalimy indywidualnie' albo pomin ten temat."
+            )
+            break  # jeden warning wystarczy zeby user mial sygnal
+
     return warnings
 
 
@@ -441,10 +472,18 @@ def _build_user_prompt(lead: Lead) -> str:
         f"  zakontraktowanych fabrykach w Chinach pod specyfikacje klienta. "
         f"  Rozne jakosci (budget / standard / premium - klient wybiera). "
         f"  Wlasna marka klienta, personalizowane opakowania, etykiety, gift-boxy. "
-        f"  30-50% taniej niz kupowanie u polskiego dystrybutora bo omijamy "
-        f"  2-3 posrednikow. MOQ od 300-1000 szt (zalezy od kategorii), "
-        f"  lead time 4-8 tygodni produkcji + transport morski. Indywidualna "
-        f"  wycena KAZDEGO produktu z ich oferty na zyczenie.\n"
+        f"  Typowo 30-50% taniej niz kupowanie u polskiego dystrybutora bo "
+        f"  omijamy 2-3 posrednikow.\n"
+        f"  **KRYTYCZNE - NIE WOLNO PISAC KONKRETNYCH LICZB MOQ ANI LEAD TIME**\n"
+        f"  MOQ realnie wynosi od pojedynczych sztuk dla wysoce custom rzeczy "
+        f"  po kilka tysiecy dla pelnej produkcji ze swoim packagingiem. To "
+        f"  zalezy od produktu, stopnia personalizacji, wybranej fabryki. "
+        f"  Lead time podobnie - od kilku tygodni do kilku miesiecy. "
+        f"  Jak chcesz wspomniec MOQ/lead time - napisz ZE TO USTALIMY "
+        f"  INDYWIDUALNIE po znajomosci produktu, NIE PODAWAJ liczb. "
+        f"  Halucynowanie '500 szt' / 'MOQ 1000' / '5 tygodni' = obietnica "
+        f"  ktorej nie mozemy dotrzymac. Wycene robi sie osobno.\n"
+        f"  Indywidualna wycena KAZDEGO produktu z ich oferty na zyczenie.\n"
         f"- 'b2b_panel' (Track B, dodatek) = stala oferta z naszego magazynu "
         f"  w Polsce, dostawa w 24h, ceny hurtowe (rowniez ponizej polskiej "
         f"  hurtowni, ale wyzsze niz Track A bo to ready stock, nie produkcja "
@@ -495,9 +534,9 @@ def _build_user_prompt(lead: Lead) -> str:
         f"  (wybierz JEDNA, dopasuj do leada):\n"
         f"  * WYCENA PRODUKCYJNA (najmocniejsze, dla private_label/both):\n"
         f"    - 'Wyslac wstepna wycene produkcyjna dla Waszych top-3 SKU "
-        f"      pod marka {lead.company_name}?'\n"
-        f"    - 'Mam orientacyjna wycene 500 sztuk farb akrylowych pod "
-        f"      Wasza marke - wyslac do porownania z tym co teraz placicie?'\n"
+        f"      pod marka {lead.company_name}?' (BEZ podawania ilosci)\n"
+        f"    - 'Mam mozliwosc wycenic Wam wybrane produkty z oferty pod "
+        f"      Wasza marke - wskazcie 2-3 najlepiej rotujace SKU?' (BEZ liczb)\n"
         f"    - 'Mozemy wycenic dowolny produkt z Waszej oferty pod Wasza marke "
         f"      - chcecie zobaczyc dla 2-3 przykladowych SKU jak wychodzi?'\n"
         f"  * INDYWIDUALNA OFERTA EMAIL:\n"
@@ -677,8 +716,24 @@ co Chiny robia (wszystko, w roznych jakosciach, na zamowienie).
   Probki dopiero gdy klient ZAINTERESOWANY i wymienilismy 2-3 maile.
 - **NIE proponujemy "darmowych mockupow projektowych"** w cold mailu z
   tego samego powodu (5 dni mojego graphic designera za zero komitmentu).
+- **NIE HALUCYNUJ liczb produkcyjnych w cold mailu.** Zadnych "MOQ 500",
+  "MOQ od 300", "minimum 1000 sztuk", "lead time 5 tygodni", "termin
+  realizacji 6 tygodni", "produkcja 4-8 tygodni". POWOD: MOQ i lead time
+  REALNIE zaleza od konkretnego produktu, fabryki, stopnia personalizacji
+  i wybranej jakosci. Dla wysoce custom rzeczy moze byc 5 sztuk, dla
+  standardow z brandingiem kilkaset, dla pelnej produkcji od zera kilka
+  tysiecy. Konkretne ramy ustalamy w wycenie po znajomosci produktu.
+  Pisanie konkretnej liczby = obietnica ktorej nie mozemy dotrzymac.
+
+  ZAMIAST tego:
+  - "MOQ i terminy ustalimy indywidualnie po znajomosci produktu"
+  - "Wycene wraz z MOQ przygotujemy gdy wskazecie konkretny SKU"
+  - lub po prostu POMIN ten temat - wycena to osobny krok po pierwszej
+    odpowiedzi klienta
+
 - **TAK proponujemy:**
-  - Wstepna WYCENA produkcyjna (email) - tani, daje konkretna liczbe.
+  - Wstepna WYCENA produkcyjna (email) - tani, daje konkretna liczbe
+    DOPIERO przy odpowiedzi klienta.
   - INDYWIDUALNA OFERTA emailem - kategorie pasujace do ich biznesu.
   - KROTKA ROZMOWA telefoniczna / spotkanie (15 min) - dla wartych leadow.
   - DOSTEP DO PANELU B2B (link) - dla leadow ktore chca tylko hurt-od-reki.

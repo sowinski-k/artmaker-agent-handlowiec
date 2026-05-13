@@ -14,18 +14,30 @@ sprzedaży, dopasowanych do skali i potrzeb klienta.
 Dla klientów z planem na własną markę albo dużym wolumenem.
 
 - Mamy zakontraktowane sprawdzone fabryki w Chinach ("fabryka świata"),
-  dzięki czemu produkujemy farby, sztalugi, płótna, pędzle, akcesoria DIY
-  pod specyfikację klienta w cenach producenta - 30-50% taniej niż polska
-  hurtownia.
+  dzięki czemu produkujemy farby, sztalugi, płótna, pędzle, akcesoria DIY,
+  papier kreatywny, dziurkacze, washi tape, w zasadzie wszystko z naszej
+  branży, pod specyfikację klienta w cenach producenta - typowo 30-50%
+  taniej niż polska hurtownia (czasem więcej, czasem mniej - zależy od
+  produktu i wolumenu).
 - Robimy personalizowane opakowania, etykiety, branding i kolekcje pod
-  marka własną klienta (white-label / private label).
-- Skala: typowo MOQ 300-1000 sztuk, lead time 4-8 tygodni produkcji + transport.
+  marką własną klienta (white-label / private label). Różne poziomy
+  jakości - klient wybiera.
+- **Skala / MOQ: BARDZO różne w zależności od produktu i stopnia
+  personalizacji.** Dla wysoko spersonalizowanych / handmade rzeczy może
+  to być nawet kilka-kilkanaście sztuk. Dla standardowych produktów z
+  brandingiem - kilkaset. Dla pełnej produkcji od zera ze swoim packagingiem
+  - kilka tysięcy. **NIGDY nie podajemy konkretnej liczby MOQ z głowy w
+  cold mailu - to wycenia się indywidualnie po znajomości produktu i
+  oczekiwań klienta.**
+- Lead time też zależny - od kilku tygodni dla standardowych zamówień do
+  kilku miesięcy dla rozbudowanych kolekcji. Nie sztywne ramy w mailu.
 
 Idealni klienci dla TRACK A:
 - Sieci sklepów detalicznych chcące własnej marki w niższym pułapie cenowym
 - Marki produkujące zestawy kreatywne / boxy subskrypcyjne
 - Dystrybutorzy szukający kontraktu produkcyjnego pod ich brand
-- Hurtownie z wolumenem co najmniej kilkaset sztuk SKU/miesiąc
+- Hurtownie z regularnym wolumenem
+- Małe marki / startup'y chcące zacząć od małej partii brandowanej
 
 ## ŚCIEŻKA B: Panel B2B SOWINS (magazyn PL, dostawa 24h)
 

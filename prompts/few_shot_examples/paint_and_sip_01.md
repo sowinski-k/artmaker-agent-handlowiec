@@ -1,4 +1,4 @@
-Subject: Plotna 30x40 pod marka WineArt - 35% taniej?
+Subject: Plotna 30x40 pod marka WineArt - oszczednosci?
 Segment: paint_and_sip
 Offer track: both
 Lead context: WineArt - paint&sip w Warszawie, robia 6-8 wieczorow tygodniowo
@@ -21,13 +21,16 @@ Konkretnie dla Was: produkcja zestawow startowych POD MARKA WineArt - plotno
 30x40 z Waszym logiem w rogu + 6 farb akrylowych + pedzel, w kartonowym
 pudelku w Waszych kolorach (zielono-rozowy). Goscie wychodza z eventu z
 fizyczna pamiatka brandowana, a Wy schodzicie z marza polskiego dystrybutora.
-MOQ 500 zestawow, 30-50% taniej niz kupowanie tego osobno + branding gdzies
-indziej. Dla 7 wieczorow tygodniowo zwraca sie w 3-4 miesiace.
+Typowo o 30-40% taniej niz kupowanie tego osobno + branding gdzies indziej.
+MOQ, terminy i wycena - ustalimy indywidualnie zaleznie od stopnia
+personalizacji zestawu.
 
-Na biezace uzupelnianie - mamy tez panel b2b.sowins.pl, magazyn PL, dostawa
-24h, minimum 1000 zl + transport gratis.
+Na biezace uzupelnianie - mamy tez panel b2b.sowins.pl z magazynu PL, dostawa
+24h, minimum 1000 zl + transport gratis. Idealnie kiedy macie nagly event
+i potrzebujecie czegos NA JUZ.
 
-Wyslac wstepna wycene produkcyjna dla 500 zestawow WineArt do porownania?
+Wyslac wstepna wycene produkcyjna zestawu pod marka WineArt do porownania
+z tym co teraz placicie?
 
 Pozdrawiam,
 Marek

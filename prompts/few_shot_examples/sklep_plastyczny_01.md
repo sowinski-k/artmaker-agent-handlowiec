@@ -18,18 +18,18 @@ specyfikacje klienta). NIE polska hurtownia odprzedajaca cudzy towar.
 
 Konkretnie dla ArtBox: zamiast kupowac farby Daler-Rowney albo Royal od
 polskich dystrybutorow, mozemy produkowac je POD MARKA ArtBox. Te same
-pigmenty, Wasze opakowania, Wasze logo na puszkach + tubach. MOQ od 300
-sztuk per kolor, 30-50% taniej niz teraz placicie u dystrybutora.
-Buduje to Wasza wlasna linie farb do sprzedazy detalicznej i wewnatrz
-warsztatow. Wycene zrobie na kazdy produkt osobno - mozecie zaczac od
-top-3 SKU jakie najlepiej Wam schodza.
+pigmenty, Wasze opakowania, Wasze logo na puszkach + tubach. Typowo o 30-50%
+taniej niz teraz placicie u dystrybutora. Buduje to Wasza wlasna linie farb
+do sprzedazy detalicznej i wewnatrz warsztatow. MOQ, terminy i wycene
+ustalimy zaleznie od konkretnego produktu i stopnia personalizacji - mozecie
+zaczac od top-3 SKU jakie najlepiej Wam schodza.
 
 Na biezace uzupelnianie - mamy tez panel b2b.sowins.pl, magazyn w Polsce,
 dostawa w 24h, minimum 1000 zl netto + transport gratis. To "Plan B"
 gdy czegos brakuje OD RAZU.
 
-Wyslac wstepna wycene produkcji 500 sztuk farby akrylowej pod logo ArtBox
-do porownania z tym co teraz placicie u dystrybutora?
+Wyslac wstepna wycene produkcji 3 najlepiej rotujacych farb akrylowych pod
+logo ArtBox do porownania z tym co teraz placicie u dystrybutora?
 
 Pozdrawiam,
 Marek
