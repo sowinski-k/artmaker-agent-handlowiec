@@ -477,12 +477,13 @@ export default function PozyskiwaniePage() {
 
         {/* JOB PROGRESS */}
         {activeJob && (
-          <div className="job-card">
+          <div className={`job-card ${jobActive ? 'active' : ''}`}>
             <div className="job-head">
               <div className="job-title">
                 <i className={`ti ti-${jobActive ? 'loader-2 spin' : activeJob.status === 'done' ? 'check' : 'x'}`} />
-                {jobActive ? 'Agent pracuje...' :
-                 activeJob.status === 'done' ? 'Gotowe!' :
+                {jobActive ? (
+                  <>Agent pracuje<span className="working-dots" /></>
+                ) : activeJob.status === 'done' ? 'Gotowe!' :
                  activeJob.status === 'failed' ? 'Job padł' : 'Anulowano'}
               </div>
               <div className="job-actions">
@@ -503,14 +504,25 @@ export default function PozyskiwaniePage() {
                   <div style={{ width: `${(activeJob.progress / Math.max(activeJob.total, 1)) * 100}%` }} />
                 </div>
                 <div className="progress-meta">
-                  <span>{activeJob.progress} / {activeJob.total} przerobione</span>
+                  {jobActive ? (
+                    <span className="working-now">
+                      <span className="dot-pulse" />
+                      Pracuje nad {activeJob.progress + 1}-tym z {activeJob.total}
+                      <span className="working-dots" />
+                    </span>
+                  ) : (
+                    <span>{activeJob.progress} / {activeJob.total} przerobione</span>
+                  )}
                   <span className="mono">job #{activeJob.id}</span>
                 </div>
               </>
             )}
             {!activeJob.total && jobActive && (
               <div className="progress-meta">
-                <span>Agent znajduje miejsca...</span>
+                <span className="working-now">
+                  <span className="dot-pulse" />
+                  Agent znajduje miejsca<span className="working-dots" />
+                </span>
                 <span className="mono">job #{activeJob.id}</span>
               </div>
             )}
@@ -962,23 +974,86 @@ const CSS = `
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .job-actions { display: flex; gap: 8px; }
 
+/* Progress bar z 2 warstwami animacji:
+   1. Glowna szerokosc (width %) - dyskretne update'y co poll
+   2. Shimmer overlay (gdy job-card.active) - ciagly ruch, sygnal "zyje" */
 .progress-bar {
-  height: 8px;
+  height: 10px;
   background: #FAFAF7;
-  border-radius: 4px;
+  border-radius: 5px;
   overflow: hidden;
   margin-bottom: 8px;
+  position: relative;
 }
 .progress-bar > div {
   height: 100%;
   background: linear-gradient(90deg, #D4212C, #8F1018);
-  transition: width 0.3s;
+  /* Plynniejszy transition - 0.8s ease-out zamiast 0.3s linear daje
+     poczucie "wlewania sie" zamiast skoku */
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
 }
+/* Shimmer overlay - widoczny TYLKO gdy job aktywny.
+   Klasa .active dodawana do .job-card warunkowo. */
+.job-card.active .progress-bar > div::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255,255,255,0.35) 30%,
+    rgba(255,255,255,0.55) 50%,
+    rgba(255,255,255,0.35) 70%,
+    transparent 100%
+  );
+  animation: shimmer-progress 1.6s linear infinite;
+  transform: translateX(-100%);
+}
+@keyframes shimmer-progress {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+/* Pulsing glow wokol progress bar gdy job aktywny - subtle "heartbeat" */
+.job-card.active .progress-bar {
+  box-shadow: 0 0 0 0 rgba(212,33,44,0.0);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212,33,44,0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(212,33,44,0.10); }
+}
+
 .progress-meta {
   display: flex; justify-content: space-between;
   font-size: 12px; color: #6B7280;
 }
 .progress-meta .mono { font-family: 'JetBrains Mono', monospace; }
+.progress-meta .working-now {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #D4212C; font-weight: 500;
+}
+.working-now .dot-pulse {
+  display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #D4212C;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { transform: scale(1);   opacity: 1;   }
+  50%      { transform: scale(1.4); opacity: 0.6; }
+}
+.working-dots::after {
+  content: '';
+  animation: dots-ellipsis 1.5s steps(4, end) infinite;
+}
+@keyframes dots-ellipsis {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+}
 
 .live-ticker {
   margin-top: 14px;
