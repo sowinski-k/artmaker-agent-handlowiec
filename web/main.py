@@ -860,6 +860,11 @@ def list_drafts(
     status_filter: str | None = "draft", limit: int = 50,
     cur: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
+    """Lista draftow + KONTEKST leada (kontakt, email, segment, miasto, score).
+
+    Frontend potrzebuje tego do email-style header (DO/FIRMA/SCORE), zeby user
+    od razu widzial DO KOGO mail leci, BEZ klikania na lead.
+    """
     limit = max(1, min(limit, 200))
     with SessionLocal() as session:
         q = select(EmailDraft).options(joinedload(EmailDraft.lead)) \
@@ -870,10 +875,18 @@ def list_drafts(
         return [{
             "id": d.id, "lead_id": d.lead_id,
             "company": d.lead.company_name if d.lead else "(unknown)",
+            # KONTEKST leada do header'a maila w UI:
+            "lead_contact_name": d.lead.contact_name if d.lead else None,
+            "lead_email": d.lead.email if d.lead else None,
+            "lead_segment": d.lead.segment if d.lead else None,
+            "lead_city": d.lead.city if d.lead else None,
+            "lead_score": float(d.lead.score) if d.lead and d.lead.score is not None else None,
+            # Sama tresc maila:
             "subject": d.subject, "snippet1": d.snippet1, "snippet2": d.snippet2,
             "snippet3": d.snippet3, "snippet4": d.snippet4, "snippet5": d.snippet5,
             "full_preview": d.full_preview, "status": d.status,
             "template_variant": d.template_variant, "edited_by_user": d.edited_by_user,
+            "generated_by_model": d.generated_by_model,
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "sent_at": d.sent_at.isoformat() if d.sent_at else None,
         } for d in drafts]
