@@ -724,15 +724,19 @@ def get_events(limit: int = 8, cur: CurrentUser = Depends(get_current_user)) -> 
 def list_leads(
     limit: int = 50, offset: int = 0,
     segment: str | None = None, status: str | None = None, min_score: float = 0.0,
+    q: str | None = None,
+    sort: str = "score",
     cur: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    """Lista leadow + agregowane statystyki draftow per lead.
+
+    Parametry:
+      q       - full-text search po company_name LUB email (case-insensitive ILIKE)
+      sort    - 'score' (default: score DESC, puste na dol) | 'newest' | 'oldest' | 'company'
+      segment/status/min_score - filtry
+    """
     limit = max(1, min(limit, 200)); offset = max(0, offset)
     with SessionLocal() as session:
-        # Sort: leady z kontaktem najpierw (po score DESC), potem leady bez
-        # email+phone na samym dole. DEAD_END status z auto-enrichmentu to
-        # silny sygnal "puste" - leci na dol.
-        # NULL OR '' bo stare leady moga miec puste stringi zamiast NULL
-        # (przed normalizacja w save_lead).
         empty_email = (Lead.email.is_(None)) | (Lead.email == "")
         empty_phone = (Lead.phone.is_(None)) | (Lead.phone == "")
         empty_flag = case(
@@ -740,20 +744,72 @@ def list_leads(
             ((empty_email & empty_phone), 1),
             else_=0,
         )
-        q = select(Lead).where(Lead.workspace_id == cur.workspace_id) \
-            .order_by(empty_flag.asc(), desc(Lead.score), desc(Lead.created_at))
-        if segment: q = q.where(Lead.segment == segment)
-        if status: q = q.where(Lead.status == status)
-        if min_score > 0: q = q.where(Lead.score >= min_score)
+        base = select(Lead).where(Lead.workspace_id == cur.workspace_id)
+        if segment: base = base.where(Lead.segment == segment)
+        if status: base = base.where(Lead.status == status)
+        if min_score > 0: base = base.where(Lead.score >= min_score)
+        if q and q.strip():
+            search = f"%{q.strip()}%"
+            base = base.where(
+                (Lead.company_name.ilike(search))
+                | (Lead.email.ilike(search))
+                | (Lead.contact_name.ilike(search))
+            )
 
-        total = int(session.scalar(select(func.count()).select_from(q.subquery())) or 0)
-        rows = session.execute(q.limit(limit).offset(offset)).scalars().all()
+        if sort == "newest":
+            ordered = base.order_by(empty_flag.asc(), desc(Lead.created_at))
+        elif sort == "oldest":
+            ordered = base.order_by(empty_flag.asc(), Lead.created_at.asc())
+        elif sort == "company":
+            ordered = base.order_by(empty_flag.asc(), Lead.company_name.asc())
+        else:  # 'score' default
+            ordered = base.order_by(empty_flag.asc(), desc(Lead.score), desc(Lead.created_at))
+
+        total = int(session.scalar(select(func.count()).select_from(ordered.subquery())) or 0)
+        rows = session.execute(ordered.limit(limit).offset(offset)).scalars().all()
+
+        # Agregat: ile draftow per lead + status najnowszego (do kolumny w tabeli).
+        # Pojedyncze query zamiast N+1: GROUP BY lead_id wszystkie drafty workspace'u
+        # i mapujemy ID -> {count, latest_status} (limit do leadow z bieżącej strony).
+        lead_ids = [l.id for l in rows]
+        drafts_info: dict[int, dict[str, Any]] = {}
+        if lead_ids:
+            # ile draftow per lead
+            counts_rows = session.execute(
+                select(EmailDraft.lead_id, func.count(EmailDraft.id))
+                .where(
+                    EmailDraft.lead_id.in_(lead_ids),
+                    EmailDraft.workspace_id == cur.workspace_id,
+                )
+                .group_by(EmailDraft.lead_id)
+            ).all()
+            for lid, cnt in counts_rows:
+                drafts_info.setdefault(lid, {})["count"] = int(cnt)
+            # status najnowszego draftu per lead (subquery z DISTINCT ON byloby
+            # ladniejsze ale dla SQLite nie dziala - lecimy fetch + grouping in-app)
+            latest_rows = session.execute(
+                select(EmailDraft.lead_id, EmailDraft.status, EmailDraft.id)
+                .where(
+                    EmailDraft.lead_id.in_(lead_ids),
+                    EmailDraft.workspace_id == cur.workspace_id,
+                )
+                .order_by(EmailDraft.lead_id, desc(EmailDraft.id))
+            ).all()
+            seen_lids: set[int] = set()
+            for lid, st, _did in latest_rows:
+                if lid in seen_lids:
+                    continue
+                seen_lids.add(lid)
+                drafts_info.setdefault(lid, {})["latest_status"] = st
+
         leads = [{
             "id": l.id, "segment": l.segment, "company_name": l.company_name,
             "contact_name": l.contact_name, "email": l.email, "phone": l.phone,
             "website": l.website, "city": l.city, "status": l.status,
             "score": float(l.score) if l.score is not None else None,
             "created_at": l.created_at.isoformat() if l.created_at else None,
+            "drafts_count": drafts_info.get(l.id, {}).get("count", 0),
+            "latest_draft_status": drafts_info.get(l.id, {}).get("latest_status"),
         } for l in rows]
     return {"total": total, "items": leads}
 
@@ -1033,6 +1089,72 @@ def create_draft(payload: CreateDraftIn, cur: CurrentUser = Depends(get_current_
             },
         )
     return {"ok": True, "job_id": job.id}
+
+
+class BulkDraftsIn(BaseModel):
+    lead_ids: list[int]
+    provider: str | None = None
+    model: str | None = None
+
+
+@app.post("/api/drafts/bulk")
+def create_drafts_bulk(
+    payload: BulkDraftsIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk-generate: tworzy GENERATE_DRAFT job per lead_id (a nie jeden BULK
+    job) - daje per-lead retry + widzialny progress per lead w UI.
+
+    Filtruje: tylko leady ktore naleza do workspace, maja status RESEARCHED
+    i nie maja juz aktywnego (non-rejected) draftu. Skip'uje cicho reszte.
+    """
+    if not payload.lead_ids:
+        raise HTTPException(status_code=400, detail="Brak lead_ids.")
+    if len(payload.lead_ids) > 50:
+        raise HTTPException(status_code=400, detail="Max 50 leadow naraz.")
+
+    with SessionLocal() as session:
+        # Wczytaj leady ktore matchuja workspace + sa researched + nie maja
+        # aktywnego draftu (LEFT JOIN by counted by non-rejected drafts)
+        eligible = session.execute(
+            select(Lead).where(
+                Lead.id.in_(payload.lead_ids),
+                Lead.workspace_id == cur.workspace_id,
+                Lead.status == LeadStatus.RESEARCHED.value,
+                Lead.email.isnot(None),
+                Lead.email != "",
+            )
+        ).scalars().all()
+
+        # Sprawdz ktore juz maja non-rejected draft
+        existing_drafts_lead_ids = set(session.execute(
+            select(EmailDraft.lead_id).where(
+                EmailDraft.lead_id.in_([l.id for l in eligible]),
+                EmailDraft.workspace_id == cur.workspace_id,
+                EmailDraft.status != DraftStatus.REJECTED.value,
+            )
+        ).scalars().all())
+
+        to_queue = [l for l in eligible if l.id not in existing_drafts_lead_ids]
+        job_ids: list[int] = []
+        for lead in to_queue:
+            job = create_job(
+                session, job_type=JobType.GENERATE_DRAFT,
+                workspace_id=cur.workspace_id, user_id=cur.user_id,
+                payload={
+                    "lead_id": lead.id,
+                    "provider": payload.provider, "model": payload.model,
+                },
+            )
+            job_ids.append(job.id)
+
+    return {
+        "ok": True,
+        "requested": len(payload.lead_ids),
+        "queued": len(job_ids),
+        "skipped_not_researched": len(payload.lead_ids) - len(eligible),
+        "skipped_already_has_draft": len(eligible) - len(to_queue),
+        "job_ids": job_ids,
+    }
 
 
 # ─── Discovery + research jako jobs ─────────────────────────────────────

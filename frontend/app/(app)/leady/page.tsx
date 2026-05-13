@@ -17,6 +17,8 @@ interface LeadRow {
   status: string;
   score: number | null;
   created_at: string | null;
+  drafts_count: number;
+  latest_draft_status: string | null;
 }
 
 interface DraftLite {
@@ -67,7 +69,15 @@ const STATUSES = ['', 'new', 'researched', 'drafted', 'approved', 'sent', 'repli
 const SEGMENTS = ['', 'sklep_plastyczny', 'sklep_papierniczy', 'paint_and_sip', 'warsztaty_dzieci',
   'animatorzy_eventy', 'szkola_artystyczna', 'marka_wlasna', 'inne'];
 
+const SORTS: Array<{ value: string; label: string }> = [
+  { value: 'score', label: 'Najwyższy score' },
+  { value: 'newest', label: 'Najnowsze' },
+  { value: 'oldest', label: 'Najstarsze' },
+  { value: 'company', label: 'Alfabetycznie' },
+];
+
 type DraftFlash = { kind: 'success' | 'error' | 'info'; text: string; draftId?: number };
+type GlobalFlash = { kind: 'success' | 'error' | 'info'; text: string };
 
 export default function LeadyPage() {
   const router = useRouter();
@@ -77,8 +87,16 @@ export default function LeadyPage() {
   const [segment, setSegment] = useState('');
   const [status, setStatus] = useState('');
   const [minScore, setMinScore] = useState(0);
+  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [sort, setSort] = useState('score');
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<LeadDetail | null>(null);
+  // Bulk selection
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  // Globalny flash (toast) - zamiast alert
+  const [flash, setFlash] = useState<GlobalFlash | null>(null);
   // Draft generation state - w drawerze, nie native alert
   const [draftJobId, setDraftJobId] = useState<number | null>(null);
   const [draftJobStatus, setDraftJobStatus] = useState<string | null>(null);
@@ -90,13 +108,27 @@ export default function LeadyPage() {
     if (!isAuthenticated()) router.push('/login');
   }, [router]);
 
+  // Debounce searchInput -> search (300ms) zeby nie spamowac backendu
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // Auto-dismiss flash po 5s
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 5000);
+    return () => clearTimeout(t);
+  }, [flash]);
+
   async function load() {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '100' });
+      const params = new URLSearchParams({ limit: '100', sort });
       if (segment) params.set('segment', segment);
       if (status) params.set('status', status);
       if (minScore > 0) params.set('min_score', String(minScore));
+      if (search.trim()) params.set('q', search.trim());
       const res = await api<LeadsResponse>(`/api/leads?${params}`);
       setLeads(res.items);
       setTotal(res.total);
@@ -107,7 +139,59 @@ export default function LeadyPage() {
     }
   }
 
-  useEffect(() => { void load(); /* eslint-disable-next-line */ }, [segment, status, minScore]);
+  useEffect(() => { void load(); /* eslint-disable-next-line */ }, [segment, status, minScore, search, sort]);
+
+  // Bulk selection helpers
+  const eligibleForBulk = leads.filter(
+    (l) => l.status === 'researched' && l.email && (l.drafts_count === 0 || l.latest_draft_status === 'rejected')
+  );
+  const allEligibleSelected = eligibleForBulk.length > 0
+    && eligibleForBulk.every((l) => selectedIds.has(l.id));
+
+  function toggleSelect(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAll() {
+    if (allEligibleSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(eligibleForBulk.map((l) => l.id)));
+    }
+  }
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  async function bulkGenerateDrafts() {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    setBulkSubmitting(true);
+    try {
+      const res = await api<{
+        ok: boolean; requested: number; queued: number;
+        skipped_not_researched: number; skipped_already_has_draft: number;
+        job_ids: number[];
+      }>('/api/drafts/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ lead_ids: ids }),
+      });
+      setFlash({
+        kind: 'success',
+        text: `Zlecone: ${res.queued} draftów. Pominięte: ${res.skipped_already_has_draft} z istniejącym draftem, ${res.skipped_not_researched} nie-researched. Worker generuje w tle.`,
+      });
+      clearSelection();
+      // Refresh listy po 1.5s zeby zlapac nowe draft counts
+      setTimeout(() => void load(), 1500);
+    } catch (err) {
+      setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd' });
+    } finally {
+      setBulkSubmitting(false);
+    }
+  }
 
   async function refreshDetail(id: number) {
     try {
@@ -240,61 +324,123 @@ export default function LeadyPage() {
         <div className="avatar">EC</div>
       </div>
 
+      {/* Globalny flash */}
+      {flash && (
+        <div className={`global-flash flash-${flash.kind}`}>
+          {flash.kind === 'success' && <i className="ti ti-check" />}
+          {flash.kind === 'error' && <i className="ti ti-alert-circle" />}
+          {flash.kind === 'info' && <i className="ti ti-info-circle" />}
+          <span style={{ flex: 1 }}>{flash.text}</span>
+          <button className="flash-close" onClick={() => setFlash(null)}>
+            <i className="ti ti-x" />
+          </button>
+        </div>
+      )}
+
       <div className="content">
         <div className="page-head">
           <div>
             <h1>Leady</h1>
-            <p>{total} firm w bazie · sortowane po score malejąco</p>
+            <p>
+              {total} {total === 1 ? 'firma' : total < 5 ? 'firmy' : 'firm'} w bazie
+              {search.trim() && ` · filtr: "${search.trim()}"`}
+            </p>
           </div>
+          <a href="/pozyskiwanie" className="btn btn-secondary">
+            <i className="ti ti-search" /> Znajdź nowe leady
+          </a>
         </div>
 
-        <div className="card">
-          <div className="card-head">
-            <div className="card-title"><i className="ti ti-filter" /> Filtry</div>
+        {/* Toolbar: search + filtry + sort - wszystko w jednym pasku */}
+        <div className="toolbar">
+          <div className="search-box">
+            <i className="ti ti-search" />
+            <input
+              type="search"
+              placeholder="Szukaj po nazwie firmy, kontakcie lub emailu..."
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+            />
+            {searchInput && (
+              <button className="search-clear" onClick={() => setSearchInput('')} title="Wyczyść">
+                <i className="ti ti-x" />
+              </button>
+            )}
           </div>
-          <div className="card-body" style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-            <div className="field">
-              <label>Segment</label>
-              <select value={segment} onChange={(e) => setSegment(e.target.value)}>
-                {SEGMENTS.map((s) => <option key={s} value={s}>{s || '- wszystkie -'}</option>)}
-              </select>
-            </div>
-            <div className="field">
-              <label>Status</label>
-              <select value={status} onChange={(e) => setStatus(e.target.value)}>
-                {STATUSES.map((s) => <option key={s} value={s}>{s || '- wszystkie -'}</option>)}
-              </select>
-            </div>
-            <div className="field" style={{ maxWidth: 200 }}>
-              <label>Min score: {minScore}</label>
+
+          <div className="toolbar-filters">
+            <select className="tb-select" value={segment} onChange={(e) => setSegment(e.target.value)}>
+              {SEGMENTS.map((s) => <option key={s} value={s}>{s ? `Segment: ${s}` : 'Wszystkie segmenty'}</option>)}
+            </select>
+            <select className="tb-select" value={status} onChange={(e) => setStatus(e.target.value)}>
+              {STATUSES.map((s) => <option key={s} value={s}>{s ? `Status: ${s}` : 'Wszystkie statusy'}</option>)}
+            </select>
+            <select className="tb-select" value={sort} onChange={(e) => setSort(e.target.value)}>
+              {SORTS.map((s) => <option key={s.value} value={s.value}>Sortuj: {s.label}</option>)}
+            </select>
+            <div className="tb-score">
+              <label>Min score: <strong>{minScore.toFixed(1)}</strong></label>
               <input type="range" min={0} max={10} step={0.5} value={minScore}
                 onChange={(e) => setMinScore(parseFloat(e.target.value))} />
             </div>
           </div>
         </div>
 
+        {/* Bulk action bar - widoczny tylko gdy cos zaznaczone */}
+        {selectedIds.size > 0 && (
+          <div className="bulk-bar">
+            <div className="bulk-info">
+              <i className="ti ti-checkbox" />
+              <strong>{selectedIds.size}</strong> zaznaczone
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={clearSelection}>
+              Wyczyść
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={bulkGenerateDrafts}
+              disabled={bulkSubmitting}
+            >
+              <i className="ti ti-mail-plus" />
+              {bulkSubmitting ? 'Zlecam...' : `Generuj drafty (${selectedIds.size})`}
+            </button>
+          </div>
+        )}
+
         <div className="card" style={{ marginTop: 12 }}>
           <div className="card-head">
             <div className="card-title">
-              <i className="ti ti-users" /> Wyniki ({leads.length})
+              <i className="ti ti-users" /> Wyniki ({leads.length}{total > leads.length ? ` z ${total}` : ''})
             </div>
+            {eligibleForBulk.length > 0 && (
+              <button
+                className="btn-link-sm"
+                onClick={toggleSelectAll}
+                title="Zaznacz wszystkie researched z emailem bez aktywnego draftu"
+              >
+                {allEligibleSelected ? 'Odznacz wszystkie' : `Zaznacz wszystkie researched (${eligibleForBulk.length})`}
+              </button>
+            )}
           </div>
           {loading ? (
             <table className="tbl">
               <thead>
                 <tr>
+                  <th style={{ width: 40 }}></th>
                   <th className="num">Score</th>
                   <th>Firma</th>
                   <th>Segment</th>
                   <th>Miasto</th>
                   <th>Email</th>
                   <th>Status</th>
+                  <th>Drafty</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
                 {Array.from({ length: 8 }).map((_, i) => (
                   <tr key={i}>
+                    <td><span className="skel" style={{ width: 16, height: 16, borderRadius: 3 }} /></td>
                     <td className="num"><span className="skel skel-pill" /></td>
                     <td><span className="skel skel-line skel-w-140" /></td>
                     <td><span className="skel skel-pill" /></td>
@@ -302,39 +448,105 @@ export default function LeadyPage() {
                     <td><span className="skel skel-line skel-w-200" /></td>
                     <td><span className="skel skel-pill" /></td>
                     <td><span className="skel skel-line skel-w-30" /></td>
+                    <td><span className="skel skel-line skel-w-30" /></td>
                   </tr>
                 ))}
               </tbody>
             </table>
           ) : leads.length === 0 ? (
-            <div style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>
-              Brak leadów. Idź do <a href="/pozyskiwanie" style={{ color: '#D4212C' }}>Pozyskiwanie</a> żeby znaleźć pierwsze.
+            <div className="empty-state">
+              <i className="ti ti-users-off" />
+              <h3>{search.trim() ? 'Nic nie znaleziono' : 'Brak leadów'}</h3>
+              <p>
+                {search.trim()
+                  ? `Spróbuj innego zapytania albo zresetuj filtry.`
+                  : <>Idź do <a href="/pozyskiwanie">Pozyskiwanie</a> żeby znaleźć pierwsze leady, albo poczekaj na Patrol AI.</>
+                }
+              </p>
             </div>
           ) : (
             <table className="tbl">
               <thead>
                 <tr>
+                  <th style={{ width: 40 }}>
+                    {eligibleForBulk.length > 0 && (
+                      <input
+                        type="checkbox"
+                        checked={allEligibleSelected}
+                        onChange={toggleSelectAll}
+                        title="Zaznacz wszystkie kwalifikujące się"
+                      />
+                    )}
+                  </th>
                   <th className="num">Score</th>
                   <th>Firma</th>
                   <th>Segment</th>
                   <th>Miasto</th>
                   <th>Email</th>
                   <th>Status</th>
+                  <th>Drafty</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {leads.map((l) => (
-                  <tr key={l.id} onClick={() => openDetail(l.id)} style={{ cursor: 'pointer' }}>
-                    <td className="num">{scoreBadge(l.score)}</td>
-                    <td><strong>{l.company_name}</strong>{l.contact_name && <div style={{ fontSize: 11, color: '#6B7280' }}>{l.contact_name}</div>}</td>
-                    <td><span className="seg-badge">{l.segment}</span></td>
-                    <td style={{ color: '#6B7280' }}>{l.city || '-'}</td>
-                    <td style={{ color: '#6B7280', fontSize: 12 }}>{l.email || '-'}</td>
-                    <td><span className={`status-badge status-${l.status}`}>{l.status}</span></td>
-                    <td><i className="ti ti-chevron-right" style={{ color: '#9CA3AF' }} /></td>
-                  </tr>
-                ))}
+                {leads.map((l) => {
+                  const isHot = l.score != null && l.score >= 8;
+                  const isEligible = l.status === 'researched' && l.email
+                    && (l.drafts_count === 0 || l.latest_draft_status === 'rejected');
+                  const isSelected = selectedIds.has(l.id);
+                  return (
+                    <tr
+                      key={l.id}
+                      className={`${isHot ? 'row-hot' : ''} ${isSelected ? 'row-selected' : ''}`}
+                      onClick={(e) => {
+                        // Klik w checkbox = toggle. Klik gdzie indziej = open drawer.
+                        const target = e.target as HTMLElement;
+                        if (target.tagName === 'INPUT' || target.closest('.row-check')) return;
+                        openDetail(l.id);
+                      }}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <td className="row-check">
+                        {isEligible ? (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelect(l.id)}
+                          />
+                        ) : (
+                          <span title="Tylko researched z emailem (bez aktywnego draftu)" style={{ opacity: 0.3 }}>
+                            <i className="ti ti-square" />
+                          </span>
+                        )}
+                      </td>
+                      <td className="num">{scoreBadge(l.score)}</td>
+                      <td>
+                        <strong>{l.company_name}</strong>
+                        {l.contact_name && <div className="contact-sub">{l.contact_name}</div>}
+                      </td>
+                      <td><span className="seg-badge">{l.segment}</span></td>
+                      <td className="muted">{l.city || '-'}</td>
+                      <td className="email-cell">{l.email || <span className="muted">brak</span>}</td>
+                      <td><span className={`status-badge status-${l.status}`}>{l.status}</span></td>
+                      <td>
+                        {l.drafts_count > 0 ? (
+                          <span className="drafts-cell" title={`Najnowszy: ${l.latest_draft_status}`}>
+                            <i className="ti ti-mail" />
+                            <strong>{l.drafts_count}</strong>
+                            {l.latest_draft_status && (
+                              <span className={`status-mini status-${l.latest_draft_status}`}>
+                                {l.latest_draft_status}
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="muted">-</span>
+                        )}
+                      </td>
+                      <td><i className="ti ti-chevron-right" style={{ color: '#9CA3AF' }} /></td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -524,9 +736,115 @@ const CSS = `
 .crumb i { font-size: 12px; color: #9CA3AF; }
 .avatar { margin-left: auto; width: 32px; height: 32px; border-radius: 50%; background: #1C1C1C; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px; border: 2px solid #D4212C; }
 .content { padding: 24px; }
-.page-head { margin-bottom: 20px; }
+.page-head { margin-bottom: 16px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; margin: 0 0 4px; }
 .page-head p { color: #6B7280; font-size: 13.5px; margin: 0; }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 500; border: 1px solid transparent; cursor: pointer; font-family: inherit; text-decoration: none; transition: background 0.15s, border-color 0.15s; }
+.btn i { font-size: 14px; }
+.btn-sm { padding: 6px 12px; font-size: 12.5px; }
+.btn-primary { background: #D4212C; color: #fff; border-color: #D4212C; }
+.btn-primary:hover:not(:disabled) { background: #8F1018; border-color: #8F1018; }
+.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-secondary { background: #fff; color: #111; border-color: #E5E7EB; }
+.btn-secondary:hover { background: #FAFAF7; border-color: #D1D5DB; }
+.btn-ghost { background: #fff; color: #6B7280; border-color: #E5E7EB; }
+.btn-ghost:hover { background: #F9FAFB; color: #111; }
+.btn-link-sm { background: none; border: none; color: #D4212C; font-size: 12px; font-weight: 500; cursor: pointer; font-family: inherit; padding: 4px 8px; border-radius: 4px; }
+.btn-link-sm:hover { background: #FDECED; }
+
+/* TOOLBAR (search + filters + sort) */
+.toolbar {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  background: #fff; border: 1px solid #E5E7EB; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.search-box {
+  position: relative; flex: 1; min-width: 280px;
+  display: flex; align-items: center;
+}
+.search-box > i {
+  position: absolute; left: 12px; color: #9CA3AF; font-size: 16px; pointer-events: none;
+}
+.search-box input {
+  flex: 1; width: 100%;
+  padding: 8px 32px 8px 36px;
+  border: 1px solid #E5E7EB; border-radius: 6px;
+  font-family: inherit; font-size: 13.5px; color: #111;
+  background: #FAFAF7;
+}
+.search-box input:focus {
+  outline: none; border-color: #D4212C; background: #fff;
+  box-shadow: 0 0 0 3px rgba(212,33,44,0.08);
+}
+.search-clear {
+  position: absolute; right: 8px;
+  background: none; border: none; cursor: pointer; color: #9CA3AF;
+  padding: 4px; display: flex; border-radius: 4px;
+}
+.search-clear:hover { color: #111; background: #F3F4F6; }
+
+.toolbar-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tb-select {
+  padding: 7px 10px; border: 1px solid #E5E7EB; border-radius: 6px;
+  font-family: inherit; font-size: 12.5px; color: #111; background: #fff;
+  cursor: pointer; max-width: 220px;
+}
+.tb-select:hover { border-color: #D1D5DB; }
+.tb-select:focus { outline: none; border-color: #D4212C; }
+.tb-score {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px 10px; background: #FAFAF7; border-radius: 6px; min-width: 160px;
+}
+.tb-score label { font-size: 10.5px; color: #6B7280; }
+.tb-score label strong { color: #111; }
+.tb-score input[type="range"] { width: 100%; height: 4px; }
+
+/* BULK ACTIONS bar */
+.bulk-bar {
+  display: flex; gap: 12px; align-items: center;
+  background: #FDECED; border: 1px solid #FCA5A5; border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 12px;
+  animation: slideDown 0.2s ease-out;
+}
+.bulk-info {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: #8F1018;
+}
+.bulk-info i { font-size: 18px; }
+.bulk-info strong { font-weight: 700; }
+
+@keyframes slideDown {
+  from { transform: translateY(-6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* GLOBAL FLASH */
+.global-flash {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  z-index: 200; min-width: 320px; max-width: 600px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-radius: 8px;
+  font-size: 13.5px; font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  animation: slideDown 0.2s ease-out;
+}
+.global-flash i { font-size: 18px; flex-shrink: 0; }
+.global-flash.flash-success { background: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
+.global-flash.flash-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+.global-flash.flash-info { background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE; }
+.flash-close {
+  background: none; border: none; cursor: pointer; color: inherit;
+  opacity: 0.7; padding: 4px; display: flex; font-size: 16px;
+}
+.flash-close:hover { opacity: 1; }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 60px 24px; }
+.empty-state i { font-size: 40px; color: #D1D5DB; display: block; margin-bottom: 12px; }
+.empty-state h3 { font-size: 16px; font-weight: 600; color: #111; margin: 0 0 8px; }
+.empty-state p { color: #6B7280; font-size: 13.5px; margin: 0; }
+.empty-state a { color: #D4212C; text-decoration: underline; }
 
 .card { background: #fff; border: 1px solid #E5E7EB; border-radius: 8px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid #E5E7EB; }
@@ -542,8 +860,36 @@ const CSS = `
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.tbl th { text-align: left; font-weight: 500; font-size: 11px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.8px; padding: 10px 16px; background: #FAFAF7; border-bottom: 1px solid #E5E7EB; }
 table.tbl th.num, table.tbl td.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
-table.tbl td { padding: 11px 16px; border-bottom: 1px solid #E5E7EB; }
+table.tbl td { padding: 11px 16px; border-bottom: 1px solid #E5E7EB; vertical-align: middle; }
 table.tbl tr:hover td { background: #FAFAF7; }
+table.tbl tr.row-hot td { background: linear-gradient(90deg, rgba(212,33,44,0.05) 0%, transparent 30%); }
+table.tbl tr.row-hot:hover td { background: linear-gradient(90deg, rgba(212,33,44,0.10) 0%, rgba(250,250,247,1) 50%); }
+table.tbl tr.row-selected td { background: #FDECED; }
+table.tbl tr.row-selected:hover td { background: #FDD8DB; }
+table.tbl .row-check { width: 40px; text-align: center; padding: 11px 0 11px 16px; }
+table.tbl .row-check input[type="checkbox"] {
+  width: 16px; height: 16px; cursor: pointer; accent-color: #D4212C;
+}
+.contact-sub { font-size: 11.5px; color: #6B7280; margin-top: 1px; }
+.muted { color: #9CA3AF; }
+.email-cell { color: #4B5563; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
+
+.drafts-cell {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #111;
+}
+.drafts-cell i { font-size: 13px; color: #D4212C; }
+.drafts-cell strong { font-weight: 600; }
+.status-mini {
+  font-size: 9.5px; font-weight: 600;
+  padding: 1px 5px; border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.status-mini.status-draft { background: #FEF3C7; color: #92400E; }
+.status-mini.status-approved { background: #DCFCE7; color: #166534; }
+.status-mini.status-sent { background: #E0E7FF; color: #4338CA; }
+.status-mini.status-rejected { background: #FEE2E2; color: #991B1B; }
 
 .score-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; padding: 2px 8px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 600; }
 .score-badge.hot { background: #FDECED; color: #8F1018; }
