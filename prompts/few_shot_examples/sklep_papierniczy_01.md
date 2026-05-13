@@ -20,14 +20,15 @@ papier scrapbookowy, dziurkacze, washi tape, stemple, bloki ozdobne, praktycznie
 wszystko w roznych jakosciach pod Wasza specyfikacje.
 
 Konkretnie dla Was: produkcja serii scrapbookingowej POD MARKA Synchronik.
-Wasz design papierow, Wasze opakowania, Wasze logo na blokach 30x30. MOQ
-od 500 sztuk na pozycje, 30-50% taniej niz importujecie teraz przez dystrybutora.
-Buduje to Wasza wlasna linie, nie zostawia marze polskiemu importerowi.
+Wasz design papierow, Wasze opakowania, Wasze logo na blokach. Typowo o 30-50%
+taniej niz importujecie teraz przez dystrybutora. Buduje to Wasza wlasna linie,
+nie zostawia marze polskiemu importerowi. MOQ, terminy i wycene zalezne od
+produktu - ustalimy indywidualnie po wskazaniu konkretnego SKU.
 
 A jak chcecie cos OD REKI na biezace uzupelnianie - mamy tez panel b2b.sowins.pl
 z magazynu w PL, minimum 1000 zl + transport gratis.
 
-Wycenic dla porownania 500 sztuk papieru scrap 30x30 pod marka Synchronik?
+Wycenic dla porownania Wasze top-3 najlepiej rotujace papiery pod marka Synchronik?
 
 Pozdrawiam,
 Marek

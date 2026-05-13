@@ -158,14 +158,19 @@ class TestParseVolume:
 
 class TestValidateDraft:
     def _make_payload(self, **overrides):
-        """Helper - default valid payload z nadpisaniami."""
+        """Helper - default valid payload z nadpisaniami.
+
+        WAZNE: bez konkretnych liczb MOQ/lead-time (od commita anti-halucynacja
+        kazda konkretna liczba w body warn'uje). Default payload powinien byc
+        no-warn."""
         defaults = dict(
             offer_track="both",
             subject="Konkretny temat dla Państwa",
             snippet1="Zerknąłem na Państwa stronę. Mam krótkie pytanie.",
             snippet2="Piszę z Artmakera. Importujemy farby bezpośrednio z Chin.",
             snippet3="Możemy dla Państwa produkować farby pod własną marką. "
-                    "Trzydzieści procent taniej niż polska hurtownia. MOQ 300 sztuk. "
+                    "Trzydzieści procent taniej niż polska hurtownia. "
+                    "MOQ i terminy ustalimy indywidualnie zależnie od produktu. "
                     "A jak czegoś potrzebujecie z magazynu PL, mamy panel B2B b2b.sowins.pl.",
             snippet4=None,
             snippet5="Wysłać wstępną wycenę produkcyjną?",
@@ -254,6 +259,75 @@ class TestValidateDraft:
         )
         warns = validate_draft(with_pl)
         assert not any("BRAK wzmianki" in w for w in warns)
+
+
+class TestMoqHalucynacjaCheck:
+    """REGRESSION dla draftu #10 Przystanek Papierniczy:
+    'Minimum produkcyjne to zwykle 500 sztuk'. To halucynacja - MOQ realnie
+    zalezy od produktu, fabryki, personalizacji."""
+
+    def _payload_with_snippet3(self, s3: str):
+        return EmailDraftPayload(
+            offer_track="private_label",
+            subject="Test temat",
+            snippet1="Zerknąłem na Państwa stronę i mam pytanie.",
+            snippet2="Piszę z Artmakera, jesteśmy producentem w Chinach.",
+            snippet3=s3,
+            snippet4=None,
+            snippet5="Wysłać wycenę produkcyjną?",
+        )
+
+    def test_moq_z_liczba_warns(self):
+        """MOQ 500 / MOQ od 300 - klasyczne halucynacje LLM."""
+        for txt in [
+            "Produkujemy farby pod Waszą marką. MOQ 500 sztuk.",
+            "Private label w Chinach, MOQ od 300 szt.",
+            "Możemy zrobić produkcję, MOQ to 1000.",
+        ]:
+            warns = validate_draft(self._payload_with_snippet3(txt))
+            assert any("HALUCYNACJA" in w for w in warns), \
+                f"Should warn for: {txt!r}, got: {warns}"
+
+    def test_minimum_produkcyjne_z_liczba_warns(self):
+        """'Minimum produkcyjne to zwykle 500 sztuk' - draftu #10 Przystanek."""
+        warns = validate_draft(self._payload_with_snippet3(
+            "Produkujemy w Chinach pod Państwa markę. "
+            "Minimum produkcyjne to zwykle 500 sztuk, co świetnie pasuje."
+        ))
+        assert any("HALUCYNACJA" in w for w in warns)
+
+    def test_lead_time_z_liczba_warns(self):
+        """'lead time 4-8 tygodni' / 'termin realizacji 6 tygodni' - halucynacja."""
+        warns = validate_draft(self._payload_with_snippet3(
+            "Produkcja w Chinach pod Państwa markę. "
+            "Lead time 4-8 tygodni od podpisania zamówienia."
+        ))
+        assert any("HALUCYNACJA" in w for w in warns)
+
+    def test_od_X_sztuk_warns(self):
+        """'od 500 sztuk' - typowa halucynacja MOQ."""
+        warns = validate_draft(self._payload_with_snippet3(
+            "Produkcja farb pod Państwa markę. Możemy wyprodukować od 500 sztuk."
+        ))
+        assert any("HALUCYNACJA" in w for w in warns)
+
+    def test_indywidualnie_NIE_warns(self):
+        """'MOQ ustalimy indywidualnie' - bez konkretnej liczby - OK, brak warning."""
+        warns = validate_draft(self._payload_with_snippet3(
+            "Produkcja pod Państwa markę w Chinach, 30-50% taniej. "
+            "MOQ i terminy ustalimy indywidualnie zależnie od produktu."
+        ))
+        assert not any("HALUCYNACJA" in w for w in warns), \
+            f"Nie powinno warn dla 'indywidualnie', got: {warns}"
+
+    def test_30_50_procent_NIE_warns_jako_moq(self):
+        """'30-50% taniej' to OK liczba (cena), NIE MOQ - nie powinno warn."""
+        warns = validate_draft(self._payload_with_snippet3(
+            "Produkcja w Chinach pod Państwa markę. "
+            "Typowo o 30-50% taniej niż polska hurtownia."
+        ))
+        # Procenty cen nie sa halucynacja MOQ
+        assert not any("HALUCYNACJA" in w for w in warns)
 
 
 class TestEdgeCases:
