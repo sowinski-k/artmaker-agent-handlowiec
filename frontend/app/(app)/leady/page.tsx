@@ -101,6 +101,9 @@ export default function LeadyPage() {
   const [draftJobId, setDraftJobId] = useState<number | null>(null);
   const [draftJobStatus, setDraftJobStatus] = useState<string | null>(null);
   const [draftFlash, setDraftFlash] = useState<DraftFlash | null>(null);
+  // Enrich (re-scrape kontakt) state - osobne, bo to inny job type niz draft
+  const [enrichJobId, setEnrichJobId] = useState<number | null>(null);
+  const [enrichJobStatus, setEnrichJobStatus] = useState<string | null>(null);
   // Ref do anulowania pollingu jak user zmienia drawer / unmount
   const pollAbortRef = useRef<{ cancelled: boolean } | null>(null);
 
@@ -210,11 +213,13 @@ export default function LeadyPage() {
   }
 
   async function openDetail(id: number) {
-    // Reset draft state przy zmianie leada
+    // Reset draft + enrich state przy zmianie leada
     if (pollAbortRef.current) pollAbortRef.current.cancelled = true;
     setDraftFlash(null);
     setDraftJobId(null);
     setDraftJobStatus(null);
+    setEnrichJobId(null);
+    setEnrichJobStatus(null);
     setSelectedId(id);
     setDetail(null);
     await refreshDetail(id);
@@ -262,6 +267,81 @@ export default function LeadyPage() {
         }
       } catch {
         /* network glitch - probuj dalej */
+      }
+    }
+  }
+
+  async function reEnrich(leadId: number) {
+    setDraftFlash(null);
+    try {
+      const res = await api<{ ok: boolean; job_id: number }>('/api/leads/enrich', {
+        method: 'POST',
+        body: JSON.stringify({ lead_id: leadId }),
+      });
+      setEnrichJobId(res.job_id);
+      setEnrichJobStatus('pending');
+      setDraftFlash({
+        kind: 'info',
+        text: 'Sprawdzam stronę jeszcze raz - scrape footer + zakładka kontakt + obfuskowane emaile (~10s)...',
+      });
+      void pollEnrichJob(res.job_id, leadId);
+    } catch (err) {
+      setDraftFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udało się zlecić re-enrich',
+      });
+    }
+  }
+
+  /** Polling enrich job - identyczny pattern jak pollDraftJob ale dla
+   *  enrichment. Po success: refreshDetail (lead.email pojawi sie), load(). */
+  async function pollEnrichJob(jobId: number, leadId: number) {
+    const ctrl = { cancelled: false };
+    // Reuse pollAbortRef bo nigdy nie powinno byc obu jobow naraz dla jednego leada
+    pollAbortRef.current = ctrl;
+    const maxWaitMs = 60_000;  // enrich krotszy niz draft (no LLM)
+    const start = Date.now();
+    while (!ctrl.cancelled && Date.now() - start < maxWaitMs) {
+      await new Promise((r) => setTimeout(r, 1500));
+      if (ctrl.cancelled) return;
+      try {
+        const job = await api<{
+          status: string;
+          result: { email?: string | null; phone?: string | null; source?: string; pages_checked?: number } | null;
+          last_error?: string;
+        }>(`/api/jobs/${jobId}`);
+        setEnrichJobStatus(job.status);
+        if (job.status === 'done') {
+          const email = job.result?.email;
+          const phone = job.result?.phone;
+          if (email || phone) {
+            setDraftFlash({
+              kind: 'success',
+              text: email
+                ? `Znaleziono email: ${email}${phone ? ' + tel ' + phone : ''}. Lead odblokowany do draftowania.`
+                : `Znaleziono telefon: ${phone}. Email nadal nieznany.`,
+            });
+          } else {
+            setDraftFlash({
+              kind: 'info',
+              text: 'Nadal nie znaleziono kontaktu. Sprawdz strone ręcznie lub zlec re-research z LLM.',
+            });
+          }
+          setEnrichJobId(null);
+          await refreshDetail(leadId);
+          await load();
+          return;
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          setDraftFlash({
+            kind: 'error',
+            text: `Re-enrich nieudany (${job.status}): ${job.last_error || 'unknown'}`,
+          });
+          setEnrichJobId(null);
+          return;
+        }
+      } catch {
+        /* network glitch */
       }
     }
   }
@@ -724,7 +804,6 @@ export default function LeadyPage() {
                         <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                           Status: <strong>{draftJobStatus || 'pending'}</strong>. Pracuje w tle - mozesz zamknac okno, status pojawi sie w Drafty.
                         </div>
-                        {/* Indeterminate progress bar - 'agent zyje' visual */}
                         <div className="jp-progress">
                           <div className="jp-progress-fill" />
                         </div>
@@ -732,7 +811,28 @@ export default function LeadyPage() {
                     </div>
                   )}
 
-                  {detail.status !== 'sent' && detail.status !== 'replied' && detail.email && draftJobId === null && (
+                  {/* Enrich job in progress */}
+                  {enrichJobId !== null && (
+                    <div className="job-progress active">
+                      <div className="jp-spinner" />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>
+                          <span className="jp-dot" />
+                          Szukam kontaktu na stronie<span className="working-dots" />{' '}
+                          <span className="mono" style={{ color: '#6B7280' }}>#{enrichJobId}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                          Sprawdzam stopkę, /kontakt, /wspolpraca, /dla-firm, /footer
+                          + dekoduję obfuskowane emaile (HTML entities, CloudFlare, [at]).
+                        </div>
+                        <div className="jp-progress">
+                          <div className="jp-progress-fill" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {detail.status !== 'sent' && detail.status !== 'replied' && detail.email && draftJobId === null && enrichJobId === null && (
                     <button
                       className="btn btn-primary"
                       onClick={() => generateDraft(detail.id)}
@@ -741,9 +841,37 @@ export default function LeadyPage() {
                       {detail.drafts.length > 0 ? 'Generuj kolejny draft' : 'Generuj draft maila'}
                     </button>
                   )}
-                  {!detail.email && (
+
+                  {/* Brak emaila -> button "Sprawdz strone jeszcze raz".
+                      Dostepny tez gdy lead.status='dead_end' (cofa z dead-end'a
+                      jak znajdzie email - logika w backend enrich_lead_in_db). */}
+                  {!detail.email && detail.website && enrichJobId === null && (
+                    <>
+                      <div className="missing-email-box">
+                        <div className="me-title">
+                          <i className="ti ti-mail-off" />
+                          Brak emaila - nie mozna wyslac maila do tego leada
+                        </div>
+                        <div className="me-desc">
+                          Strona moze ukrywac email w stopce / zakladce kontakt /
+                          obfuskowac przez JavaScript albo HTML entities. Sprobuj
+                          ponownie - nowy scraper sprawdza wiecej miejsc i dekoduje
+                          typowe obfuscation patterny.
+                        </div>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={() => reEnrich(detail.id)}
+                          style={{ marginTop: 10 }}
+                        >
+                          <i className="ti ti-refresh" /> Sprawdź stronę jeszcze raz
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {!detail.email && !detail.website && (
                     <span style={{ fontSize: 13, color: '#8F1018' }}>
-                      Brak emaila - nie mozna wyslac maila do tego leada.
+                      Brak emaila i brak strony - nie da się tu nic zrobić automatycznie.
                     </span>
                   )}
                 </div>
@@ -1081,4 +1209,30 @@ table.tbl .row-check input[type="checkbox"] {
 .warn-box { background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #9A3412; margin-bottom: 12px; }
 
 .mono { font-family: 'JetBrains Mono', monospace; }
+
+/* Brak emaila - box z CTA "Sprawdz ponownie" */
+.missing-email-box {
+  padding: 14px 16px;
+  background: #FFF7ED;
+  border: 1px solid #FED7AA;
+  border-radius: 10px;
+}
+.me-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13.5px; font-weight: 600; color: #9A3412;
+  margin-bottom: 4px;
+}
+.me-title i { font-size: 16px; }
+.me-desc {
+  font-size: 12px; color: #9A3412;
+  line-height: 1.4; opacity: 0.85;
+}
+.btn-secondary {
+  background: #fff; color: #111; border: 1px solid #E5E7EB;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
+  cursor: pointer; font-family: inherit;
+}
+.btn-secondary:hover { background: #FAFAF7; border-color: #D1D5DB; }
+.btn-secondary i { font-size: 14px; color: #D4212C; }
 `;
