@@ -1269,6 +1269,7 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
         raise HTTPException(status_code=502, detail=f"Błąd źródeł: {exc}")
 
     rel_map: dict[int, dict[str, Any]] = {}
+    relevance_source = "none"  # "llm" | "heuristic" | "none"
     if payload.use_relevance_filter and places:
         try:
             items, _ = score_relevance_batch(
@@ -1279,8 +1280,27 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
             for it in items:
                 if 0 <= it.idx < len(places):
                     rel_map[it.idx] = {"score": it.score, "reason": it.reason}
+            relevance_source = "llm"
         except Exception as exc:
-            log.warning(f"score_relevance_batch failed (continuing without): {exc}")
+            log.warning(f"score_relevance_batch failed (fallback to heuristic): {exc}")
+            # Fallback: heurystyka per place (keyword'y w nazwie). NIE LLM,
+            # ale lepsze niz puste null ktore powoduje 0-zaznaczonych w UI.
+            from agent.discovery import _heuristic_score
+            for i, p in enumerate(places):
+                if p.existing_lead_id is not None:
+                    # Duplikat - poznaczamy zachowanym score'em
+                    score_int = (
+                        int(round(p.existing_lead_score))
+                        if p.existing_lead_score is not None else 5
+                    )
+                    rel_map[i] = {
+                        "score": max(0, min(10, score_int)),
+                        "reason": f"Duplikat - już w bazie jako lead #{p.existing_lead_id}",
+                    }
+                else:
+                    score, reason = _heuristic_score(p)
+                    rel_map[i] = {"score": score, "reason": reason}
+            relevance_source = "heuristic"
 
     return {
         "places": [{
@@ -1294,6 +1314,8 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
         "diagnostics": [d.model_dump() for d in diag],
         "daily_used": today_done,
         "daily_cap": DISCOVERY_DAILY_CAP_FREE,
+        # Flaga dla frontu - czy relevance pochodzi z LLM czy fallback
+        "relevance_source": relevance_source,
     }
 
 
