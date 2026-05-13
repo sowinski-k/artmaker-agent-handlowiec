@@ -22,3 +22,6 @@ slowapi>=0.1.9
 bcrypt>=4.2.0
 # Observability - aktywuje sie gdy SENTRY_DSN ustawione (no-op bez DSN)
 sentry-sdk[fastapi]>=2.18.0
+# Testing (dev tylko, ale w jednym requirements zeby CI mial cooz instalowac)
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
