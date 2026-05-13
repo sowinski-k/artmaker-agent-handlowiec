@@ -180,7 +180,32 @@ export default function LeadyPage() {
             </div>
           </div>
           {loading ? (
-            <div style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>Ładowanie…</div>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th className="num">Score</th>
+                  <th>Firma</th>
+                  <th>Segment</th>
+                  <th>Miasto</th>
+                  <th>Email</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <tr key={i}>
+                    <td className="num"><span className="skel skel-pill" /></td>
+                    <td><span className="skel skel-line skel-w-140" /></td>
+                    <td><span className="skel skel-pill" /></td>
+                    <td><span className="skel skel-line skel-w-60" /></td>
+                    <td><span className="skel skel-line skel-w-200" /></td>
+                    <td><span className="skel skel-pill" /></td>
+                    <td><span className="skel skel-line skel-w-30" /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           ) : leads.length === 0 ? (
             <div style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>
               Brak leadów. Idź do <a href="/pozyskiwanie" style={{ color: '#D4212C' }}>Pozyskiwanie</a> żeby znaleźć pierwsze.

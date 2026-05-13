@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, getToken } from '@/lib/api';
+import Loading from './loading';
 
 interface DashboardData {
   stats: {
@@ -66,11 +67,7 @@ export default function PulpitPage() {
   }, [router]);
 
   if (loading) {
-    return (
-      <div style={{ padding: '60px 24px', textAlign: 'center', color: '#6B7280' }}>
-        Ładowanie pulpitu…
-      </div>
-    );
+    return <Loading />;
   }
 
   if (error || !data) {

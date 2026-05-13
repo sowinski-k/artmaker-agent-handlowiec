@@ -199,7 +199,27 @@ export default function DraftyPage() {
         </div>
 
         {loading ? (
-          <div style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>Ładowanie…</div>
+          <>
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="card draft-card" style={{ marginBottom: 16 }}>
+                <div className="card-head">
+                  <div className="card-title"><span className="skel skel-line-lg skel-w-200" /></div>
+                  <div className="card-actions" style={{ display: 'flex', gap: 8 }}>
+                    <span className="skel skel-circle" />
+                    <span className="skel skel-circle" />
+                    <span className="skel skel-circle" />
+                  </div>
+                </div>
+                <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <span className="skel skel-line skel-w-full" />
+                  <span className="skel skel-line skel-w-full" />
+                  <span className="skel skel-line" style={{ width: '70%' }} />
+                  <span className="skel skel-line skel-w-full" />
+                  <span className="skel skel-line" style={{ width: '55%' }} />
+                </div>
+              </div>
+            ))}
+          </>
         ) : drafts.length === 0 ? (
           <div className="card" style={{ padding: 40, textAlign: 'center', color: '#6B7280' }}>
             Brak draftów. Wygeneruj draft dla researchowanego leada w <a href="/leady" style={{ color: '#D4212C' }}>Leady</a>.
