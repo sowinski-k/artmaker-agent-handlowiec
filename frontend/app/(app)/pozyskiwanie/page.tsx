@@ -502,12 +502,36 @@ export default function PozyskiwaniePage() {
         {activeJob && (
           <div className={`job-card ${jobActive ? 'active' : ''}`}>
             <div className="job-head">
-              <div className="job-title">
-                <i className={`ti ti-${jobActive ? 'loader-2 spin' : activeJob.status === 'done' ? 'check' : 'x'}`} />
+              <div className="job-head-left">
                 {jobActive ? (
-                  <>Agent pracuje<span className="working-dots" /></>
-                ) : activeJob.status === 'done' ? 'Gotowe!' :
-                 activeJob.status === 'failed' ? 'Job padł' : 'Anulowano'}
+                  <div className="job-ring-wrap">
+                    <span className="job-ring" />
+                  </div>
+                ) : (
+                  <div className={`job-icon-wrap ${activeJob.status}`}>
+                    <i className={`ti ti-${activeJob.status === 'done' ? 'check' : 'x'}`} />
+                  </div>
+                )}
+                <div>
+                  <div className="job-title">
+                    {jobActive ? (
+                      <>
+                        <span className="dot-pulse" />
+                        {activeJob.type === 'discovery_pipeline'
+                          ? <>Agent w terenie<span className="working-dots" /></>
+                          : activeJob.type === 'bulk_research_leads'
+                          ? <>Researchuję leady<span className="working-dots" /></>
+                          : <>Agent pracuje<span className="working-dots" /></>}
+                      </>
+                    ) : activeJob.status === 'done' ? 'Gotowe!' :
+                     activeJob.status === 'failed' ? 'Job padł' : 'Anulowano'}
+                  </div>
+                  {jobActive && (
+                    <div className="job-subtitle">
+                      Pracuję w tle - możesz wylogować się, agent leci dalej
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="job-actions">
                 {jobActive ? (
@@ -1075,23 +1099,75 @@ const CSS = `
 
 .job-card {
   background: #fff;
-  border: 1px solid rgba(212,33,44,0.3);
-  border-radius: 10px;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
   padding: 18px 20px;
   margin-bottom: 16px;
-  box-shadow: 0 4px 16px -8px rgba(212,33,44,0.2);
 }
-.job-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+/* GDY agent aktywny - red glow accent + pulse-bg "oddech" kontenera */
+.job-card.active {
+  background: linear-gradient(135deg, #FDECED 0%, #FAFAF7 60%, #fff 100%);
+  border-color: #FCA5A5;
+  box-shadow: 0 4px 20px -8px rgba(212,33,44,0.25);
+  animation: jc-pulse-bg 2.5s ease-in-out infinite;
+}
+@keyframes jc-pulse-bg {
+  0%, 100% { box-shadow: 0 4px 20px -8px rgba(212,33,44,0.25); }
+  50%      { box-shadow: 0 4px 20px -8px rgba(212,33,44,0.4), 0 0 0 6px rgba(212,33,44,0.08); }
+}
+
+.job-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; gap: 12px; }
+.job-head-left { display: flex; align-items: center; gap: 14px; }
+
+/* Duzy spinner ring 48px - jak w drawer leadu, mocny visual */
+.job-ring-wrap {
+  display: flex; align-items: center; justify-content: center;
+  width: 48px; height: 48px;
+  background: #fff; border-radius: 50%;
+  border: 1px solid #FCD8DB;
+  flex-shrink: 0;
+}
+.job-ring {
+  width: 28px; height: 28px;
+  border: 3px solid #FDECED;
+  border-top-color: #D4212C;
+  border-right-color: #D4212C;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+/* Icon wrap dla finished states (done/failed/cancelled) */
+.job-icon-wrap {
+  display: flex; align-items: center; justify-content: center;
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  font-size: 22px;
+}
+.job-icon-wrap.done { background: #DCFCE7; color: #166534; }
+.job-icon-wrap.failed { background: #FEE2E2; color: #991B1B; }
+.job-icon-wrap.cancelled { background: #FAFAF7; color: #6B7280; }
+
 .job-title {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   display: flex; align-items: center; gap: 8px;
   color: #111;
+  line-height: 1.2;
 }
-.job-title i { color: #D4212C; font-size: 18px; }
+.job-title .dot-pulse {
+  width: 9px; height: 9px;
+  flex-shrink: 0;
+}
+.job-subtitle {
+  font-size: 11.5px;
+  color: #6B7280;
+  margin-top: 3px;
+  line-height: 1.3;
+}
+
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.job-actions { display: flex; gap: 8px; }
+.job-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 
 /* Progress bar z 2 warstwami animacji:
    1. Glowna szerokosc (width %) - dyskretne update'y co poll
