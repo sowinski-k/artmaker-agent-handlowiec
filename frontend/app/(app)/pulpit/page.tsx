@@ -10,7 +10,8 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
-import { api, getToken } from '@/lib/api';
+import { api, isAuthenticated } from '@/lib/api';
+import Loading from './loading';
 
 interface Module {
   slug: string;
@@ -109,7 +110,7 @@ export default function HalaPulpit() {
   };
 
   useEffect(() => {
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       router.push('/login');
       return;
     }
@@ -134,11 +135,7 @@ export default function HalaPulpit() {
   }, [router]);
 
   if (loading) {
-    return (
-      <div style={{ padding: '60px 24px', textAlign: 'center', color: '#6B7280' }}>
-        Ładowanie pulpitu…
-      </div>
-    );
+    return <Loading />;
   }
 
   if (error || !data) {

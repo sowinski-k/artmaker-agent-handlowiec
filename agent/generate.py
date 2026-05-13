@@ -76,19 +76,49 @@ _PUNCT_REPLACEMENTS = {
 
 # Phrases the LLM tends to slip in despite instructions. Hard-strip them.
 # Order matters: longer first to avoid partial matches.
+# Co tu jest: typowe AI/korpo-frazy ktore AI-detektory (Sift, Substance.AI) lapia
+# w 200ms, oraz typowe spam-trigger phrases.
 _AI_CLICHES = [
+    # Klasyki AI openings
     r"Mam nadzieję, że ta wiadomość zastanie [^.,!?\n]*[.,!?]?\s*",
     r"Mam nadzieję, że [^.,!?\n]*?dobrym zdrowiu[.,!?]?\s*",
+    r"Mam nadzieję, że (?:list|mail|wiadomość)[^.,!?\n]*[.,!?]?\s*",
+    # Korpo-otwarcia
+    r"Szanowni Państwo[,.!]?\s*",
+    r"Szanowny Panie[^.,!?\n]*[,.!]?\s*",
+    r"Szanowna Pani[^.,!?\n]*[,.!]?\s*",
+    # Sztywne formaly
     r"Pozdrawiam serdecznie[,.!]?\s*",
     r"Z wyrazami szacunku[,.!]?\s*",
     r"Z poważaniem[,.!]?\s*",
-    r"Pragnę (?:poinformować|zaproponować|przedstawić)[^.,!?\n]*[.,!?]?\s*",
-    r"Chciał(?:a)?bym (?:zaproponować|przedstawić)[^.,!?\n]*[.,!?]?\s*",
+    r"Łączę wyrazy szacunku[,.!]?\s*",
+    # AI-templated propositions
+    r"Pragnę (?:poinformować|zaproponować|przedstawić|zainteresować)[^.,!?\n]*[.,!?]?\s*",
+    r"Chciał(?:a)?bym (?:zaproponować|przedstawić|zaprezentować|zainteresować)[^.,!?\n]*[.,!?]?\s*",
+    r"Pozwolę sobie (?:zaproponować|przedstawić|zwrócić)[^.,!?\n]*[.,!?]?\s*",
+    r"Pozwalam sobie[^.,!?\n]*[.,!?]?\s*",
+    r"Mogę (?:Państwu|Pani|Panu) (?:zaproponować|przedstawić)[^.,!?\n]*[.,!?]?\s*",
     r"Korzystając z okazji[^.,!?\n]*[.,!?]?\s*",
     r"Uprzejmie informuję[^.,!?\n]*[.,!?]?\s*",
-    r"W dzisiejszych czasach\s+",
+    r"Pewnie się Pan(?:i)? zastanawia[^.,!?\n]*[.,!?]?\s*",
+    # Buzzwords - korpo PR
+    r"\brewolucyjn[ya]\w*\b",
+    r"\binnowacyjn[ya]\w*\b",
+    r"\bunikatow[ya]\w*\b",
+    r"\bwyjątkow[ya]\w*\b",
+    r"\bnajwyższej jakości\b",
+    r"\bdynamicznie (?:rozwijając|działając)\w*\b",
+    r"\blider(?:em|a)? (?:w|na) (?:branż|branz|rynk)\w+\b",
+    r"\bsynergi[iąe]\b",
+    r"\bw dzisiejszych czasach\s+",
+    r"\bz przyjemnością\b",
+    r"\brzucić światło na\b",
+    r"\botworzyć drzwi do\b",
+    r"\błącze w sobie\b",
+    # Generic auto-opening
+    r"(?:^|\n)\s*Dzień dobry[,!]\s*",
 ]
-_AI_CLICHE_PATTERN = re.compile("|".join(_AI_CLICHES), re.IGNORECASE)
+_AI_CLICHE_PATTERN = re.compile("|".join(_AI_CLICHES), re.IGNORECASE | re.MULTILINE)
 
 
 def _strip_ai_artifacts(text: str | None) -> str | None:
@@ -97,6 +127,7 @@ def _strip_ai_artifacts(text: str | None) -> str | None:
     - Replaces em-dash / en-dash / smart quotes with ASCII equivalents.
     - Removes blacklisted AI/corpo phrases the model occasionally smuggles in.
     - Collapses runs of spaces and trims edges.
+    - Czysci podwojne ".." po usunieciu frazy (np "Pragne X. Tresc." -> ". Tresc.")
 
     Returns the cleaned string, or None if input was None/empty.
     """
@@ -106,9 +137,172 @@ def _strip_ai_artifacts(text: str | None) -> str | None:
     for src, dst in _PUNCT_REPLACEMENTS.items():
         out = out.replace(src, dst)
     out = _AI_CLICHE_PATTERN.sub("", out)
+    # Po usunieciu frazy zaczynajacej zdanie zostaje czasem dziwny ". " na poczatku
+    out = re.sub(r"^\s*[.,;:!?]+\s*", "", out)
+    # Podwojne kropki/przecinki ktore zostaly po cieciu fraz
+    out = re.sub(r"\s*\.\s*\.\s*", ". ", out)
+    out = re.sub(r"\s*,\s*,\s*", ", ", out)
     out = re.sub(r"[ \t]+", " ", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
+# ---- Anti-slop validation: hard guardrails post-generation -----------------
+#
+# Idea: po LLM call i po _strip_ai_artifacts, sprawdz czy draft spelnia
+# nasze invarianty. Zwroc liste warningow (puste = OK). Caller moze:
+#   - zlogowac warnings i przepuscic (warn)
+#   - rzucic ValueError (hard validation - retry generation)
+
+_POLISH_DIACRITICS = set("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+_MAX_SENTENCE_WORDS = 22
+_MAX_SUBJECT_CHARS = 50
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Prosty splitter zdan - bez external lib. Dziele na '.', '!', '?'."""
+    if not text:
+        return []
+    # Nie tnie skrotow typu 'np.' / 'tj.' (po malej literze)
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-ZŁĆŻŚĘĄŃÓ])", text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _check_polish_diacritics(text: str | None) -> bool:
+    """Czy tekst zawiera POLSKIE znaki? Mail po polsku bez diakrytykow
+    wyglada jak masowka z translatora - red flag dla spam-filtrow."""
+    if not text:
+        return True  # puste OK
+    if len(text) < 20:
+        return True  # za krotkie zeby sensownie sprawdzac
+    return any(c in _POLISH_DIACRITICS for c in text)
+
+
+def _check_forma_consistency(text: str) -> bool:
+    """Sprawdz spojnosc formy zwracania sie: PANSTWO vs WY.
+
+    Mieszanie 'u Panstwa' z 'u Was' to klasyczny AI-tell + niespojnosc
+    znana z google translate. Wykrywamy oba warianty w jednym tekscie.
+    """
+    if not text:
+        return True
+    has_panstwo = bool(re.search(r"\b(?:Pań?stw[ao]|u Państwa|Państwa)\b", text, re.IGNORECASE))
+    has_wy = bool(re.search(r"\b(?:Wasz\w*|u Was|Wam|Was(?:i|e|y)?)\b", text))
+    return not (has_panstwo and has_wy)
+
+
+def validate_draft(payload: "EmailDraftPayload") -> list[str]:
+    """Sprawdz draft po LLM + scrub. Zwroc liste warningow.
+
+    Kazdy warning to ostrzezenie - caller decyduje czy retry. Hard
+    failures (subject za dlugi, brak polskich znakow w body) sa
+    powodem do retry generation z innym promptem/seedem.
+    """
+    warnings: list[str] = []
+
+    # Subject - hard limit
+    if payload.subject and len(payload.subject) > _MAX_SUBJECT_CHARS:
+        warnings.append(
+            f"subject za dlugi ({len(payload.subject)} znakow, max {_MAX_SUBJECT_CHARS})"
+        )
+
+    # Wszystkie snippet'y - check dlugosci zdan
+    snippets = [
+        ("snippet1", payload.snippet1),
+        ("snippet2", payload.snippet2),
+        ("snippet3", payload.snippet3),
+        ("snippet4", payload.snippet4),
+        ("snippet5", payload.snippet5),
+    ]
+    body_concat_parts: list[str] = []
+    for name, snip in snippets:
+        if not snip:
+            continue
+        body_concat_parts.append(snip)
+        for sentence in _split_sentences(snip):
+            words = sentence.split()
+            if len(words) > _MAX_SENTENCE_WORDS:
+                warnings.append(
+                    f"{name}: zdanie ma {len(words)} slow (max {_MAX_SENTENCE_WORDS}): "
+                    f"{sentence[:80]}..."
+                )
+
+    full_body = " ".join(body_concat_parts)
+
+    # Polskie diakrytyki w body (subject moze byc bardziej skrajny)
+    if not _check_polish_diacritics(full_body):
+        warnings.append("body bez polskich znakow diakrytycznych - wyglada na masowke")
+
+    # Spojnosc formy
+    if not _check_forma_consistency(full_body):
+        warnings.append("body miesza forme 'Panstwo' i 'Wy/Was' - wybierz jedna")
+
+    # Track A priority check: jesli offer_track=both, snippet3 powinien
+    # zaczynac od Track A signalow przed Track B (heurystyka)
+    if payload.offer_track == "both" and payload.snippet3:
+        idx_pl = _earliest_index(payload.snippet3.lower(),
+                                  ["private", "produkc", "fabryk", "marka wlasna", "marka własna",
+                                   "własn", "wlasn", "pod wasza", "pod państwa marką", "moq"])
+        idx_b2b = _earliest_index(payload.snippet3.lower(),
+                                   ["b2b.sowins", "panel b2b", "magazyn", "24h", "od reki", "od ręki"])
+        if idx_pl is not None and idx_b2b is not None and idx_b2b < idx_pl:
+            warnings.append(
+                "offer_track=both ale Track B (panel B2B) wymieniony PRZED Track A "
+                "(private_label) w snippet3 - filozofia 'Plan B to plan B' wymaga "
+                "odwrotnej kolejnosci"
+            )
+
+    # HARD RULE: KAZDY mail musi wspomniec o naszej zdolnosci do produkcji w
+    # Chinach / private label. To nasz CORE differentiator vs "kazda inna
+    # hurtownia". Mail bez tej wzmianki traci 80% wartosci propozycji.
+    #
+    # WAZNE (regression dla Seneks-mailu): SAM "importer" / "importujemy"
+    # NIE WYSTARCZA bo polska hurtownia tez importuje. Wymagamy keyword'ow
+    # konkretnie wskazujacych na nasze unikalne wartosci:
+    #   - geo: Chin*
+    #   - capability: fabryk*, produkc*, private label, marka wlasna, MOQ
+    #   - mechanizm: pod ich/Wasza/Panstwa specyfikacja/marka, branding,
+    #     wlasna etykieta, wlasne opakowania
+    track_a_keywords = [
+        # Geo - kluczowe
+        "chin",                          # Chinach, chinskich
+        # Capability - co umiemy zrobic
+        "fabryk",                        # fabryki, fabryka swiata
+        "private label", "private-label",
+        "produkc",                       # produkcja, produkujemy
+        "moq",
+        # Branding - jak to robimy dla klienta
+        "marka wlasna", "marka własna", "wlasn", "własn",
+        "specyfikacj",                   # pod specyfikacje, pod ich specyfikacje
+        "branding",
+        "etykiet",                       # wlasne etykiety, etykietowanie
+        "pod wasza", "pod państwa", "pod waszą",
+    ]
+    if not _has_any_keyword(full_body, track_a_keywords):
+        warnings.append(
+            "BRAK wzmianki o Chinach/produkcji/private label w mailu. "
+            "To nasz CORE differentiator - bez tego mail wyglada jak generic "
+            "hurtownik (sam 'importer' nie wystarcza, bo polska hurtownia tez "
+            "importuje). Dorzuc minimum 1 zdanie o naszej zdolnosci produkcji "
+            "w Chinach / private label / wlasna marka / pod ich specyfikacje."
+        )
+
+    return warnings
+
+
+def _has_any_keyword(text: str, keywords: list[str]) -> bool:
+    """Czy text zawiera ktorekolwiek ze slow z listy (case-insensitive)."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(k.lower() in low for k in keywords)
+
+
+def _earliest_index(text: str, needles: list[str]) -> int | None:
+    """Helper: najnizszy index pierwszego trafienia z listy needles."""
+    indices = [text.find(n) for n in needles if n]
+    indices = [i for i in indices if i >= 0]
+    return min(indices) if indices else None
 
 
 class EmailDraftPayload(BaseModel):
@@ -120,10 +314,16 @@ class EmailDraftPayload(BaseModel):
 
     offer_track: Literal["b2b_panel", "private_label", "both"] = Field(
         description=(
-            "Która oferta Artmakera jest dla tego leada: "
-            "'b2b_panel' = panel B2B z magazynu PL + dostawa 24h (Track B, default), "
-            "'private_label' = produkcja w Chinach pod marka własną (Track A), "
-            "'both' = sugerujemy obie, B teraz + A jako rozwoj na pozniej."
+            "Glowna sciezka oferty w tym mailu. PRZYPOMNIENIE FILOZOFII: "
+            "'private_label' (Track A) to PLAN A - import + produkcja w naszych "
+            "chinskich fabrykach pod marka klienta. 'both' to dwa pitche w jednym - "
+            "Track A glowny + Track B (panel B2B z magazynu) jako dodatek. "
+            "'b2b_panel' - TYLKO gdy lead jest jednoznacznie maly i jasno nie pasuje "
+            "do private label (np. solowy paint&sip 1-2 wieczory miesiecznie). "
+            "DEFAULT dla 90% leadow: 'private_label' lub 'both'. "
+            "Niezaleznie od wyboru, KAZDY mail MUSI zawierac co najmniej 1 zdanie "
+            "o naszej zdolnosci produkcji w Chinach (fabryka swiata, private label, "
+            "wlasna marka) - to nasz core differentiator i tego sa szukajacy klienci."
         )
     )
     subject: str = Field(
@@ -181,6 +381,11 @@ def _build_user_prompt(lead: Lead) -> str:
     contact = lead.contact_name or "(nieznany)"
     segment = rd.get("segment") or lead.segment or "inne"
 
+    # Sygnały skali - wpływają na sugestie Track A vs B (commit Track A priority)
+    score_breakdown = rd.get("score") or {}
+    bulk_potential = score_breakdown.get("bulk_potential")
+    scale_score = score_breakdown.get("scale")
+
     # Tone hint: if we have a first name only, it's likely informal.
     if lead.contact_name and " " not in lead.contact_name.strip():
         tone_hint = (
@@ -197,8 +402,9 @@ def _build_user_prompt(lead: Lead) -> str:
             "Bez 'Szanowni Państwo', otwórz konkretem."
         )
 
-    # Track recommendation hint based on segment - the LLM has final say.
-    track_hint = _suggest_track_hint(segment, monthly)
+    # Track recommendation hint - DOMYSLNIE 'both' z preferencja Track A.
+    # LLM has final say, ale prompt ma jasna preferencje (commit Track A priority).
+    track_hint = _suggest_track_hint(segment, monthly, bulk_potential, scale_score)
 
     return (
         f"## Lead do napisania\n"
@@ -209,83 +415,278 @@ def _build_user_prompt(lead: Lead) -> str:
         f"Kontakt: {contact}\n"
         f"Email do wysyłki: {lead.email or '(brak)'}\n"
         f"Szacunkowy wolumen B2B: {monthly}\n"
+        f"Sygnaly skali (z research): bulk_potential={bulk_potential}, scale={scale_score}\n"
         f"Ton: {tone_hint}\n\n"
         f"## Haki researchowe (UŻYJ co najmniej jednego, NIE WYMYŚLAJ nowych)\n"
         f"{hook_lines}\n\n"
         f"## Co o nich wiemy z researchu\n"
         f"{rationale}\n\n"
         f"## KROK 1: Wybór ścieżki sprzedaży (offer_track)\n"
-        f"Najpierw zdecyduj którą OFERTĘ Artmakera mailujesz dla tego leada.\n"
-        f"Sugestia (nie musisz się zgadzać): {track_hint}\n"
-        f"- 'b2b_panel' = panel B2B z magazynu PL, dostawa 24h, stała oferta. "
-        f"Default. Najlepsze dla papierniczych, paint&sip, warsztatów dzieci, "
-        f"szkół, mniejszych sklepów plastycznych.\n"
-        f"- 'private_label' = produkcja w Chinach pod marką własną klienta. "
-        f"Tylko gdy widać skalę / istniejącą markę / aspiracje brandingowe.\n"
-        f"- 'both' = w jednym mailu wspomnieć obie. Użyj OSZCZĘDNIE: tylko gdy "
-        f"lead jest pomiędzy. Zwykle lepiej skupić się na jednej.\n\n"
+        f"FILOZOFIA SPRZEDAZY ARTMAKERA (CRITICAL):\n\n"
+        f"Jestesmy IMPORTEREM i PRODUCENTEM, nie polska hurtownia. Mamy "
+        f"zakontraktowane FABRYKI w Chinach (fabryka swiata - wszystko mozemy "
+        f"wyprodukowac w roznych jakosciach pod specyfikacje klienta). Nasz "
+        f"core pitch to PRIVATE LABEL i IMPORT NA ZAMOWIENIE. Panel B2B (magazyn "
+        f"PL) to dodatek 'na biezaco', nie glowna oferta.\n\n"
+        f"ZLOTA ZASADA: KAZDY mail MUSI zawierac co najmniej 1 zdanie o naszej "
+        f"zdolnosci produkcji w Chinach / private label / importu na zamowienie. "
+        f"Niezaleznie od offer_track. Mail bez tej wzmianki = mail-slop. Tego "
+        f"szukaja klienci - to nasz prawdziwy differentiator vs 'jeszcze jedna "
+        f"hurtownia z katalogiem'.\n\n"
+        f"Sugestia heurystyki: {track_hint}\n\n"
+        f"Definicje track:\n"
+        f"- 'private_label' (Track A, GLOWNY pitch dla 90% leadow) = "
+        f"  produkujemy farby, sztalugi, plotna, akcesoria DIY, papier "
+        f"  kreatywny, dziurkacze - PRAKTYCZNIE WSZYSTKO - w naszych "
+        f"  zakontraktowanych fabrykach w Chinach pod specyfikacje klienta. "
+        f"  Rozne jakosci (budget / standard / premium - klient wybiera). "
+        f"  Wlasna marka klienta, personalizowane opakowania, etykiety, gift-boxy. "
+        f"  30-50% taniej niz kupowanie u polskiego dystrybutora bo omijamy "
+        f"  2-3 posrednikow. MOQ od 300-1000 szt (zalezy od kategorii), "
+        f"  lead time 4-8 tygodni produkcji + transport morski. Indywidualna "
+        f"  wycena KAZDEGO produktu z ich oferty na zyczenie.\n"
+        f"- 'b2b_panel' (Track B, dodatek) = stala oferta z naszego magazynu "
+        f"  w Polsce, dostawa w 24h, ceny hurtowe (rowniez ponizej polskiej "
+        f"  hurtowni, ale wyzsze niz Track A bo to ready stock, nie produkcja "
+        f"  pod nich). Panel pod https://b2b.sowins.pl. Minimum logistyczne "
+        f"  1000 zl netto, dostawa GRATIS od tego minimum. NIE pisz 'bez minimum'.\n"
+        f"- 'both' = mail z OBIEMA opcjami w jednej wiadomosci. NAJPIERW Track A "
+        f"  jako glowny pitch (produkcja w Chinach, private label, 30-50% taniej, "
+        f"  indywidualna wycena), POTEM Track B jako alternatywa na biezaco. "
+        f"  Track A to ROZWOJ + WLASNA MARKA, Track B to UZUPELNIENIE BIEZACE. "
+        f"  Nigdy nie odwrotnie.\n\n"
         f"## KROK 2: Cold mail do {lead.company_name}\n\n"
         f"### Struktura snippetów (każdy = jeden akapit, każdy krótki):\n"
         f"- subject: temat maila. Max 50 znaków. Format: pytanie/liczba/konkret. "
-        f"  Test: jeśli zobaczyłbyś ten subject w skrzynce, otworzyłbyś bez "
-        f"  wahania? Jak nie - przeformułuj.\n"
-        f"- snippet1: pierwsze zdanie/dwa. MUSI nawiązać do konkretnego haka. "
-        f"  Bez 'Dzień dobry'. Zacznij od mięsa - pytania, obserwacji, konkretu.\n"
-        f"- snippet2: kim jesteś (krótko, 1 zdanie) i dlaczego piszesz "
-        f"  AKURAT do nich (połącz to z hakiem). Max 2 zdania.\n"
-        f"- snippet3: KONKRETNA oferta zgodna z wybraną offer_track:\n"
-        f"  * b2b_panel: panel B2B Artmakera POD URL **https://b2b.sowins.pl** "
-        f"    (MUSISZ podać ten URL w mailu jeśli wybierasz b2b_panel - to nasz konkretny adres, nie generic 'panel B2B'). "
-        f"    Magazyn w PL, wysyłka w 24h, ceny hurtowe od producenta. "
-        f"    Minimum logistyczne: 1000 zł netto na zamówienie. "
-        f"    Dostawa GRATIS przy zamówieniach od minimum. "
-        f"    NIE pisz 'bez minimum zamówienia' - to nieprawda. "
-        f"    Konkretne kategorie produktów które ich dotyczą.\n"
-        f"  * private_label: produkcja w naszych chińskich fabrykach pod ich "
-        f"    specyfikację, własna marka, opakowania, 30-50% taniej niż polska "
-        f"    hurtownia. Wspomnij MOQ tylko jeśli pasuje (300-1000 szt).\n"
-        f"  * both: jedno zdanie o b2b_panel (z URL b2b.sowins.pl i wzmianką "
-        f"    o minimum 1000 zł + gratis dostawa) + jedno zdanie 'a jeśli kiedyś "
-        f"    chcielibyście rozwinąć własną markę - możemy też...'\n"
-        f"- snippet4: opcjonalny social proof / liczba (np. 'Obsługujemy "
-        f"  ponad 200 sklepów papierniczych w Polsce.'). Tylko jeśli AUTENTYCZNE. "
-        f"  Lepsze null niż wymyślone. NIE WYMYŚLAJ liczb.\n"
-        f"- snippet5: CTA-PYTANIE. Niski wysiłek dla odbiorcy. Np. "
-        f"  'Wysłać dostęp do panelu B2B żeby Pani zerknęła?' albo "
-        f"  'Otworzyłaby się Pani na 10 minut w czwartek po 14?'.\n\n"
-        f"### Cały mail (snippet1+2+3+4?+5) MUSI mieć 70-130 słów. KRÓTKO.\n"
+        f"  Test: jesli zobaczylbys ten subject w skrzynce, otworzylbys bez wahania? "
+        f"  Przyklady mocnych subjectow z Track A flavorze:\n"
+        f"  * 'Produkcja farb pod {lead.company_name} - 35% taniej?'\n"
+        f"  * 'Wlasna marka materialow - mockup na 5 dni?'\n"
+        f"  * 'Wycenicie 500 sztuk plocien pod Wasza marka?'\n"
+        f"  * 'Importujecie sami z Chin czy przez posrednika?'\n"
+        f"- snippet1: pierwsze zdanie/dwa. MUSI nawiazac do konkretnego haka. "
+        f"  Bez 'Dzien dobry', bez 'Szanowni Panstwo'. Zacznij od miesa - "
+        f"  pytania, obserwacji, konkretu z ich strony. Idealnie wciagnij od razu "
+        f"  signal ze zauwazyles ich SKALE/ASORTYMENT/AKTYWNOSC.\n"
+        f"- snippet2: kim jestes - 1 zdanie. KRYTYCZNE: napisz NIE 'mamy "
+        f"  hurtownie' ale 'importujemy bezposrednio z naszych zakontraktowanych "
+        f"  fabryk w Chinach' lub 'produkujemy w Chinach pod marka klienta'. "
+        f"  Ta jedna fraza odroznia nas od kazdej innej oferty co dostali.\n"
+        f"- snippet3: KONKRETNA propozycja:\n"
+        f"  * Dla private_label/both: OPISZ co konkretnie mozemy dla nich "
+        f"    wyprodukowac w Chinach (bazuj na ich asortymencie z hookow). "
+        f"    Konkretne kategorie: 'farby akrylowe pod Wasza marka', "
+        f"    'plotna 30x40 z brandingiem WineArt', 'zestawy startowe DIY w "
+        f"    Waszych kolorach'. Wspomnij MOQ jak pasuje (300-1000). Wspomnij "
+        f"    indywidualna wycene. Wspomnij ze omijaja posrednikow = 30-50% taniej.\n"
+        f"  * Dla 'both': dorzuc 1 zdanie o panel B2B (URL b2b.sowins.pl, "
+        f"    magazyn PL, dostawa 24h, minimum 1000zl + gratis transport) "
+        f"    jako 'a na biezace uzupelnianie braków mamy tez panel B2B'. "
+        f"    NIGDY jako glowna oferta.\n"
+        f"  * Dla pure b2b_panel (RZADKO!): nawet wtedy DORZUC 1 zdanie "
+        f"    'a jak chcielibyscie zbudowac wlasna marke, mozemy tez produkowac "
+        f"    pod Wasza specyfikacje w Chinach - wycenimy chetnie'.\n"
+        f"- snippet4: opcjonalny social proof / liczba. Tylko jesli AUTENTYCZNE. "
+        f"  Lepsze null niz wymyslone. NIE WYMYSLAJ liczb.\n"
+        f"- snippet5: CTA-PYTANIE. Niski wysilek dla odbiorcy. WAZNE: ZADNYCH "
+        f"  PROBEK / SAMPLI / GIFTOW / GRATIS-MOCKUPOW. Nie wysylamy fizycznych "
+        f"  rzeczy w cold mailu - to zostaje bezzwrotnie i konwersja zerowa. "
+        f"  CTA ma byc CZYSTO MAILOWE / TELEFONICZNE / SPOTKANIOWE. Opcje "
+        f"  (wybierz JEDNA, dopasuj do leada):\n"
+        f"  * WYCENA PRODUKCYJNA (najmocniejsze, dla private_label/both):\n"
+        f"    - 'Wyslac wstepna wycene produkcyjna dla Waszych top-3 SKU "
+        f"      pod marka {lead.company_name}?'\n"
+        f"    - 'Mam orientacyjna wycene 500 sztuk farb akrylowych pod "
+        f"      Wasza marke - wyslac do porownania z tym co teraz placicie?'\n"
+        f"    - 'Mozemy wycenic dowolny produkt z Waszej oferty pod Wasza marke "
+        f"      - chcecie zobaczyc dla 2-3 przykladowych SKU jak wychodzi?'\n"
+        f"  * INDYWIDUALNA OFERTA EMAIL:\n"
+        f"    - 'Podeslac mailem zestawienie kategorii ktore moglibysmy "
+        f"      produkowac dla Was w Chinach pod Wasza marke?'\n"
+        f"    - 'Wyslac case study ostatniej realizacji private label "
+        f"      ze sklepem podobnym do Waszego?'\n"
+        f"  * KROTKA ROZMOWA (gdy lead duzo wart):\n"
+        f"    - 'Otworzyloby sie Panstwu 15 minut w czwartek po 14 - "
+        f"      pokaze realizacje private label z ostatniego pol roku?'\n"
+        f"    - 'Krotka rozmowa telefoniczna - 10 minut - pokazac wycene "
+        f"      produkcyjna pod Wasza marke?'\n"
+        f"  * DOSTEP DO PANELU (gdy chcemy zostawic Track B opcje):\n"
+        f"    - 'Wyslac dostep do naszego panelu B2B, zeby porownal Pan/Pani "
+        f"      ceny z tym co teraz placicie u dystrybutora?'\n"
+        f"    - 'Mam tez ofertę z magazynu PL - wyslac link do panelu?'\n"
+        f"  * ZAINTERESOWANIE (najlzejsze, dla niepewnych leadow):\n"
+        f"    - 'Czy temat produkcji pod Wasza marke jest dla Was w ogole "
+        f"      ciekawym kierunkiem? Krotka odpowiedz wystarczy, dopytam.'\n"
+        f"    - 'Interesuje Was import z Chin pod wlasna marke czy raczej "
+        f"      hurt z magazynu PL? Dostosuje co Wam podesle.'\n\n"
+        f"### Cały mail (snippet1+2+3+4?+5) MUSI mieć 80-140 słów. KRÓTKO.\n"
+        f"### KAZDY mail MUSI wspomniec o Chinach / produkcji / private label / "
+        f"imporcie / fabrykach. To nie sugestia, to twardy wymog.\n"
         f"### NIGDY nie używaj długiego myślnika ani średniego myślnika w żadnym snippecie. Tylko zwykły dywiz -.\n"
     )
 
 
-def _suggest_track_hint(segment: str, monthly_volume: str) -> str:
-    """Heuristic suggestion for which sales track suits this lead. The LLM
-    has the final say in offer_track - this is just a starter hint."""
+def _parse_volume_pln(volume_str: str | None) -> int | None:
+    """Wyciagnij DOLNA granica kwoty z estimated_monthly_volume.
+
+    '300-800 PLN'   -> 300
+    '2000+ PLN'     -> 2000
+    '5000-10000'    -> 5000
+    'kilkaset zlotych' / null / nieparsowalne -> None
+    """
+    if not volume_str:
+        return None
+    # Znajdz pierwsza liczbe w stringu (z ewentualnymi tysiacami)
+    m = re.search(r"(\d[\d\s]{1,8})", volume_str)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(" ", ""))
+    except ValueError:
+        return None
+
+
+def _suggest_track_hint(
+    segment: str,
+    monthly_volume: str | None,
+    bulk_potential: float | None,
+    scale: float | None,
+) -> str:
+    """Track suggestion v2 (po feedbacku usera: AI nadal wybiera czysty Track B).
+
+    NOWY DEFAULT: 'private_label' dla wiekszosci leadow. 'both' tylko gdy
+    naprawde widac silny use-case dla Track B (np. paint&sip - konsumpcyjne
+    zuzycie regularne). 'b2b_panel' samodzielny NIGDY nie wybierany przez
+    heurystyke - jak LLM chce, niech sam wymusi z bardzo silnymi sygnalami.
+
+    Filozofia: import z Chin + private label to nasz CORE pitch. Nawet maly
+    sklep moze chciec wlasna marke. Nawet duzy sklep moze chciec wlasna marke.
+    Panel B2B jest "wygoda na biezaco" - drugorzedny zawsze.
+
+    Reguly:
+    1. marka_wlasna -> private_label (oczywiste, z definicji)
+    2. paint_and_sip/warsztaty/animatorzy/szkola -> 'both' (regularne zuzycie
+       konsumpcyjne usprawiedliwia Track B obok produkcji)
+    3. Reszta (sklep_*, marka_wlasna, inne) -> private_label glownie
+    """
     if segment == "marka_wlasna":
-        return "private_label (segment marka_wlasna - default Track A)."
-    if segment in {"sklep_papierniczy", "paint_and_sip", "warsztaty_dzieci",
-                   "animatorzy_eventy", "szkola_artystyczna"}:
-        return f"b2b_panel (segment {segment} - typowo Track B)."
-    if segment == "sklep_plastyczny":
-        # Big shops can go private label, small ones panel B2B.
-        if monthly_volume and any(c in monthly_volume for c in "5+") and "00" in monthly_volume:
-            return (
-                "both (sklep plastyczny z większym wolumenem - można "
-                "zaproponować obie ścieżki)."
-            )
-        return "b2b_panel (sklep plastyczny - default Track B)."
-    return "b2b_panel (default - bezpieczniej zacząć od panelu B2B)."
+        return (
+            "private_label (segment marka_wlasna - z definicji Track A, "
+            "klient juz buduje wlasna marke). "
+            "Track B wspomnij MARGINALNIE 1 zdaniem jako 'a jesli chcecie cos OD REKI "
+            "z magazynu PL do uzupelnienia oferty, mamy tez panel b2b.sowins.pl'."
+        )
+
+    if segment in {"paint_and_sip", "warsztaty_dzieci", "animatorzy_eventy"}:
+        return (
+            f"both - dla segmentu {segment} Track B (panel B2B) ma sens "
+            "(konsumpcyjne zuzycie farb/platen na regularnych wieczorach/warsztatach), "
+            "ALE Track A (private_label) jest tak samo wazny - zestawy startowe "
+            "z ich logo, kartonowe pudelka z brandingiem, gift-boxy dla goscia "
+            "ktory wychodzi z eventu z fizyczna pamiatka. Wymien Track A PIERWSZE, "
+            "Track B jako drugi wariant."
+        )
+
+    if segment == "szkola_artystyczna":
+        return (
+            "private_label glownie. Szkoly to idealny case dla zestawow "
+            "edukacyjnych z logo szkoly + merch dla uczniow/absolwentow. "
+            "Panel B2B mozesz wspomniec marginalnie jako uzupelnienie biezacych "
+            "potrzeb, ale to drugorzedne. NIE odwrotnie."
+        )
+
+    # Sklepy plastyczne, papiernicze, inne - domyslnie private_label glownie.
+    # Sprawdz sygnaly skali - gdy duzo, dorzuc 'both' bo widac ze maja juz
+    # przeplyw towarow z magazynu.
+    vol_pln = _parse_volume_pln(monthly_volume)
+    big_signal = (
+        (bulk_potential is not None and bulk_potential >= 1.5)
+        or (scale is not None and scale >= 1.5)
+        or (vol_pln is not None and vol_pln >= 2000)
+    )
+
+    if big_signal:
+        return (
+            f"both - dla segmentu {segment} z duzym wolumenem "
+            f"(bulk_potential={bulk_potential}, scale={scale}, vol={monthly_volume!r}) "
+            "Track A (private_label, produkcja w Chinach pod ich marka) jest "
+            "GLOWNYM pitchem, Track B (panel B2B z magazynu) drugorzednym "
+            "'na biezaco/uzupelnienie'. Najpierw Chiny, potem magazyn."
+        )
+
+    return (
+        f"private_label - dla segmentu {segment} domyslnie pchamy import z Chin "
+        "+ private label jako GLOWNY pitch. To NASZ core differentiator vs "
+        "polska hurtownia. Panel B2B mozesz dorzucic 1 zdaniem marginalnie "
+        "'a jesli czegos potrzebujecie OD REKI, mamy tez panel z magazynu PL'."
+    )
 
 
 PERSONA_AND_RULES = """\
 ## Kim jesteś
 
-Jesteś polskim handlowcem z 15-letnim doświadczeniem w branży importu z Chin
-i sprzedaży hurtowej do sklepów detalicznych. Dorobiłeś się fortuny bo
-piszesz maile, które ludzie naprawdę otwierają i czytają. Twoja przewaga:
-brzmisz jak człowiek, nie jak generator. Konkret zamiast lania wody.
-Polski biznes znasz od podszewki - wiesz jak rozmawia mały sklep w Łomży,
-a jak właściciel sieci e-commerce w Warszawie. Dopasowujesz ton.
+Jesteś polskim handlowcem z 20-letnim doświadczeniem w branży importu z Chin
+i sprzedaży hurtowej do sklepów detalicznych. Sam zaczynałeś jako mały
+sklepik plastyczny, potem otworzyłeś hurtownię, potem zakontraktowałeś
+fabryki w Chinach. Wiesz JAK wyglądają obie strony. Piszesz maile, ktore
+ludzie otwierają i czytają - bo zaczynasz od ich biznesu, nie od swojego.
+Twoj wlasciciel zwraca uwage na kazdy szczegol - jak brzmi mail, czy nie
+ma typowych AI-tellow, czy odbiorca poczuje ze pisze do niego CZLOWIEK
+a nie generator.
+
+## FILOZOFIA SPRZEDAZY ARTMAKERA (krytyczne)
+
+Mamy dwie sciezki. Track A = IMPORT z Chin + PRODUKCJA pod marka klienta
+(private label). Track B = panel B2B z magazynu PL, dostawa 24h.
+
+**Plan A = Track A. Plan B = Track B. NIE odwrotnie.**
+
+Wiekszosc cold maili w naszej branzy proponuje TYLKO Track B - "kupcie
+od nas hurt, wysylamy". To zostawia 80% wartosci na stole. My idziemy
+inaczej. Sa dwa Powody:
+
+1. **Track A daje wieksze biznes klientowi.** Wlasna marka, kontrola "
+   nad jakoscia i marketingiem, 30-50% nizsze koszty bo omijaja
+   posrednikow. To dla nich PRAWDZIWA strategia rozwoju.
+
+2. **Track A daje wieksza marze nam.** Produkcja pod ich brand = dluga
+   relacja, regularne zamowienia, retencja klienta. Panel B2B to
+   single-transaction zarobek.
+
+Reguly:
+- KAZDY mail MUSI zawierac co najmniej 1 zdanie o produkcji w Chinach
+  / private label / imporcie / fabrykach / wlasnej marce / specyfikacji
+  klienta. Niezaleznie od offer_track. **Bez tej wzmianki mail jest do
+  kosza - to nasz core differentiator.**
+- Domyslnie pchamy private_label jako GLOWNY pitch
+- Track B wymieniamy jako DODATEK 1 zdaniem ('a jak chcecie cos od reki
+  z magazynu, mamy tez panel b2b.sowins.pl')
+- 'both' uzywamy gdy widac sygnaly skali (regularny przeplyw +
+  perspektywa wlasnej marki)
+- 'b2b_panel' samodzielnie - RZADKO, tylko gdy lead ewidentnie maly
+  i nie pasuje do produkcji
+- Marka_wlasna -> WYLACZNIE Track A (ich biznes jest budowanie marki)
+
+Fraza "fabryka swiata" jest dozwolona i polecana - opisuje DOKLADNIE
+co Chiny robia (wszystko, w roznych jakosciach, na zamowienie).
+
+## ZASADY SPRZEDAZOWE - czego NIE robic w cold mailu
+
+- **NIE proponujemy probek/sampli/giftow.** Wysylanie fizycznych rzeczy
+  na cold mail to spalone pieniadze: probka pojdzie, oni nigdy nie odpisza.
+  Probki dopiero gdy klient ZAINTERESOWANY i wymienilismy 2-3 maile.
+- **NIE proponujemy "darmowych mockupow projektowych"** w cold mailu z
+  tego samego powodu (5 dni mojego graphic designera za zero komitmentu).
+- **TAK proponujemy:**
+  - Wstepna WYCENA produkcyjna (email) - tani, daje konkretna liczbe.
+  - INDYWIDUALNA OFERTA emailem - kategorie pasujace do ich biznesu.
+  - KROTKA ROZMOWA telefoniczna / spotkanie (15 min) - dla wartych leadow.
+  - DOSTEP DO PANELU B2B (link) - dla leadow ktore chca tylko hurt-od-reki.
+  - PYTANIE O ZAINTERESOWANIE - najlzejsze, dla leadow niepewnych.
+
+To rozroznia nas od kazdego "hurtownika" co bombarduje katalogiem.
+My pomagamy zbudowac IM marke, oni placa nam za produkcje. To inny
+poziom rozmowy.
 
 ## Twoje zadanie teraz
 
@@ -473,6 +874,15 @@ def generate_draft_for_lead(
         snippet4=_strip_ai_artifacts(payload.snippet4),
         snippet5=_strip_ai_artifacts(payload.snippet5) or payload.snippet5,
     )
+
+    # Hard validation - ostrzezenia po scrub. Na razie tylko logujemy (soft mode);
+    # jak bedzie problem na produkcji mozemy podlaczyc retry na warning != [].
+    warnings = validate_draft(payload)
+    if warnings:
+        for w in warnings:
+            logger.bind(source="generate").warning(
+                f"Draft #lead={lead_id} validation: {w}"
+            )
 
     full_preview = _assemble_preview(payload)
     logger.bind(source="generate").info(

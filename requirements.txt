@@ -1,4 +1,3 @@
-streamlit>=1.40.0
 sqlalchemy>=2.0.36
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
@@ -21,3 +20,11 @@ python-multipart>=0.0.20
 # Security
 slowapi>=0.1.9
 bcrypt>=4.2.0
+# Observability - aktywuje sie gdy SENTRY_DSN ustawione (no-op bez DSN)
+sentry-sdk[fastapi]>=2.18.0
+# Testing (dev tylko, ale w jednym requirements zeby CI mial cooz instalowac)
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+# Migracje DB - Alembic. Zarzadza wersjami schematu, dziala obok init_db()
+# (init_db zostaje jako bootstrap fallback dla dev SQLite).
+alembic>=1.14.0

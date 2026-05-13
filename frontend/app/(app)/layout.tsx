@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
-import { api, clearToken, getToken, logout } from '@/lib/api';
+import { api, clearToken, isAuthenticated, logout } from '@/lib/api';
 
 const HANDLOWIEC_PAGES = [
   { href: '/handlowiec/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
@@ -42,14 +42,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [credits, setCredits] = useState<{ used: number; total: number } | null>(null);
 
   useEffect(() => {
-    if (typeof window !== 'undefined' && !getToken()) {
+    if (typeof window !== 'undefined' && !isAuthenticated()) {
       router.push('/login');
     }
   }, [router]);
 
   // Poll active jobs every 8s (workspace-wide widget)
   useEffect(() => {
-    if (!getToken()) return;
+    if (!isAuthenticated()) return;
     let cancelled = false;
     async function refresh() {
       try {

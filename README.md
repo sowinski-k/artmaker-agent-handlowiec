@@ -138,28 +138,22 @@ lowercase) i sprawdzany przed researchem. Jeśli lead już jest w bazie:
 `save_lead()` w trybie refresh aktualizuje istniejący wpis (research_data,
 score, status, updated_at) zamiast wstawiać nowy.
 
-### Klucze na Streamlit Cloud
+### Klucze na Railway
 
-`.env` jest lokalny i nie wjeżdża do gita. Dla wersji wdrożonej na Streamlit
-Community Cloud trzeba dodać sekrety w panelu aplikacji:
+`.env` jest lokalny i nie wjeżdża do gita. W produkcji ustaw klucze przez
+panel Railway (Service → Variables) dla każdego serwisu osobno (backend,
+worker). Aplikacja czyta je przez `os.getenv` / `pydantic-settings`.
 
-1. share.streamlit.io → Twoja aplikacja → **Settings** → **Secrets**.
-2. Wklej w formacie TOML (możesz oba):
+## Frontend
 
-       ANTHROPIC_API_KEY = "sk-ant-..."
-       GEMINI_API_KEY = "AIza..."
-       # Discovery (opcjonalne, ile chcesz):
-       APIFY_API_TOKEN = "apify_api_..."
-       GOOGLE_PLACES_API_KEY = "AIza..."
+    cd frontend && npm install && npm run dev
 
-Aplikacja zrestartuje się i pobierze sekrety przez `st.secrets`. Status klucza
-(OK / brak) jest widoczny w panelu LLM po lewej.
+Otwiera się na http://localhost:3000. Wymaga zmiennej `BACKEND_URL`
+wskazującej na FastAPI (domyślnie `http://localhost:8000`).
 
-## GUI
+## Backend
 
-    streamlit run gui/app.py
-
-Otwiera się na http://localhost:8501.
+    uvicorn web.main:app --reload --port 8000
 
 ## Moduły agenta
 

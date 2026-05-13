@@ -28,10 +28,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+import asyncio
+import json as _json
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -64,6 +67,7 @@ from web.auth import (
     register_user,
     validate_email,
     verify_password,
+    verify_token,
 )
 from web.jobs_dispatcher import count_active_jobs, create_job, find_active_job, serialize_job
 
@@ -81,10 +85,46 @@ ALLOWED_ORIGINS = ["*"] if _origins_env == "*" else [
 ]
 IS_PROD = os.getenv("RAILWAY_ENVIRONMENT") is not None
 
+# COOKIE_DOMAIN: ustaw na ".twojadomena.pl" zeby cookie bylo shared miedzy
+# app.twojadomena.pl (frontend) i api.twojadomena.pl (backend) - WTEDY
+# mozna uzyc SameSite=Lax (silniejszy niz None) i zrezygnowac z Bearer headera
+# w localStorage. Bez tego (cross-domain railway.app + custom domain frontend)
+# musimy uzywac SameSite=None + Secure - dziala ale slabszy CSRF guard.
+COOKIE_DOMAIN = (os.getenv("COOKIE_DOMAIN") or "").strip() or None
+
+# COOKIE_SAMESITE pozwala wymusic 'lax' / 'strict' jak masz subdomena setup
+# (zob. COOKIE_DOMAIN). Default: 'none' w prod (cross-origin), 'lax' w dev.
+_samesite_env = (os.getenv("COOKIE_SAMESITE") or "").strip().lower()
+COOKIE_SAMESITE = _samesite_env if _samesite_env in {"lax", "strict", "none"} else (
+    "none" if IS_PROD else "lax"
+)
+# Secure musi byc True dla SameSite=None (wymog przegladarki) oraz w prod.
+COOKIE_SECURE = IS_PROD or COOKIE_SAMESITE == "none"
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Pojedynczy helper do ustawiania ciasteczka - uzywany w register/login.
+    Centralizuje flagi zeby logout/set/delete uzywaly tych samych ustawien.
+    """
+    response.set_cookie(
+        key=COOKIE_NAME, value=token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite=COOKIE_SAMESITE,
+        secure=COOKIE_SECURE,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
 limiter = Limiter(key_func=get_remote_address)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ecombinat")
+
+# Sentry init musi byc PRZED app = FastAPI(...) zeby lapal startup errory.
+from core.observability import init_sentry
+init_sentry("web")
 
 
 # ─── App lifespan ────────────────────────────────────────────────────────
@@ -187,6 +227,57 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/_health/worker")
+def worker_health() -> dict[str, Any]:
+    """Sprawdz czy worker zyje - czyta ostatni Event(type='worker.heartbeat').
+
+    Worker pisze heartbeat co 60s (WORKER_HEARTBEAT_INTERVAL). Jak ostatni
+    heartbeat > 120s temu, worker padl albo zawiesil sie. Endpoint public
+    (no auth) zeby latwo monitorowac z zewnatrz (Railway healthcheck,
+    UptimeRobot, prosty cron).
+
+    Status:
+      ok      - heartbeat < 120s (worker zdrowy)
+      warn    - 120-300s (mozliwy zwis, ostrzezenie)
+      down    - >300s LUB brak heartbeatu w ogole
+    """
+    threshold_warn_s = float(os.getenv("WORKER_HEALTH_WARN_S", "120"))
+    threshold_down_s = float(os.getenv("WORKER_HEALTH_DOWN_S", "300"))
+    try:
+        with SessionLocal() as session:
+            last = session.execute(
+                select(Event)
+                .where(Event.type == "worker.heartbeat")
+                .order_by(Event.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+    except Exception as exc:
+        return {"status": "unknown", "error": str(exc)[:200]}
+
+    if last is None:
+        return {"status": "down", "reason": "no heartbeat ever recorded"}
+
+    now = datetime.now(timezone.utc)
+    last_at = last.created_at
+    if last_at.tzinfo is None:
+        last_at = last_at.replace(tzinfo=timezone.utc)
+    age_s = (now - last_at).total_seconds()
+
+    if age_s > threshold_down_s:
+        status_ = "down"
+    elif age_s > threshold_warn_s:
+        status_ = "warn"
+    else:
+        status_ = "ok"
+    return {
+        "status": status_,
+        "last_heartbeat_at": last_at.isoformat(),
+        "age_seconds": round(age_s, 1),
+        "warn_threshold_s": threshold_warn_s,
+        "down_threshold_s": threshold_down_s,
+    }
+
+
 @app.get("/api/_diag")
 def diagnostics() -> dict[str, Any]:
     """Diagnostic endpoint - bezpieczny do public bo NIE leakuje wartosci sekretow.
@@ -242,12 +333,8 @@ def register(request: Request, payload: RegisterIn, response: Response) -> AuthO
             workspace_name=payload.workspace_name,
         )
         token = make_token(user.id, ws.id)
-        # Cookie fallback dla SSR
-        response.set_cookie(
-            key=COOKIE_NAME, value=token,
-            max_age=COOKIE_MAX_AGE, httponly=True,
-            samesite="none" if IS_PROD else "lax", secure=IS_PROD,
-        )
+        # Cookie httpOnly (XSS-safe) - obok Bearer token w response
+        _set_session_cookie(response, token)
         _log_event(ws.id, user.id, "INFO", "auth", "user_registered",
                    f"New user registered: {user.email}")
         return AuthOut(
@@ -308,11 +395,7 @@ def login(request: Request, payload: LoginIn, response: Response) -> AuthOut:
         session.commit()
 
         token = make_token(user.id, ws.id)
-        response.set_cookie(
-            key=COOKIE_NAME, value=token,
-            max_age=COOKIE_MAX_AGE, httponly=True,
-            samesite="none" if IS_PROD else "lax", secure=IS_PROD,
-        )
+        _set_session_cookie(response, token)
         _log_event(ws.id, user.id, "INFO", "auth", "login_ok",
                    f"Login OK for {user.email}")
         return AuthOut(
@@ -327,7 +410,16 @@ def login(request: Request, payload: LoginIn, response: Response) -> AuthOut:
 
 @app.post("/api/auth/logout")
 def logout(response: Response) -> dict[str, bool]:
-    response.delete_cookie(COOKIE_NAME)
+    # WAZNE: delete_cookie musi miec te SAME flagi co set_cookie zeby browser
+    # faktycznie usunal ciasteczko. Bez samesite/secure/domain browser ignoruje delete.
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        samesite=COOKIE_SAMESITE,
+        secure=COOKIE_SECURE,
+        httponly=True,
+        domain=COOKIE_DOMAIN,
+    )
     return {"ok": True}
 
 
@@ -668,12 +760,62 @@ def list_leads(
 
 @app.get("/api/leads/{lead_id}")
 def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Lead detail z draftami i timeline eventow.
+
+    Drafty: lista wszystkich draftow tego leada (zeby drawer mogl pokazac
+    historie + aktualny active draft do klikniecia "Otworz w Drafty").
+    Events: timeline aktywnosci per-lead (uzywa Event.lead_id z migracji 0002).
+    Active jobs: lista RUNNING/PENDING jobow ktore dotycza tego leada (np.
+    generate_draft odpalony z drawera) zeby UI pokazywal "Pracuje..."
+    bez native alert'a.
+    """
     with SessionLocal() as session:
         lead = session.execute(
             select(Lead).where(Lead.id == lead_id, Lead.workspace_id == cur.workspace_id)
         ).scalar_one_or_none()
         if lead is None:
             raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+
+        drafts = session.execute(
+            select(EmailDraft)
+            .where(
+                EmailDraft.lead_id == lead_id,
+                EmailDraft.workspace_id == cur.workspace_id,
+            )
+            .order_by(desc(EmailDraft.created_at))
+        ).scalars().all()
+
+        events = session.execute(
+            select(Event)
+            .where(
+                Event.lead_id == lead_id,
+                Event.workspace_id == cur.workspace_id,
+            )
+            .order_by(desc(Event.created_at))
+            .limit(50)
+        ).scalars().all()
+
+        # Aktywne jobs - filter po payload (lead_id jest w payload JSON).
+        # Dla skali w przyszlosci dodac Job.lead_id kolumne, na razie szukamy
+        # ostatnich 20 jobow workspace'u w pamiec.
+        recent_jobs = session.execute(
+            select(Job)
+            .where(
+                Job.workspace_id == cur.workspace_id,
+                Job.status.in_(["pending", "running"]),
+            )
+            .order_by(desc(Job.created_at)).limit(20)
+        ).scalars().all()
+        active_jobs_for_lead = [
+            {
+                "id": j.id, "type": j.type, "status": j.status,
+                "progress": j.progress, "total": j.total,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+            }
+            for j in recent_jobs
+            if isinstance(j.payload, dict) and j.payload.get("lead_id") == lead_id
+        ]
+
         return {
             "id": lead.id, "segment": lead.segment,
             "company_name": lead.company_name, "contact_name": lead.contact_name,
@@ -684,6 +826,30 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
             "research_data": lead.research_data, "notes": lead.notes,
             "created_at": lead.created_at.isoformat() if lead.created_at else None,
             "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
+            "drafts": [
+                {
+                    "id": d.id,
+                    "subject": d.subject,
+                    "status": d.status,
+                    "template_variant": d.template_variant,
+                    "edited_by_user": d.edited_by_user,
+                    "created_at": d.created_at.isoformat() if d.created_at else None,
+                    "sent_at": d.sent_at.isoformat() if d.sent_at else None,
+                }
+                for d in drafts
+            ],
+            "events": [
+                {
+                    "id": e.id,
+                    "type": e.type,
+                    "level": e.level,
+                    "source": e.source,
+                    "message": e.message,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in events
+            ],
+            "active_jobs": active_jobs_for_lead,
         }
 
 
@@ -694,6 +860,11 @@ def list_drafts(
     status_filter: str | None = "draft", limit: int = 50,
     cur: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
+    """Lista draftow + KONTEKST leada (kontakt, email, segment, miasto, score).
+
+    Frontend potrzebuje tego do email-style header (DO/FIRMA/SCORE), zeby user
+    od razu widzial DO KOGO mail leci, BEZ klikania na lead.
+    """
     limit = max(1, min(limit, 200))
     with SessionLocal() as session:
         q = select(EmailDraft).options(joinedload(EmailDraft.lead)) \
@@ -704,10 +875,18 @@ def list_drafts(
         return [{
             "id": d.id, "lead_id": d.lead_id,
             "company": d.lead.company_name if d.lead else "(unknown)",
+            # KONTEKST leada do header'a maila w UI:
+            "lead_contact_name": d.lead.contact_name if d.lead else None,
+            "lead_email": d.lead.email if d.lead else None,
+            "lead_segment": d.lead.segment if d.lead else None,
+            "lead_city": d.lead.city if d.lead else None,
+            "lead_score": float(d.lead.score) if d.lead and d.lead.score is not None else None,
+            # Sama tresc maila:
             "subject": d.subject, "snippet1": d.snippet1, "snippet2": d.snippet2,
             "snippet3": d.snippet3, "snippet4": d.snippet4, "snippet5": d.snippet5,
             "full_preview": d.full_preview, "status": d.status,
             "template_variant": d.template_variant, "edited_by_user": d.edited_by_user,
+            "generated_by_model": d.generated_by_model,
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "sent_at": d.sent_at.isoformat() if d.sent_at else None,
         } for d in drafts]
@@ -1145,6 +1324,147 @@ def enrich_empty(payload: EnrichEmptyIn, cur: CurrentUser = Depends(get_current_
             },
         )
     return {"ok": True, "job_id": job.id, "candidates": len(candidates)}
+
+
+# ─── SSE stream eventow + jobs ───────────────────────────────────────────
+
+# Tunables
+SSE_POLL_INTERVAL_S = float(os.getenv("SSE_POLL_INTERVAL", "2"))
+SSE_HEARTBEAT_S = float(os.getenv("SSE_HEARTBEAT", "15"))
+SSE_MAX_CONNECTION_S = float(os.getenv("SSE_MAX_CONNECTION", "300"))  # 5min - przegladarka odnowi
+
+
+def _sse_format(event_type: str, data: dict) -> str:
+    """Format Server-Sent Event: type: foo\\ndata: {...}\\n\\n"""
+    return f"event: {event_type}\ndata: {_json.dumps(data, default=str)}\n\n"
+
+
+@app.get("/api/events/stream")
+async def events_stream(
+    request: Request,
+    token: str = Query("", description="Auth token (EventSource nie wspiera headerow). Opcjonalny - cookie fallback dziala tez."),
+):
+    """Server-Sent Events: live stream nowych eventow + zmian jobow per workspace.
+
+    Frontend uzywa zamiast pollingu jobs/events co 2-8s. EventSource w browser
+    nie wspiera customowych headerow, dlatego token leci albo jako query param
+    (Bearer mode) albo automatycznie z cookie (cookie mode - browser sam dolacza).
+
+    Strumien emituje:
+      event: event     -> nowy wpis w Event table (research done, draft gen, etc.)
+      event: job       -> zmiana statusu Joba (pending->running->done/failed)
+      event: heartbeat -> co SSE_HEARTBEAT_S sekund (zeby proxy nie ucial)
+
+    Jak SSE pad (proxy, mobile background), frontend wraca do pollingu.
+    Auto-close po SSE_MAX_CONNECTION_S sekundach - przegladarka sama otworzy nowy.
+    """
+    # Auth: najpierw query token (Bearer mode), potem cookie (cookie-only mode)
+    auth_token = token or request.cookies.get(COOKIE_NAME, "")
+    payload = verify_token(auth_token) if auth_token else None
+    if not payload:
+        raise HTTPException(status_code=401, detail="Brak autoryzacji.")
+    ws_id = payload.get("workspace_id")
+    if not ws_id:
+        raise HTTPException(status_code=401, detail="Workspace nie wybrany.")
+
+    async def gen():
+        # Start od najnowszego znanego ID - nie spamujemy historii.
+        last_event_id = 0
+        # Job statuses w pamieci - emitujemy "job" event tylko na zmiane.
+        job_states: dict[int, str] = {}
+        try:
+            with SessionLocal() as session:
+                last_row = session.execute(
+                    select(Event.id).where(Event.workspace_id == ws_id)
+                    .order_by(desc(Event.id)).limit(1)
+                ).scalar_one_or_none()
+                last_event_id = int(last_row or 0)
+                # Wstepny snapshot aktywnych jobow
+                active = session.execute(
+                    select(Job).where(
+                        Job.workspace_id == ws_id,
+                        Job.status.in_(["pending", "running"]),
+                    )
+                ).scalars().all()
+                for j in active:
+                    job_states[j.id] = j.status
+                    yield _sse_format("job", {
+                        "id": j.id, "type": j.type, "status": j.status,
+                        "progress": j.progress, "total": j.total,
+                    })
+
+            yield _sse_format("ready", {"last_event_id": last_event_id})
+
+            start_ts = asyncio.get_event_loop().time()
+            last_heartbeat = start_ts
+            while True:
+                # Klient sie rozlaczyl
+                if await request.is_disconnected():
+                    break
+                # Limit czasu polaczenia (zeby zlap proxy timeouty + browser auto-recover)
+                now = asyncio.get_event_loop().time()
+                if now - start_ts > SSE_MAX_CONNECTION_S:
+                    yield _sse_format("reconnect", {"reason": "max-connection-age"})
+                    break
+
+                # Pobierz nowe eventy + sprawdz zmiany jobow
+                with SessionLocal() as session:
+                    new_events = session.execute(
+                        select(Event)
+                        .where(Event.workspace_id == ws_id, Event.id > last_event_id)
+                        .order_by(Event.id.asc()).limit(50)
+                    ).scalars().all()
+                    for e in new_events:
+                        last_event_id = e.id
+                        yield _sse_format("event", {
+                            "id": e.id,
+                            "type": e.type,
+                            "level": e.level,
+                            "source": e.source,
+                            "message": e.message,
+                            "lead_id": e.lead_id,
+                            "created_at": e.created_at.isoformat() if e.created_at else None,
+                        })
+                    # Snapshot biezacych jobow workspace'u
+                    current_jobs = session.execute(
+                        select(Job).where(Job.workspace_id == ws_id)
+                        .order_by(desc(Job.id)).limit(20)
+                    ).scalars().all()
+                    seen_ids = set()
+                    for j in current_jobs:
+                        seen_ids.add(j.id)
+                        prev = job_states.get(j.id)
+                        # Emituj jak nowy ALBO zmiana statusu/progresu
+                        if prev != j.status or j.status in ("pending", "running"):
+                            job_states[j.id] = j.status
+                            yield _sse_format("job", {
+                                "id": j.id, "type": j.type, "status": j.status,
+                                "progress": j.progress, "total": j.total,
+                            })
+                    # Posprzataj job_states dla nieobecnych (mogly byc starsze niz limit)
+                    for stale_id in list(job_states.keys()):
+                        if stale_id not in seen_ids:
+                            del job_states[stale_id]
+
+                # Heartbeat (zeby proxy / load balancer nie ucial idle)
+                if now - last_heartbeat >= SSE_HEARTBEAT_S:
+                    last_heartbeat = now
+                    yield _sse_format("heartbeat", {"t": now})
+
+                await asyncio.sleep(SSE_POLL_INTERVAL_S)
+        except asyncio.CancelledError:
+            # Klient rozlaczyl sie - normalne zakonczenie
+            pass
+        except Exception as exc:
+            log.exception(f"SSE stream error for ws={ws_id}: {exc}")
+            yield _sse_format("error", {"detail": str(exc)[:200]})
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # Nginx: nie buforuj
+    }
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 # ─── Jobs polling ────────────────────────────────────────────────────────

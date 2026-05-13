@@ -38,6 +38,10 @@ POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL", "5"))
 JOB_TIMEOUT_S = float(os.getenv("JOB_TIMEOUT", "1800"))  # 30 min hard limit
 MAX_RETRIES = int(os.getenv("JOB_MAX_RETRIES", "3"))
 PATROL_TICK_S = float(os.getenv("PATROL_TICK_INTERVAL", "60"))  # check patrols co 60s
+HEARTBEAT_S = float(os.getenv("WORKER_HEARTBEAT_INTERVAL", "60"))  # heartbeat co 60s
+
+from core.observability import init_sentry
+init_sentry("worker")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,10 +64,13 @@ signal.signal(signal.SIGTERM, _handle_shutdown)
 
 # ─── Job handlers ────────────────────────────────────────────────────────
 
-def _log_event(session: Session, workspace_id: int, level: str, type_: str, msg: str) -> None:
+def _log_event(
+    session: Session, workspace_id: int, level: str, type_: str, msg: str,
+    lead_id: int | None = None,
+) -> None:
     session.add(Event(
         workspace_id=workspace_id, type=type_, level=level,
-        source="worker", message=msg[:1000],
+        source="worker", message=msg[:1000], lead_id=lead_id,
     ))
 
 
@@ -362,12 +369,18 @@ def handle_bulk_enrich_leads(session: Session, job: Job) -> dict:
 def handle_generate_draft(session: Session, job: Job) -> dict:
     from agent.generate import generate_draft_for_lead
     p = job.payload
+    lead_id = p["lead_id"]
+    _log_event(session, job.workspace_id, "INFO", "draft.generating",
+               f"Generuje draft dla lead #{lead_id}...", lead_id=lead_id)
+    session.commit()  # widoczne w timeline od razu
     draft_id = generate_draft_for_lead(
-        p["lead_id"],
+        lead_id,
         provider=p.get("provider"), model=p.get("model"),
         workspace_id=job.workspace_id,
     )
-    return {"draft_id": draft_id}
+    _log_event(session, job.workspace_id, "INFO", "draft.generated",
+               f"Draft #{draft_id} wygenerowany.", lead_id=lead_id)
+    return {"draft_id": draft_id, "lead_id": lead_id}
 
 
 def handle_bulk_generate_drafts(session: Session, job: Job) -> dict:
@@ -643,11 +656,35 @@ def _patrol_tick() -> int:
     return triggered
 
 
+def _heartbeat() -> None:
+    """Zapisz "pulse" do tabeli Event - pozwala backendowi sprawdzic czy worker zyje.
+
+    workspace_id=NULL (system-level event, nie nalezy do zadnego workspace -
+    FK jest nullable w schemie). Backend filtruje Event.type='worker.heartbeat'
+    przy /api/_health/worker - jak ostatni heartbeat > 2 min temu, worker padl.
+    """
+    try:
+        with SessionLocal() as session:
+            session.add(Event(
+                workspace_id=None,
+                type="worker.heartbeat",
+                level="INFO",
+                source="worker",
+                message="alive",
+                payload={"poll_interval": POLL_INTERVAL_S, "max_retries": MAX_RETRIES},
+            ))
+            session.commit()
+    except Exception as exc:
+        log.warning(f"Heartbeat failed (non-fatal): {exc}")
+
+
 def loop_forever() -> None:
     log.info(f"Worker starting (poll interval {POLL_INTERVAL_S}s, max retries {MAX_RETRIES})")
     init_db()
     _recover_zombie_jobs()
+    _heartbeat()  # initial heartbeat zaraz po starcie
     last_patrol_tick = 0.0
+    last_heartbeat = time.time()
     while not _shutdown:
         try:
             # Patrol tick co PATROL_TICK_S - tworzy nowe DISCOVERY_PIPELINE
@@ -656,6 +693,9 @@ def loop_forever() -> None:
             if now_ts - last_patrol_tick >= PATROL_TICK_S:
                 last_patrol_tick = now_ts
                 _patrol_tick()
+            if now_ts - last_heartbeat >= HEARTBEAT_S:
+                last_heartbeat = now_ts
+                _heartbeat()
 
             # Wyciagamy tylko pola ktorych potrzebujemy POZA scope sesji,
             # zeby nie miec DetachedInstanceError gdy session.close() rozlaczy obiekt.

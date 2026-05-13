@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { api, getToken } from '@/lib/api';
+import { api, isAuthenticated } from '@/lib/api';
 
 interface Patrol {
   id: number;
@@ -86,7 +86,7 @@ export default function PatrolPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       router.push('/login');
       return;
     }
@@ -219,7 +219,31 @@ export default function PatrolPage() {
         </div>
 
         {loading ? (
-          <div className="empty">Ładowanie...</div>
+          <div className="patrols-list">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="patrol-card on">
+                <div className="pc-head">
+                  <div className="pc-name" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <span className="skel skel-circle" />
+                    <span className="skel skel-line-lg skel-w-200" />
+                    <span className="skel skel-pill" />
+                  </div>
+                  <div className="pc-actions" style={{ display: 'flex', gap: 8 }}>
+                    <span className="skel skel-circle" />
+                    <span className="skel skel-circle" />
+                    <span className="skel skel-circle" />
+                    <span className="skel skel-circle" />
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, padding: 16 }}>
+                  <span className="skel skel-line" />
+                  <span className="skel skel-line" />
+                  <span className="skel skel-line" />
+                  <span className="skel skel-line" />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : patrols.length === 0 ? (
           <div className="empty-card">
             <i className="ti ti-radar-2" />

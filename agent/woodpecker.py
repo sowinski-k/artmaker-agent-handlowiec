@@ -36,16 +36,7 @@ _last_request_at: float = 0.0
 
 
 def _resolve_key() -> str:
-    """Sprawdź env (lokalnie) i Streamlit secrets (Streamlit Cloud)."""
-    if settings.woodpecker_api_key:
-        return settings.woodpecker_api_key
-    try:
-        import streamlit as st  # type: ignore[import-not-found]
-        if hasattr(st, "secrets") and "WOODPECKER_API_KEY" in st.secrets:
-            return str(st.secrets["WOODPECKER_API_KEY"])
-    except Exception:
-        pass
-    return ""
+    return settings.woodpecker_api_key or ""
 
 
 def has_woodpecker_key() -> bool:
