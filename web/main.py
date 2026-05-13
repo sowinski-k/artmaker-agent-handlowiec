@@ -124,6 +124,7 @@ log = logging.getLogger("ecombinat")
 
 # Sentry init musi byc PRZED app = FastAPI(...) zeby lapal startup errory.
 from core.observability import init_sentry
+from core.serialize import iso_utc
 init_sentry("web")
 
 
@@ -271,7 +272,7 @@ def worker_health() -> dict[str, Any]:
         status_ = "ok"
     return {
         "status": status_,
-        "last_heartbeat_at": last_at.isoformat(),
+        "last_heartbeat_at": iso_utc(last_at),
         "age_seconds": round(age_s, 1),
         "warn_threshold_s": threshold_warn_s,
         "down_threshold_s": threshold_down_s,
@@ -807,7 +808,7 @@ def list_leads(
             "contact_name": l.contact_name, "email": l.email, "phone": l.phone,
             "website": l.website, "city": l.city, "status": l.status,
             "score": float(l.score) if l.score is not None else None,
-            "created_at": l.created_at.isoformat() if l.created_at else None,
+            "created_at": iso_utc(l.created_at),
             "drafts_count": drafts_info.get(l.id, {}).get("count", 0),
             "latest_draft_status": drafts_info.get(l.id, {}).get("latest_status"),
         } for l in rows]
@@ -866,7 +867,7 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
             {
                 "id": j.id, "type": j.type, "status": j.status,
                 "progress": j.progress, "total": j.total,
-                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "created_at": iso_utc(j.created_at),
             }
             for j in recent_jobs
             if isinstance(j.payload, dict) and j.payload.get("lead_id") == lead_id
@@ -880,8 +881,8 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
             "status": lead.status,
             "score": float(lead.score) if lead.score is not None else None,
             "research_data": lead.research_data, "notes": lead.notes,
-            "created_at": lead.created_at.isoformat() if lead.created_at else None,
-            "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
+            "created_at": iso_utc(lead.created_at),
+            "updated_at": iso_utc(lead.updated_at),
             "drafts": [
                 {
                     "id": d.id,
@@ -889,8 +890,8 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
                     "status": d.status,
                     "template_variant": d.template_variant,
                     "edited_by_user": d.edited_by_user,
-                    "created_at": d.created_at.isoformat() if d.created_at else None,
-                    "sent_at": d.sent_at.isoformat() if d.sent_at else None,
+                    "created_at": iso_utc(d.created_at),
+                    "sent_at": iso_utc(d.sent_at),
                 }
                 for d in drafts
             ],
@@ -901,7 +902,7 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
                     "level": e.level,
                     "source": e.source,
                     "message": e.message,
-                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                    "created_at": iso_utc(e.created_at),
                 }
                 for e in events
             ],
@@ -943,8 +944,8 @@ def list_drafts(
             "full_preview": d.full_preview, "status": d.status,
             "template_variant": d.template_variant, "edited_by_user": d.edited_by_user,
             "generated_by_model": d.generated_by_model,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-            "sent_at": d.sent_at.isoformat() if d.sent_at else None,
+            "created_at": iso_utc(d.created_at),
+            "sent_at": iso_utc(d.sent_at),
         } for d in drafts]
 
 
@@ -1575,7 +1576,7 @@ async def events_stream(
                             "source": e.source,
                             "message": e.message,
                             "lead_id": e.lead_id,
-                            "created_at": e.created_at.isoformat() if e.created_at else None,
+                            "created_at": iso_utc(e.created_at),
                         })
                     # Snapshot biezacych jobow workspace'u
                     current_jobs = session.execute(
@@ -1690,9 +1691,9 @@ def _serialize_patrol(p: PatrolSchedule) -> dict[str, Any]:
         "auto_draft_threshold": p.auto_draft_threshold,
         "runs_today": p.runs_today, "total_runs": p.total_runs,
         "total_leads_found": p.total_leads_found,
-        "last_run_at": p.last_run_at.isoformat() if p.last_run_at else None,
-        "next_run_at": p.next_run_at.isoformat() if p.next_run_at else None,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "last_run_at": iso_utc(p.last_run_at),
+        "next_run_at": iso_utc(p.next_run_at),
+        "created_at": iso_utc(p.created_at),
     }
 
 

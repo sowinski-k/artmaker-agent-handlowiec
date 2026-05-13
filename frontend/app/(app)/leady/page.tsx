@@ -626,25 +626,46 @@ export default function LeadyPage() {
                   <div className="empty-mini">Brak draftow. Wygeneruj ponizej.</div>
                 ) : (
                   <div className="draft-list">
-                    {detail.drafts.map((d) => (
-                      <a
-                        key={d.id}
-                        href={`/drafty?open=${d.id}`}
-                        className={`draft-chip status-${d.status}`}
-                        onClick={(e) => {
-                          // Pozwol Ctrl-klik otworzyc w nowej karcie, ale single-click w SPA
-                          if (!e.metaKey && !e.ctrlKey) {
-                            e.preventDefault();
-                            router.push(`/drafty?open=${d.id}`);
-                          }
-                        }}
-                      >
-                        <span className="dc-id">#{d.id}</span>
-                        <span className="dc-subject">{d.subject || '(bez tematu)'}</span>
-                        <span className={`status-badge status-${d.status}`}>{d.status}</span>
-                        {d.edited_by_user && <span className="dc-edited" title="Edytowany rocznie">✏️</span>}
-                      </a>
-                    ))}
+                    {detail.drafts.map((d) => {
+                      const isRejected = d.status === 'rejected';
+                      // Rejected drafty: nieklikalne, wizualnie przekreslone -
+                      // /drafty domyslnie filtruje status=draft, klik prowadzilby
+                      // do pustej strony "brak draftow" - mylace.
+                      if (isRejected) {
+                        return (
+                          <div
+                            key={d.id}
+                            className="draft-chip status-rejected"
+                            title="Draft odrzucony - nie wysyla sie. Mozesz wygenerowac nowy nizej."
+                          >
+                            <span className="dc-id">#{d.id}</span>
+                            <span className="dc-subject dc-strikethrough">
+                              {d.subject || '(bez tematu)'}
+                            </span>
+                            <span className="status-badge status-rejected">rejected</span>
+                            {d.edited_by_user && <span className="dc-edited">edytowany</span>}
+                          </div>
+                        );
+                      }
+                      return (
+                        <a
+                          key={d.id}
+                          href={`/drafty?open=${d.id}`}
+                          className={`draft-chip status-${d.status}`}
+                          onClick={(e) => {
+                            if (!e.metaKey && !e.ctrlKey) {
+                              e.preventDefault();
+                              router.push(`/drafty?open=${d.id}`);
+                            }
+                          }}
+                        >
+                          <span className="dc-id">#{d.id}</span>
+                          <span className="dc-subject">{d.subject || '(bez tematu)'}</span>
+                          <span className={`status-badge status-${d.status}`}>{d.status}</span>
+                          {d.edited_by_user && <span className="dc-edited" title="Edytowany ręcznie">edytowany</span>}
+                        </a>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -934,7 +955,18 @@ table.tbl .row-check input[type="checkbox"] {
 /* Drafty chip list */
 .draft-list { display: flex; flex-direction: column; gap: 6px; }
 .draft-chip { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #E5E7EB; border-radius: 8px; text-decoration: none; color: #111; transition: border-color 0.15s, background 0.15s; cursor: pointer; }
-.draft-chip:hover { border-color: #D4212C; background: #FDECED; }
+.draft-chip:not(.status-rejected):hover { border-color: #D4212C; background: #FDECED; }
+.draft-chip.status-rejected {
+  cursor: default;
+  background: #FAFAF7;
+  border-color: #F3F4F6;
+  opacity: 0.7;
+}
+.draft-chip.status-rejected:hover { background: #FAFAF7; border-color: #F3F4F6; }
+.dc-strikethrough {
+  text-decoration: line-through;
+  color: #6B7280;
+}
 .dc-id { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9CA3AF; font-weight: 600; min-width: 30px; }
 .dc-subject { flex: 1; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dc-edited { font-size: 12px; opacity: 0.7; }
