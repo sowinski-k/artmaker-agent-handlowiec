@@ -19,7 +19,14 @@ interface LeadRow {
   created_at: string | null;
   drafts_count: number;
   latest_draft_status: string | null;
+  active_job_type: string | null;
 }
+
+const JOB_LABEL: Record<string, string> = {
+  generate_draft: 'Pisze maila',
+  enrich_lead: 'Szuka kontaktu',
+  research_lead: 'Sprawdza firmę',
+};
 
 interface DraftLite {
   id: number;
@@ -89,7 +96,8 @@ export default function LeadyPage() {
   const [minScore, setMinScore] = useState(0);
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
-  const [sort, setSort] = useState('score');
+  // Default 'newest' - swieze leady na gorze, najczestszy use case po pozyskiwaniu
+  const [sort, setSort] = useState('newest');
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<LeadDetail | null>(null);
   // Bulk selection
@@ -158,6 +166,27 @@ export default function LeadyPage() {
   }
 
   useEffect(() => { void load(); /* eslint-disable-next-line */ }, [segment, status, minScore, search, sort]);
+
+  // Auto-refresh listy CO 3s gdy chocaby 1 lead ma active_job_type
+  // (cichy refresh - bez setLoading, zeby tabela nie migotala). Daje
+  // poczucie ze indykatory aktualizuja sie 'live'. Jak nie ma zadnych
+  // running jobow, polling stoi (zero load na backend).
+  useEffect(() => {
+    const hasActive = leads.some(l => l.active_job_type !== null);
+    if (!hasActive) return;
+    const t = setInterval(() => {
+      // Silent refresh - nie ruszamy loading state'a (no skeleton flash)
+      const params = new URLSearchParams({ limit: '100', sort });
+      if (segment) params.set('segment', segment);
+      if (status) params.set('status', status);
+      if (minScore > 0) params.set('min_score', String(minScore));
+      if (search.trim()) params.set('q', search.trim());
+      api<LeadsResponse>(`/api/leads?${params}`)
+        .then((res) => { setLeads(res.items); setTotal(res.total); })
+        .catch(() => {/* network glitch - probuj dalej */});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [leads, segment, status, minScore, search, sort]);
 
   // Bulk selection helpers
   const eligibleForBulk = leads.filter(
@@ -333,6 +362,28 @@ export default function LeadyPage() {
       } catch {
         /* network glitch - probuj dalej */
       }
+    }
+  }
+
+  async function deleteLead() {
+    if (!detail) return;
+    const ok = window.confirm(
+      `Usunąć lead "${detail.company_name}" (#${detail.id})?\n\n` +
+      `Operacja nieodwracalna - usuwa też wszystkie drafty (${detail.drafts.length}) ` +
+      `i historię tego leada.`
+    );
+    if (!ok) return;
+    try {
+      await api(`/api/leads/${detail.id}`, { method: 'DELETE' });
+      setFlash({ kind: 'success', text: `Lead "${detail.company_name}" usunięty.` });
+      setSelectedId(null);
+      setDetail(null);
+      await load();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie usunac',
+      });
     }
   }
 
@@ -666,7 +717,18 @@ export default function LeadyPage() {
                       </td>
                       <td className="num">{scoreBadge(l.score)}</td>
                       <td>
-                        <strong>{l.company_name}</strong>
+                        <div className="firma-cell">
+                          <strong>{l.company_name}</strong>
+                          {l.active_job_type && (
+                            <span
+                              className="working-pill"
+                              title={`Agent ${JOB_LABEL[l.active_job_type] || l.active_job_type}... (klik = otwórz drawer)`}
+                            >
+                              <span className="wp-dot" />
+                              {JOB_LABEL[l.active_job_type] || 'Pracuje'}
+                            </span>
+                          )}
+                        </div>
                         {l.contact_name && <div className="contact-sub">{l.contact_name}</div>}
                       </td>
                       <td><span className="seg-badge">{l.segment}</span></td>
@@ -1053,6 +1115,15 @@ export default function LeadyPage() {
                       Brak emaila i brak strony - nie da się tu nic zrobić automatycznie.
                     </span>
                   )}
+
+                  {/* Destrukcyjna akcja - na samym dole, dyskretna */}
+                  <button
+                    className="btn-delete-lead"
+                    onClick={deleteLead}
+                    title="Usuń lead z bazy (nieodwracalne)"
+                  >
+                    <i className="ti ti-trash" /> Usuń lead z bazy
+                  </button>
                 </div>
               </div>
             )}
@@ -1213,6 +1284,33 @@ table.tbl .row-check input[type="checkbox"] {
   width: 16px; height: 16px; cursor: pointer; accent-color: #D4212C;
 }
 .contact-sub { font-size: 11.5px; color: #6B7280; margin-top: 1px; }
+
+/* Wiersz tabeli z aktywnym jobem - badge "Pracuje" obok nazwy */
+.firma-cell {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.working-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px 2px 7px;
+  background: #FDECED;
+  border: 1px solid #FCA5A5;
+  border-radius: 11px;
+  font-size: 10.5px; font-weight: 600;
+  color: #8F1018;
+  font-family: 'JetBrains Mono', monospace;
+  cursor: help;
+  animation: working-pulse 2s ease-in-out infinite;
+}
+.wp-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #D4212C;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes working-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212,33,44,0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(212,33,44,0.15); }
+}
 .muted { color: #9CA3AF; }
 .email-cell { color: #4B5563; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
 
@@ -1462,4 +1560,21 @@ table.tbl .row-check input[type="checkbox"] {
 }
 .btn-secondary:hover { background: #FAFAF7; border-color: #D1D5DB; }
 .btn-secondary i { font-size: 14px; color: #D4212C; }
+
+/* Destrukcyjna akcja - dyskretna, ale wyraznie czerwona przy hover */
+.btn-delete-lead {
+  margin-top: 16px;
+  padding: 6px 10px;
+  background: none; border: 1px solid #F3F4F6;
+  border-radius: 6px;
+  color: #9CA3AF; font-size: 11.5px;
+  cursor: pointer; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 5px;
+  align-self: flex-start;
+  transition: all 0.15s;
+}
+.btn-delete-lead i { font-size: 13px; }
+.btn-delete-lead:hover {
+  background: #FEE2E2; border-color: #FCA5A5; color: #991B1B;
+}
 `;
