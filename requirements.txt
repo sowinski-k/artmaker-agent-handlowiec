@@ -20,3 +20,5 @@ python-multipart>=0.0.20
 # Security
 slowapi>=0.1.9
 bcrypt>=4.2.0
+# Observability - aktywuje sie gdy SENTRY_DSN ustawione (no-op bez DSN)
+sentry-sdk[fastapi]>=2.18.0

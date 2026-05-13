@@ -86,6 +86,10 @@ limiter = Limiter(key_func=get_remote_address)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ecombinat")
 
+# Sentry init musi byc PRZED app = FastAPI(...) zeby lapal startup errory.
+from core.observability import init_sentry
+init_sentry("web")
+
 
 # ─── App lifespan ────────────────────────────────────────────────────────
 
@@ -185,6 +189,57 @@ def root() -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/_health/worker")
+def worker_health() -> dict[str, Any]:
+    """Sprawdz czy worker zyje - czyta ostatni Event(type='worker.heartbeat').
+
+    Worker pisze heartbeat co 60s (WORKER_HEARTBEAT_INTERVAL). Jak ostatni
+    heartbeat > 120s temu, worker padl albo zawiesil sie. Endpoint public
+    (no auth) zeby latwo monitorowac z zewnatrz (Railway healthcheck,
+    UptimeRobot, prosty cron).
+
+    Status:
+      ok      - heartbeat < 120s (worker zdrowy)
+      warn    - 120-300s (mozliwy zwis, ostrzezenie)
+      down    - >300s LUB brak heartbeatu w ogole
+    """
+    threshold_warn_s = float(os.getenv("WORKER_HEALTH_WARN_S", "120"))
+    threshold_down_s = float(os.getenv("WORKER_HEALTH_DOWN_S", "300"))
+    try:
+        with SessionLocal() as session:
+            last = session.execute(
+                select(Event)
+                .where(Event.type == "worker.heartbeat")
+                .order_by(Event.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+    except Exception as exc:
+        return {"status": "unknown", "error": str(exc)[:200]}
+
+    if last is None:
+        return {"status": "down", "reason": "no heartbeat ever recorded"}
+
+    now = datetime.now(timezone.utc)
+    last_at = last.created_at
+    if last_at.tzinfo is None:
+        last_at = last_at.replace(tzinfo=timezone.utc)
+    age_s = (now - last_at).total_seconds()
+
+    if age_s > threshold_down_s:
+        status_ = "down"
+    elif age_s > threshold_warn_s:
+        status_ = "warn"
+    else:
+        status_ = "ok"
+    return {
+        "status": status_,
+        "last_heartbeat_at": last_at.isoformat(),
+        "age_seconds": round(age_s, 1),
+        "warn_threshold_s": threshold_warn_s,
+        "down_threshold_s": threshold_down_s,
+    }
 
 
 @app.get("/api/_diag")
