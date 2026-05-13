@@ -10,6 +10,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { ThemeToggle } from '@/lib/ThemeToggle';
+import { UserMenu } from '@/lib/UserMenu';
 import Loading from './loading';
 
 interface DashboardData {
@@ -107,22 +109,20 @@ export default function PulpitPage() {
     <>
       <style dangerouslySetInnerHTML={{ __html: PULPIT_CSS }} />
 
-      {/* TOPBAR */}
+      {/* TOPBAR - czysty, bez no-op buttonow.
+          Search/+/?/Bell wywalone bo brak funkcji. Zostaje:
+          - Crumb (kontekst)
+          - ThemeToggle (light/auto/dark - prawdziwa funkcja)
+          - UserMenu avatar -> dropdown z linkiem do /ustawienia + logout */}
       <div className="topbar">
         <div className="crumb">
           <strong>Handlowiec</strong>
           <i className="ti ti-chevron-right"></i>
           Pulpit
         </div>
-        <div className="search">
-          <i className="ti ti-search"></i>
-          Szukaj leadów, kampanii, ustawień…
-          <span className="kbd">⌘K</span>
-        </div>
-        <button className="topbtn" title="Nowy projekt"><i className="ti ti-plus"></i></button>
-        <button className="topbtn" title="Powiadomienia"><i className="ti ti-bell"></i><span className="dot"></span></button>
-        <button className="topbtn" title="Pomoc"><i className="ti ti-help"></i></button>
-        <div className="avatar">EC</div>
+        <div className="topbar-spacer" />
+        <ThemeToggle compact />
+        <UserMenu />
       </div>
 
       <div className="content">
@@ -436,6 +436,7 @@ const PULPIT_CSS = `
 .crumb { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .crumb strong { color: var(--ink); font-weight: 500; }
 .crumb i { font-size: 12px; color: var(--muted-2); }
+.topbar-spacer { flex: 1; }
 .search {
   margin-left: auto;
   display: flex; align-items: center; gap: 8px;

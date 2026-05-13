@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
 import { api, clearToken, isAuthenticated, logout } from '@/lib/api';
+import { initTheme } from '@/lib/theme';
 
 const HANDLOWIEC_PAGES = [
   { href: '/handlowiec/pulpit', icon: 'layout-dashboard', label: 'Pulpit' },
@@ -46,6 +47,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       router.push('/login');
     }
   }, [router]);
+
+  // Init dark/light theme z localStorage (raz na mount). Auto-update gdy
+  // user zmieni 'system' w OS-level prefers-color-scheme.
+  useEffect(() => initTheme(), []);
 
   // Poll active jobs every 8s (workspace-wide widget)
   useEffect(() => {
@@ -163,6 +168,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           )}
 
           <div className="sb-foot">
+            <Link
+              href="/ustawienia"
+              className={`sb-item sb-item-foot ${pathname === '/ustawienia' ? 'active' : ''}`}
+            >
+              <i className="ti ti-settings"></i>
+              <span className="sb-label">Ustawienia</span>
+            </Link>
             <div className="sb-foot-row">
               Kredyty
               <strong>{credits?.used ?? 0} / {credits?.total ?? 100}</strong>
