@@ -18,7 +18,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
-import { api, getToken } from '@/lib/api';
+import { api, isAuthenticated } from '@/lib/api';
 
 interface DiscoveredPlace {
   source: string;
@@ -99,7 +99,7 @@ export default function PozyskiwaniePage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       router.push('/login');
       return;
     }

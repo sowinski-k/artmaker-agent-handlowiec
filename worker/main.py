@@ -64,10 +64,13 @@ signal.signal(signal.SIGTERM, _handle_shutdown)
 
 # ─── Job handlers ────────────────────────────────────────────────────────
 
-def _log_event(session: Session, workspace_id: int, level: str, type_: str, msg: str) -> None:
+def _log_event(
+    session: Session, workspace_id: int, level: str, type_: str, msg: str,
+    lead_id: int | None = None,
+) -> None:
     session.add(Event(
         workspace_id=workspace_id, type=type_, level=level,
-        source="worker", message=msg[:1000],
+        source="worker", message=msg[:1000], lead_id=lead_id,
     ))
 
 
@@ -366,12 +369,18 @@ def handle_bulk_enrich_leads(session: Session, job: Job) -> dict:
 def handle_generate_draft(session: Session, job: Job) -> dict:
     from agent.generate import generate_draft_for_lead
     p = job.payload
+    lead_id = p["lead_id"]
+    _log_event(session, job.workspace_id, "INFO", "draft.generating",
+               f"Generuje draft dla lead #{lead_id}...", lead_id=lead_id)
+    session.commit()  # widoczne w timeline od razu
     draft_id = generate_draft_for_lead(
-        p["lead_id"],
+        lead_id,
         provider=p.get("provider"), model=p.get("model"),
         workspace_id=job.workspace_id,
     )
-    return {"draft_id": draft_id}
+    _log_event(session, job.workspace_id, "INFO", "draft.generated",
+               f"Draft #{draft_id} wygenerowany.", lead_id=lead_id)
+    return {"draft_id": draft_id, "lead_id": lead_id}
 
 
 def handle_bulk_generate_drafts(session: Session, job: Job) -> dict:

@@ -85,6 +85,38 @@ ALLOWED_ORIGINS = ["*"] if _origins_env == "*" else [
 ]
 IS_PROD = os.getenv("RAILWAY_ENVIRONMENT") is not None
 
+# COOKIE_DOMAIN: ustaw na ".twojadomena.pl" zeby cookie bylo shared miedzy
+# app.twojadomena.pl (frontend) i api.twojadomena.pl (backend) - WTEDY
+# mozna uzyc SameSite=Lax (silniejszy niz None) i zrezygnowac z Bearer headera
+# w localStorage. Bez tego (cross-domain railway.app + custom domain frontend)
+# musimy uzywac SameSite=None + Secure - dziala ale slabszy CSRF guard.
+COOKIE_DOMAIN = (os.getenv("COOKIE_DOMAIN") or "").strip() or None
+
+# COOKIE_SAMESITE pozwala wymusic 'lax' / 'strict' jak masz subdomena setup
+# (zob. COOKIE_DOMAIN). Default: 'none' w prod (cross-origin), 'lax' w dev.
+_samesite_env = (os.getenv("COOKIE_SAMESITE") or "").strip().lower()
+COOKIE_SAMESITE = _samesite_env if _samesite_env in {"lax", "strict", "none"} else (
+    "none" if IS_PROD else "lax"
+)
+# Secure musi byc True dla SameSite=None (wymog przegladarki) oraz w prod.
+COOKIE_SECURE = IS_PROD or COOKIE_SAMESITE == "none"
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Pojedynczy helper do ustawiania ciasteczka - uzywany w register/login.
+    Centralizuje flagi zeby logout/set/delete uzywaly tych samych ustawien.
+    """
+    response.set_cookie(
+        key=COOKIE_NAME, value=token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite=COOKIE_SAMESITE,
+        secure=COOKIE_SECURE,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
 limiter = Limiter(key_func=get_remote_address)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -301,12 +333,8 @@ def register(request: Request, payload: RegisterIn, response: Response) -> AuthO
             workspace_name=payload.workspace_name,
         )
         token = make_token(user.id, ws.id)
-        # Cookie fallback dla SSR
-        response.set_cookie(
-            key=COOKIE_NAME, value=token,
-            max_age=COOKIE_MAX_AGE, httponly=True,
-            samesite="none" if IS_PROD else "lax", secure=IS_PROD,
-        )
+        # Cookie httpOnly (XSS-safe) - obok Bearer token w response
+        _set_session_cookie(response, token)
         _log_event(ws.id, user.id, "INFO", "auth", "user_registered",
                    f"New user registered: {user.email}")
         return AuthOut(
@@ -367,11 +395,7 @@ def login(request: Request, payload: LoginIn, response: Response) -> AuthOut:
         session.commit()
 
         token = make_token(user.id, ws.id)
-        response.set_cookie(
-            key=COOKIE_NAME, value=token,
-            max_age=COOKIE_MAX_AGE, httponly=True,
-            samesite="none" if IS_PROD else "lax", secure=IS_PROD,
-        )
+        _set_session_cookie(response, token)
         _log_event(ws.id, user.id, "INFO", "auth", "login_ok",
                    f"Login OK for {user.email}")
         return AuthOut(
@@ -386,7 +410,16 @@ def login(request: Request, payload: LoginIn, response: Response) -> AuthOut:
 
 @app.post("/api/auth/logout")
 def logout(response: Response) -> dict[str, bool]:
-    response.delete_cookie(COOKIE_NAME)
+    # WAZNE: delete_cookie musi miec te SAME flagi co set_cookie zeby browser
+    # faktycznie usunal ciasteczko. Bez samesite/secure/domain browser ignoruje delete.
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        samesite=COOKIE_SAMESITE,
+        secure=COOKIE_SECURE,
+        httponly=True,
+        domain=COOKIE_DOMAIN,
+    )
     return {"ok": True}
 
 
@@ -727,12 +760,62 @@ def list_leads(
 
 @app.get("/api/leads/{lead_id}")
 def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Lead detail z draftami i timeline eventow.
+
+    Drafty: lista wszystkich draftow tego leada (zeby drawer mogl pokazac
+    historie + aktualny active draft do klikniecia "Otworz w Drafty").
+    Events: timeline aktywnosci per-lead (uzywa Event.lead_id z migracji 0002).
+    Active jobs: lista RUNNING/PENDING jobow ktore dotycza tego leada (np.
+    generate_draft odpalony z drawera) zeby UI pokazywal "Pracuje..."
+    bez native alert'a.
+    """
     with SessionLocal() as session:
         lead = session.execute(
             select(Lead).where(Lead.id == lead_id, Lead.workspace_id == cur.workspace_id)
         ).scalar_one_or_none()
         if lead is None:
             raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+
+        drafts = session.execute(
+            select(EmailDraft)
+            .where(
+                EmailDraft.lead_id == lead_id,
+                EmailDraft.workspace_id == cur.workspace_id,
+            )
+            .order_by(desc(EmailDraft.created_at))
+        ).scalars().all()
+
+        events = session.execute(
+            select(Event)
+            .where(
+                Event.lead_id == lead_id,
+                Event.workspace_id == cur.workspace_id,
+            )
+            .order_by(desc(Event.created_at))
+            .limit(50)
+        ).scalars().all()
+
+        # Aktywne jobs - filter po payload (lead_id jest w payload JSON).
+        # Dla skali w przyszlosci dodac Job.lead_id kolumne, na razie szukamy
+        # ostatnich 20 jobow workspace'u w pamiec.
+        recent_jobs = session.execute(
+            select(Job)
+            .where(
+                Job.workspace_id == cur.workspace_id,
+                Job.status.in_(["pending", "running"]),
+            )
+            .order_by(desc(Job.created_at)).limit(20)
+        ).scalars().all()
+        active_jobs_for_lead = [
+            {
+                "id": j.id, "type": j.type, "status": j.status,
+                "progress": j.progress, "total": j.total,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+            }
+            for j in recent_jobs
+            if isinstance(j.payload, dict) and j.payload.get("lead_id") == lead_id
+        ]
+
         return {
             "id": lead.id, "segment": lead.segment,
             "company_name": lead.company_name, "contact_name": lead.contact_name,
@@ -743,6 +826,30 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
             "research_data": lead.research_data, "notes": lead.notes,
             "created_at": lead.created_at.isoformat() if lead.created_at else None,
             "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
+            "drafts": [
+                {
+                    "id": d.id,
+                    "subject": d.subject,
+                    "status": d.status,
+                    "template_variant": d.template_variant,
+                    "edited_by_user": d.edited_by_user,
+                    "created_at": d.created_at.isoformat() if d.created_at else None,
+                    "sent_at": d.sent_at.isoformat() if d.sent_at else None,
+                }
+                for d in drafts
+            ],
+            "events": [
+                {
+                    "id": e.id,
+                    "type": e.type,
+                    "level": e.level,
+                    "source": e.source,
+                    "message": e.message,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in events
+            ],
+            "active_jobs": active_jobs_for_lead,
         }
 
 
@@ -1222,12 +1329,13 @@ def _sse_format(event_type: str, data: dict) -> str:
 @app.get("/api/events/stream")
 async def events_stream(
     request: Request,
-    token: str = Query("", description="Auth token (EventSource nie wspiera headerow)"),
+    token: str = Query("", description="Auth token (EventSource nie wspiera headerow). Opcjonalny - cookie fallback dziala tez."),
 ):
     """Server-Sent Events: live stream nowych eventow + zmian jobow per workspace.
 
     Frontend uzywa zamiast pollingu jobs/events co 2-8s. EventSource w browser
-    nie wspiera customowych headerow, dlatego token leci jako query param.
+    nie wspiera customowych headerow, dlatego token leci albo jako query param
+    (Bearer mode) albo automatycznie z cookie (cookie mode - browser sam dolacza).
 
     Strumien emituje:
       event: event     -> nowy wpis w Event table (research done, draft gen, etc.)
@@ -1237,8 +1345,9 @@ async def events_stream(
     Jak SSE pad (proxy, mobile background), frontend wraca do pollingu.
     Auto-close po SSE_MAX_CONNECTION_S sekundach - przegladarka sama otworzy nowy.
     """
-    # Auth via query param (Bearer headers nie dziala w EventSource)
-    payload = verify_token(token) if token else None
+    # Auth: najpierw query token (Bearer mode), potem cookie (cookie-only mode)
+    auth_token = token or request.cookies.get(COOKIE_NAME, "")
+    payload = verify_token(auth_token) if auth_token else None
     if not payload:
         raise HTTPException(status_code=401, detail="Brak autoryzacji.")
     ws_id = payload.get("workspace_id")

@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { api, getToken } from '@/lib/api';
+import { api, isAuthenticated } from '@/lib/api';
 
 interface LeadRow {
   id: number;
@@ -19,12 +19,43 @@ interface LeadRow {
   created_at: string | null;
 }
 
+interface DraftLite {
+  id: number;
+  subject: string | null;
+  status: string;
+  template_variant: string | null;
+  edited_by_user: boolean;
+  created_at: string | null;
+  sent_at: string | null;
+}
+
+interface EventLite {
+  id: number;
+  type: string;
+  level: string;
+  source: string | null;
+  message: string;
+  created_at: string | null;
+}
+
+interface ActiveJobLite {
+  id: number;
+  type: string;
+  status: string;
+  progress: number;
+  total: number;
+  created_at: string | null;
+}
+
 interface LeadDetail extends LeadRow {
   instagram: string | null;
   country: string;
   research_data: Record<string, unknown> | null;
   notes: string | null;
   updated_at: string | null;
+  drafts: DraftLite[];
+  events: EventLite[];
+  active_jobs: ActiveJobLite[];
 }
 
 interface LeadsResponse {
@@ -36,6 +67,8 @@ const STATUSES = ['', 'new', 'researched', 'drafted', 'approved', 'sent', 'repli
 const SEGMENTS = ['', 'sklep_plastyczny', 'sklep_papierniczy', 'paint_and_sip', 'warsztaty_dzieci',
   'animatorzy_eventy', 'szkola_artystyczna', 'marka_wlasna', 'inne'];
 
+type DraftFlash = { kind: 'success' | 'error' | 'info'; text: string; draftId?: number };
+
 export default function LeadyPage() {
   const router = useRouter();
   const [leads, setLeads] = useState<LeadRow[]>([]);
@@ -46,10 +79,15 @@ export default function LeadyPage() {
   const [minScore, setMinScore] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<LeadDetail | null>(null);
-  const [generating, setGenerating] = useState(false);
+  // Draft generation state - w drawerze, nie native alert
+  const [draftJobId, setDraftJobId] = useState<number | null>(null);
+  const [draftJobStatus, setDraftJobStatus] = useState<string | null>(null);
+  const [draftFlash, setDraftFlash] = useState<DraftFlash | null>(null);
+  // Ref do anulowania pollingu jak user zmienia drawer / unmount
+  const pollAbortRef = useRef<{ cancelled: boolean } | null>(null);
 
   useEffect(() => {
-    if (!getToken()) router.push('/login');
+    if (!isAuthenticated()) router.push('/login');
   }, [router]);
 
   async function load() {
@@ -71,55 +109,117 @@ export default function LeadyPage() {
 
   useEffect(() => { void load(); /* eslint-disable-next-line */ }, [segment, status, minScore]);
 
-  async function openDetail(id: number) {
-    setSelectedId(id);
-    setDetail(null);
+  async function refreshDetail(id: number) {
     try {
       const d = await api<LeadDetail>(`/api/leads/${id}`);
       setDetail(d);
+      // Wykryj aktywny generate_draft job - jak jest, polluj dla statusu
+      const activeDraftJob = d.active_jobs.find((j) => j.type === 'generate_draft');
+      if (activeDraftJob && draftJobId !== activeDraftJob.id) {
+        setDraftJobId(activeDraftJob.id);
+        setDraftJobStatus(activeDraftJob.status);
+        void pollDraftJob(activeDraftJob.id, id);
+      }
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd');
+      console.error(err);
+    }
+  }
+
+  async function openDetail(id: number) {
+    // Reset draft state przy zmianie leada
+    if (pollAbortRef.current) pollAbortRef.current.cancelled = true;
+    setDraftFlash(null);
+    setDraftJobId(null);
+    setDraftJobStatus(null);
+    setSelectedId(id);
+    setDetail(null);
+    await refreshDetail(id);
+  }
+
+  /**
+   * Polling job statusu w tle. Aktualizuje drawer (refreshDetail) gdy
+   * job zmienia state. User moze zamknac okno - polling zostanie anulowany,
+   * ale BACKEND nadal pracuje (Worker process). Po powrocie userowi
+   * drawer od nowa wykryje active_job albo gotowy draft.
+   */
+  async function pollDraftJob(jobId: number, leadId: number) {
+    const ctrl = { cancelled: false };
+    pollAbortRef.current = ctrl;
+    const maxWaitMs = 120_000;
+    const start = Date.now();
+    while (!ctrl.cancelled && Date.now() - start < maxWaitMs) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (ctrl.cancelled) return;
+      try {
+        const job = await api<{ status: string; result: { draft_id?: number } | null; last_error?: string }>(
+          `/api/jobs/${jobId}`
+        );
+        setDraftJobStatus(job.status);
+        if (job.status === 'done') {
+          const draftId = job.result?.draft_id;
+          setDraftFlash({
+            kind: 'success',
+            text: 'Draft wygenerowany - kliknij zeby otworzyc.',
+            draftId,
+          });
+          setDraftJobId(null);
+          // Auto-refresh: drawer + tabela
+          await refreshDetail(leadId);
+          await load();
+          return;
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          setDraftFlash({
+            kind: 'error',
+            text: `Generacja nieudana (${job.status}): ${job.last_error || 'unknown'}`,
+          });
+          setDraftJobId(null);
+          return;
+        }
+      } catch {
+        /* network glitch - probuj dalej */
+      }
     }
   }
 
   async function generateDraft(leadId: number) {
-    setGenerating(true);
+    setDraftFlash(null);
     try {
       const res = await api<{ ok: boolean; job_id: number }>('/api/drafts', {
         method: 'POST',
         body: JSON.stringify({ lead_id: leadId }),
       });
-      // Job utworzony - worker generuje draft async (~20-40s). Polluj az done.
-      const jobId = res.job_id;
-      const maxWaitMs = 90_000;  // 90s hard limit
-      const start = Date.now();
-      let lastStatus = 'pending';
-      while (Date.now() - start < maxWaitMs) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const job = await api<{ status: string; result: { draft_id?: number } | null; last_error?: string }>(
-            `/api/jobs/${jobId}`
-          );
-          lastStatus = job.status;
-          if (job.status === 'done') {
-            const draftId = job.result?.draft_id;
-            alert(`✅ Draft #${draftId ?? '?'} wygenerowany. Zobacz w Drafty.`);
-            return;
-          }
-          if (job.status === 'failed' || job.status === 'cancelled') {
-            alert(`❌ Draft NIE wygenerowany (status: ${job.status}). ${job.last_error || ''}`);
-            return;
-          }
-        } catch {
-          /* network glitch, poll again */
-        }
-      }
-      alert(`⏳ Draft jeszcze sie generuje (job #${jobId}, status: ${lastStatus}). Sprawdz /drafty za chwile.`);
+      setDraftJobId(res.job_id);
+      setDraftJobStatus('pending');
+      setDraftFlash({ kind: 'info', text: 'Draft zlecony - agent pracuje w tle. Mozesz zamknac okno.' });
+      void pollDraftJob(res.job_id, leadId);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd');
-    } finally {
-      setGenerating(false);
+      setDraftFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie zlecic generacji',
+      });
     }
+  }
+
+  // Cleanup polling przy odmontowaniu komponentu (np. nawigacja)
+  useEffect(() => {
+    return () => {
+      if (pollAbortRef.current) pollAbortRef.current.cancelled = true;
+    };
+  }, []);
+
+  function formatTimeAgo(iso: string): string {
+    const t = new Date(iso).getTime();
+    const diff = Math.max(0, Date.now() - t);
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return `${sec}s temu`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min} min temu`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h temu`;
+    const day = Math.floor(hr / 24);
+    if (day < 30) return `${day} dni temu`;
+    return new Date(iso).toLocaleDateString('pl-PL');
   }
 
   const scoreBadge = (s: number | null) => {
@@ -268,7 +368,7 @@ export default function LeadyPage() {
 
                 {detail.research_data && (
                   <>
-                    <h3 style={{ marginTop: 20, marginBottom: 8 }}>Research</h3>
+                    <h3 className="section-h">Research</h3>
                     {(detail.research_data as { rationale?: string }).rationale && (
                       <p style={{ fontSize: 13, color: '#374151', marginBottom: 12 }}>
                         {(detail.research_data as { rationale: string }).rationale}
@@ -284,18 +384,127 @@ export default function LeadyPage() {
                         </ul>
                       </div>
                     )}
+                    {(detail.research_data as { estimated_monthly_volume?: string }).estimated_monthly_volume && (
+                      <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 4 }}>
+                        <strong>Szac. wolumen B2B:</strong>{' '}
+                        <span style={{ color: '#111' }}>
+                          {(detail.research_data as { estimated_monthly_volume: string }).estimated_monthly_volume}
+                        </span>
+                      </div>
+                    )}
+                    {Array.isArray((detail.research_data as { warning_flags?: string[] }).warning_flags) &&
+                      (detail.research_data as { warning_flags: string[] }).warning_flags.length > 0 && (
+                      <div className="warn-box">
+                        <strong>Czerwone flagi:</strong>
+                        <ul style={{ marginTop: 4, paddingLeft: 16 }}>
+                          {(detail.research_data as { warning_flags: string[] }).warning_flags.map((w, i) => (
+                            <li key={i}>{w}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* DRAFTY tego leada - klikalne, prowadza do /drafty z highlightem */}
+                <h3 className="section-h">
+                  Drafty <span style={{ color: '#9CA3AF', fontWeight: 400 }}>({detail.drafts.length})</span>
+                </h3>
+                {detail.drafts.length === 0 ? (
+                  <div className="empty-mini">Brak draftow. Wygeneruj ponizej.</div>
+                ) : (
+                  <div className="draft-list">
+                    {detail.drafts.map((d) => (
+                      <a
+                        key={d.id}
+                        href={`/drafty?open=${d.id}`}
+                        className={`draft-chip status-${d.status}`}
+                        onClick={(e) => {
+                          // Pozwol Ctrl-klik otworzyc w nowej karcie, ale single-click w SPA
+                          if (!e.metaKey && !e.ctrlKey) {
+                            e.preventDefault();
+                            router.push(`/drafty?open=${d.id}`);
+                          }
+                        }}
+                      >
+                        <span className="dc-id">#{d.id}</span>
+                        <span className="dc-subject">{d.subject || '(bez tematu)'}</span>
+                        <span className={`status-badge status-${d.status}`}>{d.status}</span>
+                        {d.edited_by_user && <span className="dc-edited" title="Edytowany rocznie">✏️</span>}
+                      </a>
+                    ))}
+                  </div>
+                )}
+
+                {/* TIMELINE aktywnosci - z Event table per lead_id */}
+                {detail.events.length > 0 && (
+                  <>
+                    <h3 className="section-h">Historia</h3>
+                    <ol className="timeline">
+                      {detail.events.map((e) => (
+                        <li key={e.id} className={`tl-item level-${e.level.toLowerCase()}`}>
+                          <span className="tl-dot" />
+                          <div className="tl-body">
+                            <div className="tl-msg">{e.message}</div>
+                            <div className="tl-meta">
+                              <span className="tl-type">{e.type}</span>
+                              {e.created_at && (
+                                <span className="tl-time">{formatTimeAgo(e.created_at)}</span>
+                              )}
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
                   </>
                 )}
 
                 <div className="drawer-actions">
-                  {detail.status === 'researched' && detail.email && (
-                    <button className="btn btn-primary" onClick={() => generateDraft(detail.id)} disabled={generating}>
-                      {generating ? 'Generuję…' : '✉️ Generuj draft maila'}
+                  {/* Inline flash zamiast native alert */}
+                  {draftFlash && (
+                    <div className={`flash flash-${draftFlash.kind}`}>
+                      {draftFlash.kind === 'success' && <span>✅</span>}
+                      {draftFlash.kind === 'error' && <span>❌</span>}
+                      {draftFlash.kind === 'info' && <span>⏳</span>}
+                      <span style={{ flex: 1 }}>{draftFlash.text}</span>
+                      {draftFlash.draftId && (
+                        <button
+                          className="btn btn-link"
+                          onClick={() => router.push(`/drafty?open=${draftFlash.draftId}`)}
+                        >
+                          Otworz
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Pracuje w tle - widac progress + status, mozna zamknac okno */}
+                  {draftJobId !== null && (
+                    <div className="job-progress">
+                      <div className="jp-spinner" />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>
+                          Agent generuje draft <span className="mono" style={{ color: '#6B7280' }}>#{draftJobId}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: '#6B7280' }}>
+                          Status: <strong>{draftJobStatus || 'pending'}</strong>. Pracuje w tle - mozesz zamknac okno, status pojawi sie w Drafty.
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {detail.status !== 'sent' && detail.status !== 'replied' && detail.email && draftJobId === null && (
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => generateDraft(detail.id)}
+                    >
+                      <i className="ti ti-mail-plus" />{' '}
+                      {detail.drafts.length > 0 ? 'Generuj kolejny draft' : 'Generuj draft maila'}
                     </button>
                   )}
                   {!detail.email && (
                     <span style={{ fontSize: 13, color: '#8F1018' }}>
-                      Brak emaila - nie można wysłać maila do tego leada.
+                      Brak emaila - nie mozna wyslac maila do tego leada.
                     </span>
                   )}
                 </div>
@@ -364,9 +573,53 @@ table.tbl tr:hover td { background: #FAFAF7; }
 .kv .k { color: #6B7280; text-transform: uppercase; font-size: 11px; letter-spacing: 0.8px; font-weight: 500; padding-top: 2px; }
 .kv .v { color: #111; }
 
-.drawer-actions { margin-top: 24px; padding-top: 20px; border-top: 1px solid #E5E7EB; display: flex; gap: 8px; align-items: center; }
+.drawer-actions { margin-top: 24px; padding-top: 20px; border-top: 1px solid #E5E7EB; display: flex; flex-direction: column; gap: 12px; }
 .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; font-family: inherit; }
 .btn-primary { background: #D4212C; color: #fff; }
 .btn-primary:hover:not(:disabled) { background: #8F1018; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-link { background: none; color: #D4212C; border: 1px solid #D4212C; padding: 4px 10px; font-size: 12px; font-weight: 500; border-radius: 6px; }
+.btn-link:hover { background: #FDECED; }
+
+/* Section headers inside drawer */
+.section-h { font-size: 13px; font-weight: 600; color: #111; margin: 24px 0 10px; padding-top: 16px; border-top: 1px solid #F3F4F6; text-transform: uppercase; letter-spacing: 0.6px; }
+.empty-mini { font-size: 12px; color: #9CA3AF; padding: 8px 12px; background: #FAFAF7; border-radius: 6px; }
+
+/* Drafty chip list */
+.draft-list { display: flex; flex-direction: column; gap: 6px; }
+.draft-chip { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #E5E7EB; border-radius: 8px; text-decoration: none; color: #111; transition: border-color 0.15s, background 0.15s; cursor: pointer; }
+.draft-chip:hover { border-color: #D4212C; background: #FDECED; }
+.dc-id { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9CA3AF; font-weight: 600; min-width: 30px; }
+.dc-subject { flex: 1; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-edited { font-size: 12px; opacity: 0.7; }
+
+/* Timeline (Event historia) */
+.timeline { list-style: none; padding: 0; margin: 0; position: relative; }
+.timeline::before { content: ''; position: absolute; left: 6px; top: 4px; bottom: 4px; width: 2px; background: #E5E7EB; }
+.tl-item { display: flex; gap: 12px; padding: 6px 0; position: relative; }
+.tl-dot { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #9CA3AF; flex-shrink: 0; margin-top: 4px; position: relative; z-index: 1; }
+.tl-item.level-info .tl-dot { border-color: #4338CA; }
+.tl-item.level-warning .tl-dot { border-color: #C2410C; background: #FFF7ED; }
+.tl-item.level-error .tl-dot { border-color: #8F1018; background: #FDECED; }
+.tl-body { flex: 1; min-width: 0; }
+.tl-msg { font-size: 13px; color: #111; line-height: 1.4; }
+.tl-meta { font-size: 11px; color: #9CA3AF; display: flex; gap: 8px; margin-top: 2px; }
+.tl-type { font-family: 'JetBrains Mono', monospace; }
+.tl-time { font-family: 'JetBrains Mono', monospace; }
+
+/* Inline flash (zamiast alert) */
+.flash { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.4; }
+.flash-success { background: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
+.flash-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+.flash-info { background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE; }
+
+/* Background job progress widget */
+.job-progress { display: flex; align-items: center; gap: 14px; padding: 12px 14px; background: #FAFAF7; border: 1px solid #E5E7EB; border-radius: 8px; }
+.jp-spinner { width: 22px; height: 22px; border: 3px solid #E5E7EB; border-top-color: #D4212C; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Warning box dla research warning_flags */
+.warn-box { background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #9A3412; margin-bottom: 12px; }
+
+.mono { font-family: 'JetBrains Mono', monospace; }
 `;

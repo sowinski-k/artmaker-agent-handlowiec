@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { api, getToken } from '@/lib/api';
+import { api, isAuthenticated } from '@/lib/api';
 
 interface Draft {
   id: number;
@@ -49,7 +49,7 @@ export default function DraftyPage() {
   const [regenerating, setRegenerating] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!getToken()) router.push('/login');
+    if (!isAuthenticated()) router.push('/login');
   }, [router]);
 
   async function load() {

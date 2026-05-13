@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { api, getToken } from '@/lib/api';
+import { api, isAuthenticated } from '@/lib/api';
 import Loading from './loading';
 
 interface DashboardData {
@@ -46,7 +46,7 @@ export default function PulpitPage() {
 
   useEffect(() => {
     // Auth gate - bez tokena redirect na login
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       router.push('/login');
       return;
     }

@@ -1,13 +1,31 @@
 /* Ecombinat API client - same-origin fetches przez Next.js proxy.
  *
- * Multi-tenant auth: rejestracja + login (email + hasło), token Bearer
- * w localStorage. Każdy request leci z Authorization header, backend
- * sprawdza token i filter'uje wszystko by workspace_id.
+ * Multi-tenant auth: rejestracja + login (email + hasło). Dwa tryby:
+ *
+ *   1) Bearer (default) - token w localStorage + Authorization header.
+ *      Dziala cross-origin (np. Railway frontend.up.railway.app + backend.up).
+ *      Wada: localStorage jest XSS-vulnerable.
+ *
+ *   2) Cookie-only - backend ustawia httpOnly cookie przy login (juz robi).
+ *      Frontend NIE czyta tokena, NIE wysyla Authorization, polega na cookie.
+ *      Browser sam dolaczy cookie do kazdego requestu (credentials: 'include').
+ *      Wymaga: subdomenowy setup (COOKIE_DOMAIN .twojadomena.pl po stronie
+ *      backendu) zeby SameSite=Lax dzialal cross-subdomain.
+ *
+ * Tryb wybierany przez NEXT_PUBLIC_AUTH_MODE: 'bearer' (default) | 'cookie'.
+ * Backend zawsze akceptuje OBA - mozemy w bezpiecznie przelaczyc na produkcji
+ * po wpieciu subdomenowego DNS, bez wymuszania na useraach re-login.
  */
 
 const TOKEN_KEY = 'ecombinat_token';
 const USER_KEY = 'ecombinat_user';
 const WORKSPACE_KEY = 'ecombinat_workspace';
+
+// 'bearer' albo 'cookie'. Bezpieczniejszy: 'cookie' (po subdomenowym setupie).
+const AUTH_MODE: 'bearer' | 'cookie' =
+  (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_AUTH_MODE === 'cookie')
+    ? 'cookie'
+    : 'bearer';
 
 export interface UserInfo {
   id: number;
@@ -28,6 +46,26 @@ export interface WorkspaceInfo {
 export function getToken(): string | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem(TOKEN_KEY);
+}
+
+/**
+ * Czy user jest (prawdopodobnie) zalogowany?
+ *
+ * Bearer mode: sprawdza czy token jest w localStorage
+ * Cookie mode: localStorage nie ma tokena, ale ma USER_KEY cache jak user
+ *   sie zalogowal - to nie jest 100% gwarancja (cookie moglo wygasnac),
+ *   ale wystarczy dla auth gate w UI. 401 z API i tak wyrzuci na login.
+ */
+export function isAuthenticated(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (AUTH_MODE === 'cookie') {
+    return localStorage.getItem(USER_KEY) !== null;
+  }
+  return localStorage.getItem(TOKEN_KEY) !== null;
+}
+
+export function getAuthMode(): 'bearer' | 'cookie' {
+  return AUTH_MODE;
 }
 
 export function setToken(token: string): void {
@@ -56,7 +94,12 @@ export function getCachedWorkspace(): WorkspaceInfo | null {
 
 function _saveSession(token: string, user: UserInfo, workspace: WorkspaceInfo): void {
   if (typeof window === 'undefined') return;
-  localStorage.setItem(TOKEN_KEY, token);
+  // W trybie cookie-only nie chcemy DUPLIKOWAC tokena w localStorage (XSS risk).
+  // Cookie httpOnly jest jedynym storem. User/workspace cache zostaje zeby UI
+  // mogl renderowac bez auth/me round-trip.
+  if (AUTH_MODE === 'bearer') {
+    localStorage.setItem(TOKEN_KEY, token);
+  }
   localStorage.setItem(USER_KEY, JSON.stringify(user));
   localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspace));
 }
@@ -67,7 +110,10 @@ interface ApiOptions extends RequestInit {
 
 export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
   const { noAuth, headers, ...rest } = opts;
-  const token = noAuth ? null : getToken();
+  // W trybie cookie-only NIE wysylamy Bearer headera - polegamy na httpOnly
+  // cookie ustawionym przez backend przy login. credentials: 'include' nizej
+  // dolacza cookie automatycznie.
+  const token = (noAuth || AUTH_MODE === 'cookie') ? null : getToken();
   const url = path.startsWith('/') ? path : '/' + path;
 
   const res = await fetch(url, {
