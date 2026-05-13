@@ -219,6 +219,12 @@ class Event(Base):
         ForeignKey("workspaces.id"), index=True, nullable=True,
     )
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # lead_id - dla szybkiego timeline per-lead (klik na lead -> historia).
+    # Bez tej kolumny trzeba bylo szukac po payload JSON co jest wolne na
+    # Postgres bez funkcjonalnego indeksu.
+    lead_id: Mapped[int | None] = mapped_column(
+        ForeignKey("leads.id"), nullable=True, index=True,
+    )
     type: Mapped[str] = mapped_column(String(100), index=True)
     level: Mapped[str] = mapped_column(String(20), default="INFO", index=True)
     source: Mapped[str | None] = mapped_column(String(50))
@@ -385,6 +391,7 @@ def _migrate_workspace_columns() -> None:
         ("email_drafts", "edited_by_user", "BOOLEAN DEFAULT FALSE" if is_pg else "INTEGER DEFAULT 0"),
         ("events", "workspace_id", "INTEGER"),
         ("events", "user_id", "INTEGER"),
+        ("events", "lead_id", "INTEGER"),
         ("events", "payload", "JSON" if is_pg else "TEXT"),
     ]
     added = 0
@@ -414,6 +421,8 @@ def _migrate_workspace_columns() -> None:
         # Draft lists
         ("ix_drafts_workspace_status_created", "email_drafts", "(workspace_id, status, created_at)"),
         ("ix_email_drafts_created_at", "email_drafts", "(created_at)"),
+        # Event timeline per-lead
+        ("ix_events_lead_id", "events", "(lead_id)"),
     ]
     idx_added = 0
     for idx_name, table, cols in indexes_to_create:
