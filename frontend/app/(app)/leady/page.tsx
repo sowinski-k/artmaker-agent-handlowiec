@@ -774,11 +774,15 @@ const CSS = `
 .btn-link-sm { background: none; border: none; color: #D4212C; font-size: 12px; font-weight: 500; cursor: pointer; font-family: inherit; padding: 4px 8px; border-radius: 4px; }
 .btn-link-sm:hover { background: #FDECED; }
 
-/* TOOLBAR (search + filters + sort) */
+/* TOOLBAR (search + filters + sort) - STICKY przy scroll w dol */
+/* top: 52px = wysokosc topbar (sticky nad nim) */
 .toolbar {
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   background: #fff; border: 1px solid #E5E7EB; border-radius: 8px;
   padding: 10px 12px; margin-bottom: 12px;
+  position: sticky; top: 52px; z-index: 9;
+  /* Subtle shadow gdy scroll - pokazuje ze element jest "nad" listing'iem */
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
 }
 .search-box {
   position: relative; flex: 1; min-width: 280px;
@@ -822,11 +826,15 @@ const CSS = `
 .tb-score input[type="range"] { width: 100%; height: 4px; }
 
 /* BULK ACTIONS bar */
+/* BULK BAR - sticky tuz pod toolbar gdy zaznaczone */
 .bulk-bar {
   display: flex; gap: 12px; align-items: center;
   background: #FDECED; border: 1px solid #FCA5A5; border-radius: 8px;
   padding: 10px 14px; margin-bottom: 12px;
   animation: slideDown 0.2s ease-out;
+  /* top dopasowane do toolbar height + margin */
+  position: sticky; top: 124px; z-index: 8;
+  box-shadow: 0 2px 8px rgba(212,33,44,0.08);
 }
 .bulk-info {
   display: flex; align-items: center; gap: 8px;

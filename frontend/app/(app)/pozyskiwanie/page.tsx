@@ -64,14 +64,84 @@ const SEGMENTS = [
   'inne',
 ];
 
-const SOURCES = [
-  { key: 'google_places', label: 'Google Places' },
-  { key: 'apify', label: 'Apify Google Maps' },
-  { key: 'apify_allegro', label: 'Apify Allegro' },
-  { key: 'apify_linkedin', label: 'Apify LinkedIn' },
+// Polskie etykiety segmentow + krotkie opisy do helper tekstu
+const SEGMENT_INFO: Record<string, { label: string; desc: string }> = {
+  sklep_plastyczny: { label: 'Sklep plastyczny', desc: 'Sklepy z farbami, plotnami, sztalugami - retail.' },
+  sklep_papierniczy: { label: 'Sklep papierniczy', desc: 'Papier, biuro, szkolne, ozdobne, scrapbooking.' },
+  paint_and_sip: { label: 'Paint & sip', desc: 'Studia malowania z winem dla doroslych.' },
+  warsztaty_dzieci: { label: 'Warsztaty dzieci', desc: 'Pracownie kreatywne, animacje urodzin.' },
+  animatorzy_eventy: { label: 'Animatorzy / eventy', desc: 'Firmy eventowe organizujace zajecia kreatywne.' },
+  szkola_artystyczna: { label: 'Szkola artystyczna', desc: 'Szkoly plastyczne, ogniska, kursy rysunku.' },
+  marka_wlasna: { label: 'Marka wlasna / DIY', desc: 'Tworcy zestawow DIY, autorzy kursow, dystrybutorzy.' },
+  inne: { label: 'Inne', desc: 'Bez konkretnego segmentu - LLM zaklasyfikuje.' },
+};
+
+// Sources z meta-info: opis, szacunkowy koszt, limit API. Bazuje na real cennikach
+// Google Places New (Aug 2024) i Apify (Compass actors). Limity to twarde caps API.
+interface SourceMeta {
+  key: string;
+  label: string;
+  desc: string;
+  costHint: string;        // dla cost estimate (USD per 1000 zapytan/items)
+  costPer1000: number;     // do liczenia szacunku
+  limit: number;           // twardy cap per query
+  warning?: string;        // np. LinkedIn compliance
+}
+
+const SOURCES: SourceMeta[] = [
+  {
+    key: 'google_places',
+    label: 'Google Places',
+    desc: 'Bezposrednio z Google. Najbogatsze pola (telefon, rating, kategoria, godziny). Najwyzsza jakosc.',
+    costHint: '$25/1000',
+    costPer1000: 25,
+    limit: 60,
+  },
+  {
+    key: 'apify',
+    label: 'Apify Google Maps',
+    desc: 'Apify scraper Google Maps - alternatywa dla Places API. Tansze ale wolniejsze.',
+    costHint: '$5/1000',
+    costPer1000: 5,
+    limit: 50,
+  },
+  {
+    key: 'apify_allegro',
+    label: 'Apify Allegro',
+    desc: 'Sprzedawcy z Allegro - kandydaci na private label / hurt. Inny target niz Google Maps.',
+    costHint: '$5/1000',
+    costPer1000: 5,
+    limit: 100,
+  },
+  {
+    key: 'apify_linkedin',
+    label: 'Apify LinkedIn',
+    desc: 'Firmy z LinkedIna. UWAGA: TOS LinkedIn + RODO - uzywaj ostroznie i tylko dla B2B.',
+    costHint: '$10/1000',
+    costPer1000: 10,
+    limit: 50,
+    warning: 'TOS LinkedIn + RODO - sprawdz compliance przed wlaczeniem.',
+  },
+];
+
+// 16 wojewodztw + top miasta - do datalist autocomplete'a w Lokalizacja
+const POLSKA_LOCATIONS = [
+  // Wojewodztwa
+  'Dolnoslaskie', 'Kujawsko-Pomorskie', 'Lubelskie', 'Lubuskie',
+  'Lodzkie', 'Malopolskie', 'Mazowieckie', 'Opolskie',
+  'Podkarpackie', 'Podlaskie', 'Pomorskie', 'Slaskie',
+  'Swietokrzyskie', 'Warminsko-Mazurskie', 'Wielkopolskie', 'Zachodniopomorskie',
+  // Top miasta wojewodzkie
+  'Warszawa', 'Krakow', 'Lodz', 'Wroclaw', 'Poznan', 'Gdansk',
+  'Szczecin', 'Bydgoszcz', 'Lublin', 'Bialystok', 'Katowice', 'Gdynia',
+  'Czestochowa', 'Radom', 'Sosnowiec', 'Torun', 'Kielce', 'Rzeszow',
+  'Gliwice', 'Zabrze', 'Olsztyn', 'Bielsko-Biala', 'Bytom', 'Zielona Gora',
+  'Rybnik', 'Ruda Slaska', 'Tychy', 'Opole', 'Gorzow Wielkopolski',
+  'Plock', 'Elblag', 'Walbrzych',
 ];
 
 type Mode = 'manual' | 'agent';
+type Flash = { kind: 'success' | 'error' | 'info'; text: string };
 
 export default function PozyskiwaniePage() {
   const router = useRouter();
@@ -97,6 +167,32 @@ export default function PozyskiwaniePage() {
   const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Globalny flash zamiast alert()
+  const [flash, setFlash] = useState<Flash | null>(null);
+
+  // Cost estimate - liczy szacunek na podstawie wybranych zrodel x max/source +
+  // LLM relevance check (gemini-flash-lite ~$0.001/lead).
+  const costEstimate = (() => {
+    let usd = 0;
+    for (const key of selectedSources) {
+      const src = SOURCES.find((s) => s.key === key);
+      if (src) {
+        // (max/1000) * cost_per_1000 = USD per source
+        usd += (Math.min(maxPerSource, src.limit) / 1000) * src.costPer1000;
+      }
+    }
+    // Plus LLM relevance check dla wszystkich znalezionych (tani model)
+    const totalLeads = selectedSources.length * Math.min(maxPerSource, 100);
+    usd += totalLeads * 0.0005;  // ~$0.5 per 1000
+    return usd;
+  })();
+
+  // Auto-dismiss flash po 5s
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 5000);
+    return () => clearTimeout(t);
+  }, [flash]);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -161,7 +257,7 @@ export default function PozyskiwaniePage() {
   async function handlePeek(e: React.FormEvent) {
     e.preventDefault();
     if (selectedSources.length === 0) {
-      alert('Wybierz przynajmniej jedno źródło.');
+      setFlash({ kind: 'error', text: 'Wybierz przynajmniej jedno źródło danych.' });
       return;
     }
     setPeeking(true);
@@ -197,8 +293,15 @@ export default function PozyskiwaniePage() {
         }
       });
       setSelected(auto);
+      setFlash({
+        kind: 'success',
+        text: `Znalazłem ${res.places.length} firm. ${auto.size} pasujących zaznaczonych automatycznie - sprawdź i kliknij "Researchuj".`,
+      });
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd wyszukiwania');
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Błąd wyszukiwania',
+      });
     } finally {
       setPeeking(false);
     }
@@ -241,7 +344,10 @@ export default function PozyskiwaniePage() {
     const e = err as Error & { status?: number; detail?: { active_job_id?: number; msg?: string } };
     if (e.status === 409 && e.detail?.active_job_id) {
       const msg = e.detail.msg || fallbackMsg;
-      alert(`${msg}\n\nPokażę aktualnie pracującego agenta.`);
+      setFlash({
+        kind: 'info',
+        text: `${msg} Pokazuję aktualnie pracującego agenta poniżej.`,
+      });
       try {
         const job = await api<JobInfo>(`/api/jobs/${e.detail.active_job_id}`);
         setActiveJob(job);
@@ -251,13 +357,13 @@ export default function PozyskiwaniePage() {
       } catch {/* ignore */}
       return;
     }
-    alert(e.message || fallbackMsg);
+    setFlash({ kind: 'error', text: e.message || fallbackMsg });
   }
 
   async function handleSendAgent(e: React.FormEvent) {
     e.preventDefault();
     if (selectedSources.length === 0) {
-      alert('Wybierz przynajmniej jedno źródło.');
+      setFlash({ kind: 'error', text: 'Wybierz przynajmniej jedno źródło danych.' });
       return;
     }
     setSubmitting(true);
@@ -325,6 +431,19 @@ export default function PozyskiwaniePage() {
           </div>
         )}
       </div>
+
+      {/* Global flash (zamiast alert) */}
+      {flash && (
+        <div className={`global-flash flash-${flash.kind}`}>
+          {flash.kind === 'success' && <i className="ti ti-check" />}
+          {flash.kind === 'error' && <i className="ti ti-alert-circle" />}
+          {flash.kind === 'info' && <i className="ti ti-info-circle" />}
+          <span style={{ flex: 1 }}>{flash.text}</span>
+          <button className="flash-close" onClick={() => setFlash(null)}>
+            <i className="ti ti-x" />
+          </button>
+        </div>
+      )}
 
       <div className="content">
         <div className="page-head">
@@ -471,62 +590,152 @@ export default function PozyskiwaniePage() {
               <div className="field">
                 <label>Segment</label>
                 <select value={segment} onChange={(e) => setSegment(e.target.value)}>
-                  {SEGMENTS.map((s) => <option key={s} value={s}>{s}</option>)}
+                  {SEGMENTS.map((s) => (
+                    <option key={s} value={s}>
+                      {SEGMENT_INFO[s]?.label || s}
+                    </option>
+                  ))}
                 </select>
+                <span className="field-hint">
+                  {SEGMENT_INFO[segment]?.desc || ''}
+                </span>
               </div>
               <div className="field">
                 <label>Lokalizacja (miasto / województwo)</label>
-                <input type="text" value={location} onChange={(e) => setLocation(e.target.value)}
-                  placeholder="np. Warszawa, Pomorskie" />
+                <input
+                  type="text"
+                  value={location}
+                  onChange={(e) => setLocation(e.target.value)}
+                  placeholder="np. Warszawa, Mazowieckie"
+                  list="pl-locations"
+                />
+                <datalist id="pl-locations">
+                  {POLSKA_LOCATIONS.map((loc) => (
+                    <option key={loc} value={loc} />
+                  ))}
+                </datalist>
+                <span className="field-hint">
+                  Wpisz miasto albo wybierz z listy 16 województw + top miast PL.
+                </span>
               </div>
               <div className="field" style={{ maxWidth: 200 }}>
-                <label>Max / źródło (1-100)</label>
+                <label>Max / źródło</label>
                 <input type="number" value={maxPerSource} min={1} max={100}
                   onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 50)} />
-                <span style={{ fontSize: 11, color: '#6B7280', marginTop: 4, display: 'block' }}>
-                  Twarde limity API: Google Places 60, Apify Maps 50, Allegro 100, LinkedIn 50. Włącz kilka źródeł żeby zwiększyć pulę.
+                <span className="field-hint">
+                  Twarde limity API: Google Places 60, Apify Maps 50, Allegro 100, LinkedIn 50.
                 </span>
               </div>
             </div>
 
             <div className="field">
-              <label>Własny opis targetu (opcjonalny, ma pierwszeństwo nad segmentem)</label>
+              <label>Własny opis targetu <span style={{ fontWeight: 400, color: '#9CA3AF' }}>(opcjonalny, nadpisuje segment)</span></label>
               <textarea value={customTarget} onChange={(e) => setCustomTarget(e.target.value)}
-                placeholder="np. 'producenci sztalug i ram do obrazów'"
+                placeholder="np. 'producenci sztalug i ram do obrazów', 'paint&sip studia z winem'"
                 rows={2} />
             </div>
 
             <div className="field">
-              <label>Źródła</label>
-              <div className="checkbox-row">
-                {SOURCES.map((s) => (
-                  <label key={s.key} className="check">
-                    <input type="checkbox" checked={selectedSources.includes(s.key)}
-                      onChange={() => toggleSource(s.key)} />
-                    <span>{s.label}</span>
-                  </label>
-                ))}
+              <label>Źródła danych</label>
+              <div className="source-grid">
+                {SOURCES.map((s) => {
+                  const checked = selectedSources.includes(s.key);
+                  return (
+                    <label
+                      key={s.key}
+                      className={`source-card ${checked ? 'on' : ''} ${s.warning ? 'has-warning' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSource(s.key)}
+                      />
+                      <div className="src-content">
+                        <div className="src-head">
+                          <span className="src-label">{s.label}</span>
+                          <span className="src-cost" title={`Szacunkowy koszt: ${s.costHint}`}>
+                            {s.costHint}
+                          </span>
+                        </div>
+                        <div className="src-desc">{s.desc}</div>
+                        <div className="src-foot">
+                          Limit API: {s.limit} / zapytanie
+                        </div>
+                        {s.warning && (
+                          <div className="src-warning">
+                            <i className="ti ti-alert-triangle" /> {s.warning}
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="form-row">
-              <label className="check">
-                <input type="checkbox" checked={autoDraft}
-                  onChange={(e) => setAutoDraft(e.target.checked)} />
-                <span><i className="ti ti-mail" /> Auto-draft jeśli score &ge; 7</span>
+            <div className="form-row" style={{ alignItems: 'center' }}>
+              <div className="field" style={{ maxWidth: 280 }}>
+                <label>
+                  Próg trafności LLM ≥ <strong>{relevanceThreshold}</strong>/10
+                </label>
+                <input
+                  type="range" min={0} max={10}
+                  value={relevanceThreshold}
+                  onChange={(e) => setRelevanceThreshold(parseInt(e.target.value))}
+                />
+                <span className="field-hint">
+                  {relevanceThreshold <= 4 && 'Luźny - zostawi prawie wszystko, możesz mieć śmieci.'}
+                  {relevanceThreshold === 5 && 'Średni - rozsądny default.'}
+                  {relevanceThreshold === 6 && 'Standardowy - typowy próg "dobry lead".'}
+                  {relevanceThreshold === 7 && 'Wymagający - tylko jasno pasujące firmy.'}
+                  {relevanceThreshold >= 8 && 'Surowy - tylko top - może wyrzucić sporo.'}
+                </span>
+              </div>
+              <label className="check check-card">
+                <input
+                  type="checkbox"
+                  checked={autoDraft}
+                  onChange={(e) => setAutoDraft(e.target.checked)}
+                />
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                    <i className="ti ti-mail" /> Auto-draft jeśli score ≥ 7
+                  </div>
+                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                    Po researchu agent wygeneruje draft maila dla hot leadów (zużywa więcej tokenów).
+                  </div>
+                </div>
               </label>
-              <div className="field" style={{ maxWidth: 240 }}>
-                <label>Próg trafności LLM &ge; {relevanceThreshold}</label>
-                <input type="range" min={0} max={10} value={relevanceThreshold}
-                  onChange={(e) => setRelevanceThreshold(parseInt(e.target.value))} />
+            </div>
+
+            {/* COST ESTIMATE - real-time pod button */}
+            <div className="cost-estimate">
+              <div className="ce-row">
+                <span className="ce-k">Szacunkowy koszt API:</span>
+                <span className="ce-v">
+                  {selectedSources.length === 0 ? (
+                    <span style={{ color: '#9CA3AF' }}>wybierz źródła</span>
+                  ) : (
+                    <strong>~${costEstimate.toFixed(2)}</strong>
+                  )}
+                </span>
+              </div>
+              <div className="ce-hint">
+                {selectedSources.length > 0 && (
+                  <>
+                    {selectedSources.length} {selectedSources.length === 1 ? 'źródło' : 'źródła'} ×
+                    do {maxPerSource} firm + LLM filtr trafności.
+                    {' '}Ostateczna liczba leadów zależy od deduplikacji i progu trafności.
+                  </>
+                )}
               </div>
             </div>
 
-            <button type="submit" className="btn btn-primary"
-              disabled={peeking || submitting || !!jobActive}>
+            <button type="submit" className="btn btn-primary btn-cta"
+              disabled={peeking || submitting || !!jobActive || selectedSources.length === 0}>
               {mode === 'manual'
-                ? (peeking ? 'Szukam...' : 'Zajrzyj na rynek')
-                : (submitting ? 'Wysyłam agenta...' : 'Wyślij agenta w teren')}
+                ? (peeking ? <><span className="spinner-mini" /> Szukam...</> : <><i className="ti ti-search" /> Zajrzyj na rynek</>)
+                : (submitting ? <><span className="spinner-mini" /> Wysyłam agenta...</> : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>)}
             </button>
           </form>
         </div>
@@ -982,4 +1191,164 @@ table.tbl tr:hover td { background: #FAFAF7; }
   line-height: 1.7;
 }
 .explainer-list li { margin-bottom: 4px; }
+
+/* ============ GLOBAL FLASH ============ */
+.global-flash {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  z-index: 200; min-width: 320px; max-width: 600px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-radius: 8px;
+  font-size: 13.5px; font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  animation: slideDownFlash 0.2s ease-out;
+}
+.global-flash i { font-size: 18px; flex-shrink: 0; }
+.global-flash.flash-success { background: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
+.global-flash.flash-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+.global-flash.flash-info { background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE; }
+.flash-close {
+  background: none; border: none; cursor: pointer; color: inherit;
+  opacity: 0.7; padding: 4px; display: flex; font-size: 16px;
+}
+.flash-close:hover { opacity: 1; }
+@keyframes slideDownFlash {
+  from { transform: translate(-50%, -10px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
+/* ============ FIELD HINTS ============ */
+.field-hint {
+  display: block;
+  font-size: 11.5px;
+  color: #6B7280;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+/* ============ SOURCE GRID ============ */
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+.source-card {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1.5px solid #E5E7EB;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  align-items: flex-start;
+}
+.source-card:hover { border-color: #D1D5DB; background: #FAFAF7; }
+.source-card.on {
+  border-color: #D4212C;
+  background: #FDECED;
+}
+.source-card.on:hover { background: #FCD8DB; }
+.source-card input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 18px; height: 18px;
+  margin-top: 2px;
+  accent-color: #D4212C;
+  cursor: pointer;
+}
+.src-content { flex: 1; min-width: 0; }
+.src-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 4px;
+}
+.src-label { font-weight: 600; font-size: 13.5px; color: #111; }
+.src-cost {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: #6B7280;
+  background: #FAFAF7;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #E5E7EB;
+}
+.source-card.on .src-cost {
+  background: #fff;
+  border-color: #FCA5A5;
+  color: #8F1018;
+}
+.src-desc {
+  font-size: 12px; color: #4B5563;
+  line-height: 1.4; margin-bottom: 6px;
+}
+.src-foot {
+  font-size: 11px; color: #9CA3AF;
+  font-family: 'JetBrains Mono', monospace;
+}
+.src-warning {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #FFF7ED;
+  border: 1px solid #FED7AA;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #9A3412;
+  display: flex; align-items: flex-start; gap: 6px;
+  line-height: 1.4;
+}
+.src-warning i { font-size: 12px; margin-top: 1px; flex-shrink: 0; }
+
+/* ============ CHECK CARD ============ */
+.check-card {
+  display: flex;
+  gap: 10px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1.5px solid #E5E7EB;
+  border-radius: 10px;
+  cursor: pointer;
+  flex: 1; min-width: 260px;
+  align-items: flex-start;
+}
+.check-card:hover { border-color: #D1D5DB; }
+.check-card input[type="checkbox"] {
+  width: 18px; height: 18px;
+  margin-top: 2px;
+  accent-color: #D4212C;
+  flex-shrink: 0;
+}
+.check-card i { color: #D4212C; }
+
+/* ============ COST ESTIMATE ============ */
+.cost-estimate {
+  background: #FAFAF7;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-top: 8px;
+}
+.ce-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 12px;
+}
+.ce-k { font-size: 12px; color: #6B7280; font-weight: 500; }
+.ce-v { font-size: 18px; font-family: 'JetBrains Mono', monospace; color: #111; }
+.ce-v strong { font-weight: 700; }
+.ce-hint {
+  font-size: 11.5px;
+  color: #9CA3AF;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* ============ CTA BUTTON + SPINNER ============ */
+.btn-cta { padding: 12px 24px; font-size: 14.5px; font-weight: 600; margin-top: 4px; }
+.spinner-mini {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 `;
