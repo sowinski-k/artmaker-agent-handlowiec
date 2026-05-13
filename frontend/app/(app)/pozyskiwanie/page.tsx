@@ -19,6 +19,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { useConfirm } from '@/lib/confirm';
 
 interface DiscoveredPlace {
   source: string;
@@ -146,6 +147,7 @@ type Flash = { kind: 'success' | 'error' | 'info'; text: string };
 
 export default function PozyskiwaniePage() {
   const router = useRouter();
+  const confirm = useConfirm();
   const [mode, setMode] = useState<Mode>('manual');
 
   // Form
@@ -332,10 +334,37 @@ export default function PozyskiwaniePage() {
 
   async function handleResearchSelected() {
     if (!peekResults || selected.size === 0) return;
-    const urls = Array.from(selected)
-      .map((i) => peekResults[i]?.website)
-      .filter((w): w is string => !!w);
+    const selectedPlaces = Array.from(selected)
+      .map((i) => peekResults[i])
+      .filter((p): p is DiscoveredPlace => !!p && !!p.website);
+    const urls = selectedPlaces.map((p) => p.website as string);
     if (urls.length === 0) return;
+
+    // Force refresh jezeli ktorykolwiek zaznaczony jest duplikatem -
+    // user swiadomie chce re-research (spala tokeny ponownie).
+    const hasDuplicates = selectedPlaces.some((p) => p.existing_lead_id != null);
+    if (hasDuplicates) {
+      const dupCount = selectedPlaces.filter((p) => p.existing_lead_id != null).length;
+      const ok = await confirm({
+        title: dupCount === 1 ? 'Re-research duplikatu?' : `Re-research ${dupCount} duplikatów?`,
+        message: (
+          <>
+            Wybrane firmy są już w Twojej bazie. Możemy je sprawdzić ponownie,
+            ale to <strong>spali ponownie tokeny LLM</strong> (orientacyjnie
+            ~$0.01-0.05 za firmę).
+            <br /><br />
+            Score i dane zostaną zaktualizowane na świeższe.
+          </>
+        ),
+        confirmLabel: 'Tak, sprawdź ponownie',
+        cancelLabel: 'Anuluj',
+        icon: 'refresh',
+      });
+      if (!ok) {
+        setSubmitting(false);
+        return;
+      }
+    }
 
     setSubmitting(true);
     try {
@@ -346,6 +375,7 @@ export default function PozyskiwaniePage() {
           segment_hint: segment,
           city_hint: location || null,
           auto_draft_threshold: autoDraft ? 7 : null,
+          force_refresh: hasDuplicates,
         }),
       });
       setActiveJob({
@@ -854,21 +884,59 @@ export default function PozyskiwaniePage() {
           </div>
         )}
 
-        {/* PEEK RESULTS - info gdy 0 zaznaczonych mimo wynikow */}
-        {mode === 'manual' && peekResults && peekResults.length > 0 && selected.size === 0 && !peeking && (
-          <div className="banner-info" style={{ marginTop: 16 }}>
-            <i className="ti ti-info-circle" />
-            <div>
-              <strong>0 firm zaznaczonych automatycznie</strong> - zadna z {peekResults.length} firm
-              nie przekroczyla progu trafnosci ({relevanceThreshold}/10). Co mozesz zrobic:
-              <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12.5 }}>
-                <li>Obnizyc <strong>Prog trafnosci LLM</strong> w formularzu (np. z {relevanceThreshold} na 4-5)</li>
-                <li>Zaznaczyc recznie ktore firmy chcesz researchowac (kliknij checkbox per wiersz)</li>
-                <li>Zmienic <strong>segment</strong> albo <strong>opis targetu</strong> jesli wyniki sa off-topic</li>
-              </ul>
+        {/* PEEK RESULTS - info gdy 0 zaznaczonych mimo wynikow.
+            Diagnostyka per powod: duplikaty / brak URL / ponizej progu.
+            Zamiast jednego mylacego komunikatu "nie przekroczyly progu trafnosci"
+            (ktory byl falszywy gdy wszystkie 4 firmy mialy trafnosc 9-10 ale
+            byly duplikatami) pokazujemy konkretne liczby per problem. */}
+        {mode === 'manual' && peekResults && peekResults.length > 0 && selected.size === 0 && !peeking && (() => {
+          const dupCount = peekResults.filter((r) => r.existing_lead_id != null).length;
+          const noUrlCount = peekResults.filter((r) => !r.website && r.existing_lead_id == null).length;
+          const belowThreshold = peekResults.filter((r) =>
+            r.website &&
+            r.existing_lead_id == null &&
+            r.relevance &&
+            r.relevance.score < relevanceThreshold,
+          ).length;
+          const noRelevance = peekResults.filter((r) =>
+            r.website && r.existing_lead_id == null && !r.relevance,
+          ).length;
+          return (
+            <div className="banner-info" style={{ marginTop: 16 }}>
+              <i className="ti ti-info-circle" />
+              <div>
+                <strong>0 firm zaznaczonych automatycznie</strong> z {peekResults.length} wynikow.
+                Przyczyny:
+                <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12.5 }}>
+                  {dupCount > 0 && (
+                    <li>
+                      <strong>{dupCount}</strong> juz w bazie (duplikat).
+                      Mozesz zaznaczyc recznie zeby <em>wymusic re-research</em> - tokeny LLM zostana spalone ponownie.
+                    </li>
+                  )}
+                  {noUrlCount > 0 && (
+                    <li>
+                      <strong>{noUrlCount}</strong> bez strony WWW - nie da sie zresearchowac bez URL.
+                      Sprawdz w Google i dodaj recznie w <Link href="/leady">/leady</Link> jezeli warto.
+                    </li>
+                  )}
+                  {belowThreshold > 0 && (
+                    <li>
+                      <strong>{belowThreshold}</strong> ponizej progu trafnosci ({relevanceThreshold}/10).
+                      Obnizyc prog w formularzu (np. na 4-5) albo zaznaczyc recznie.
+                    </li>
+                  )}
+                  {noRelevance > 0 && (
+                    <li>
+                      <strong>{noRelevance}</strong> bez oceny LLM (filtr trafnosci wylaczony lub blad).
+                      Mozesz zaznaczyc recznie wszystkie ktore wydaja sie sensowne.
+                    </li>
+                  )}
+                </ul>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* PEEK RESULTS TABLE */}
         {mode === 'manual' && peekResults && (
@@ -911,12 +979,22 @@ export default function PozyskiwaniePage() {
               <tbody>
                 {peekResults.map((p, i) => {
                   const dup = p.existing_lead_id != null;
+                  const noUrl = !p.website;
                   const rel = p.relevance;
+                  // Disabled tylko gdy nie ma URL - bez URL nie da sie zresearchowac.
+                  // Duplikaty teraz mozna zaznaczyc -> backend force_refresh re-research.
+                  const checkboxDisabled = noUrl;
+                  const checkboxTitle = noUrl
+                    ? 'Lead bez strony WWW - nie da sie zresearchowac. Dodaj recznie w /leady.'
+                    : dup
+                      ? `Duplikat (lead #${p.existing_lead_id}) - zaznaczenie wymusi re-research (spali tokeny LLM ponownie)`
+                      : '';
                   return (
-                    <tr key={`${p.source}-${i}`} style={{ opacity: dup ? 0.5 : 1 }}>
+                    <tr key={`${p.source}-${i}`} style={{ opacity: dup || noUrl ? 0.55 : 1 }}>
                       <td>
                         <input type="checkbox" checked={selected.has(i)}
-                          disabled={!p.website || dup}
+                          disabled={checkboxDisabled}
+                          title={checkboxTitle}
                           onChange={() => {
                             const s = new Set(selected);
                             if (s.has(i)) s.delete(i); else s.add(i);
@@ -925,7 +1003,8 @@ export default function PozyskiwaniePage() {
                       </td>
                       <td>
                         <strong>{p.name}</strong>
-                        {dup && <span style={{ color: '#6B7280', fontSize: 11 }}> · w bazie #{p.existing_lead_id}</span>}
+                        {dup && <span style={{ color: '#6B7280', fontSize: 11 }}> · w bazie #{p.existing_lead_id} (re-research mozliwy)</span>}
+                        {noUrl && !dup && <span style={{ color: '#92400E', fontSize: 11 }}> · brak WWW</span>}
                       </td>
                       <td style={{ color: '#6B7280' }}>{p.address || '-'}</td>
                       <td className="num">{p.rating?.toFixed(1) || '-'}</td>

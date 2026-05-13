@@ -83,24 +83,45 @@ MAX_CONCURRENT_HEAVY_JOBS = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS") or 3)
 #
 # AUTOMATYKA: backend sam wybiera kwoty na podstawie current year.
 # Brak env vars do konfiguracji - user nic nie ustawia.
-# Co rok aktualizujemy ten dict (1 linijka + deploy) gdy GUS ogłosi
-# nową kwotę minimalną.
+# Co rok aktualizujemy te dicty (1 linijka + deploy) gdy GUS ogłosi nowe
+# stawki.
 #
-# Źródła:
-# - Minimalna 2026: ustawa o minimalnym wynagrodzeniu, ogłoszenie sierpnia 2025
-# - 168h/mies = 21 dni roboczych × 8h (Kodeks Pracy art. 130)
-# - Employer cost mult 1.33: brutto + ZUS pracodawcy (emerytalna 9.76%,
-#   rentowa 6.5%, wypadkowa ~1.67%, FP 2.45%, FGŚP 0.1%) ≈ 20.5% na top
-#   ALE plus rezerwa urlopowa + chorobowe + benefits = praktycznie 1.33×
-# - Stawka handlowca B2B: średni rynek 2025/2026, junior 50, mid 70, senior 100
+# Źródła stawek 2026:
+# - Najniższa krajowa miesięczna: 4806 zł brutto (Rozporządzenie RM z 11.09.2025)
+# - **Minimalna stawka godzinowa: 31.40 zł brutto** - to OFICJALNA stawka
+#   ustawowa, NIE 4806/168 = 28.6. Stawka godzinowa rośnie szybciej niż
+#   miesięczna (różnica idzie do tych co pracują na umowie zleceniu - placa
+#   za realnie przepracowane godziny vs etat z urlopami).
+# - Netto z 4806 brutto ≈ 3621 zł "na rękę" (po PIT, ZUS pracownika, składkach)
+# - Employer cost mult 1.2305: brutto + ZUS pracodawcy (emerytalna 9.76%,
+#   rentowa 6.5%, wypadkowa ~1.67%, FP 2.45%, FGŚP 0.1%) ≈ 20.48% narzutu
+#   (rezerwa urlopowa + chorobowe + benefity to osobny koszt, NIE wliczamy
+#   bo to fluktuuje per firma).
+# - Stawka handlowca B2B 2025/2026: junior 50-60, mid 70-90, senior 100+
 #   Bierzemy mid jako fair estymata średniego rynku.
 
-# Minimum wage history + future projections (4806 zł brutto 2026)
+# Minimum wage history + future projections (miesięczna brutto)
 MIN_WAGE_BY_YEAR: dict[int, float] = {
-    2024: 4242.0,  # styczeń-czerwiec
-    2025: 4666.0,  # od stycznia 2025
-    2026: 4806.0,  # od stycznia 2026 (ogłoszone)
+    2024: 4242.0,
+    2025: 4666.0,
+    2026: 4806.0,  # Rozp. RM z 11.09.2025
     # 2027+: aktualizuj gdy GUS ogłosi
+}
+
+# Minimalna stawka godzinowa BRUTTO (ustawowa) per rok
+# 2026: 31.40 zł/h (oficjalna, w Rozp. RM z 11.09.2025)
+MIN_WAGE_HOURLY_BY_YEAR: dict[int, float] = {
+    2024: 27.70,
+    2025: 30.50,
+    2026: 31.40,  # oficjalna stawka, nie wyliczona z miesięcznej
+}
+
+# Netto miesięczne dla najniższej krajowej (po PIT + ZUS pracownika)
+# 2026: 3621 zł "na rękę" przy 4806 brutto
+MIN_WAGE_NET_MONTHLY_BY_YEAR: dict[int, float] = {
+    2024: 3262.0,
+    2025: 3510.0,
+    2026: 3621.0,
 }
 
 # Stawka handlowca B2B per rok (rynek - subiektywne, można dostosować)
@@ -112,17 +133,20 @@ SALES_RATE_BY_YEAR: dict[int, float] = {
 }
 
 # Mnożnik koszt pracodawcy brutto -> realny koszt etatu (z ZUS pracodawcy)
-EMPLOYER_COST_MULTIPLIER = 1.33
+# 20.48% narzutu = ZUS pracodawcy (emerytalna+rentowa+wypadkowa+FP+FGŚP)
+EMPLOYER_COST_MULTIPLIER = 1.2048
 
-# Hours per month (Kodeks Pracy)
+# Hours per month (Kodeks Pracy art. 130)
 HOURS_PER_MONTH = 168
 
 # Czasy ręcznej pracy per zadanie (z praktyki - relatywnie stabilne między latami)
+# UWAGA: user-facing labelki sa w endpoint /api/dashboard ponizej (breakdown).
+# Tu trzymamy tylko KEY -> czas. User nie widzi tych keys.
 LABOR_TIME_MINUTES: dict[str, float] = {
-    "research": 8.0,        # analiza strony + scoring + hooks
-    "enrich_success": 2.0,  # dodatkowe minuty na szukanie kontaktu (tylko gdy znaleziony)
-    "draft": 15.0,          # napisanie spersonalizowanego cold maila
-    "sent": 1.0,            # klik wyślij + log w arkuszu
+    "research": 8.0,        # sprawdzenie firmy: kto to, czym sie zajmuje, czy pasuje
+    "enrich_success": 2.0,  # znalezienie adresu mailowego na stronie (tylko gdy success)
+    "draft": 15.0,          # napisanie spersonalizowanego maila
+    "sent": 1.0,            # wyslanie + zapis w historii
 }
 
 
@@ -134,19 +158,29 @@ def _get_roi_rates_for_today() -> dict[str, float]:
     'najlepszej znanej wartości').
     """
     current_year = datetime.now(timezone.utc).year
-    # Min wage - pick year (fallback: latest available)
-    min_wage_monthly = MIN_WAGE_BY_YEAR.get(
-        current_year,
-        MIN_WAGE_BY_YEAR[max(MIN_WAGE_BY_YEAR.keys())],
+    latest = max(MIN_WAGE_BY_YEAR.keys())
+    pick_year = current_year if current_year in MIN_WAGE_BY_YEAR else latest
+
+    min_wage_monthly = MIN_WAGE_BY_YEAR[pick_year]
+    # Stawka godzinowa: PREFEROWANA jest oficjalna ustawowa (31.40 dla 2026).
+    # Fallback do wyliczenia z miesięcznej dla starszych lat bez oficjalnej.
+    min_wage_h = MIN_WAGE_HOURLY_BY_YEAR.get(
+        pick_year,
+        round(min_wage_monthly / HOURS_PER_MONTH, 2),
+    )
+    min_wage_net_monthly = MIN_WAGE_NET_MONTHLY_BY_YEAR.get(
+        pick_year,
+        round(min_wage_monthly * 0.755, 0),  # heurystyka: 75.5% brutto -> netto
     )
     sales_rate = SALES_RATE_BY_YEAR.get(
-        current_year,
+        pick_year,
         SALES_RATE_BY_YEAR[max(SALES_RATE_BY_YEAR.keys())],
     )
     return {
-        "year": current_year,
+        "year": pick_year,
         "min_wage_monthly": min_wage_monthly,
-        "min_wage_h": round(min_wage_monthly / HOURS_PER_MONTH, 2),
+        "min_wage_monthly_net": min_wage_net_monthly,
+        "min_wage_h": min_wage_h,
         "employer_mult": EMPLOYER_COST_MULTIPLIER,
         "sales_rate_h": sales_rate,
         "min_per_research": LABOR_TIME_MINUTES["research"],
@@ -535,6 +569,7 @@ def _sparkline_for_ws(workspace_id: int, status: str | None = None, days: int = 
     q = select(date_col, func.count(Lead.id)).where(
         Lead.workspace_id == workspace_id,
         Lead.created_at >= start,
+        Lead.deleted_at.is_(None),  # ukryj kosz w sparkline
     ).group_by(date_col)
     if status:
         q = q.where(Lead.status == status)
@@ -575,7 +610,10 @@ def workspace_overview(cur: CurrentUser = Depends(get_current_user)) -> dict[str
         with SessionLocal() as session:
             ws = session.get(Workspace, ws_id)
             leads_total = int(session.scalar(
-                select(func.count(Lead.id)).where(Lead.workspace_id == ws_id)
+                select(func.count(Lead.id)).where(
+                    Lead.workspace_id == ws_id,
+                    Lead.deleted_at.is_(None),
+                )
             ) or 0)
             drafts_pending = int(session.scalar(
                 select(func.count(EmailDraft.id)).where(
@@ -643,15 +681,24 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
 
     def _counts():
         with SessionLocal() as session:
+            # Wszystkie KPI dashboardu wykluczaja leady w koszu - jak user
+            # usunie 100 staruszek, dashboard pokazuje rzeczywisty stan.
             def cnt(*conds): return int(session.scalar(
-                select(func.count(Lead.id)).where(Lead.workspace_id == ws_id, *conds)
+                select(func.count(Lead.id)).where(
+                    Lead.workspace_id == ws_id,
+                    Lead.deleted_at.is_(None),
+                    *conds,
+                )
             ) or 0)
             def cnt_d(*conds): return int(session.scalar(
                 select(func.count(EmailDraft.id)).where(EmailDraft.workspace_id == ws_id, *conds)
             ) or 0)
 
             avg_q = session.scalar(
-                select(func.avg(Lead.score)).where(Lead.workspace_id == ws_id)
+                select(func.avg(Lead.score)).where(
+                    Lead.workspace_id == ws_id,
+                    Lead.deleted_at.is_(None),
+                )
             )
 
             return {
@@ -679,7 +726,10 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
         with SessionLocal() as session:
             rows = session.execute(
                 select(Lead.segment, func.count(Lead.id))
-                .where(Lead.workspace_id == ws_id)
+                .where(
+                    Lead.workspace_id == ws_id,
+                    Lead.deleted_at.is_(None),
+                )
                 .group_by(Lead.segment)
                 .order_by(func.count(Lead.id).desc())
             ).all()
@@ -739,7 +789,12 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
 
     def _roi_counts():
         """Kanoniczne counts dla ROI - stabilne na przyszlosc bo NIE
-        zaleza od bieżących statusów leada (ktore moga byc cofniete)."""
+        zaleza od bieżących statusów leada (ktore moga byc cofniete).
+
+        Leady w trash SA wliczone do ROI - praca wykonana przez agenta sie
+        liczy, nawet jak user pozniej usunal lead (np. zlecił research, lead
+        okazał się off-topic, kasuje). Agent nie wie kto będzie usunięty.
+        """
         with SessionLocal() as session:
             researched = int(session.scalar(
                 select(func.count(Lead.id)).where(
@@ -796,6 +851,31 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
     saved_min_wage_employer = round((minutes_saved / 60) * min_wage_h * employer_mult, 0)
     saved_sales = round((minutes_saved / 60) * sales_rate_h, 0)
 
+    # Roczna projekcja - dla psychologicznego efektu "ile zaoszczędzisz w skali roku
+    # przy obecnym tempie". Liczymy: ile godzin/dzień średnio agent juz pracuje
+    # (hours_saved podzielone przez liczbe dni od pierwszego leada do dzis),
+    # potem rozszerzamy do 365 dni.
+    yearly_saved_pln: dict[str, int] | None = None
+    daily_pace_hours: float | None = None
+    try:
+        with SessionLocal() as session:
+            first_lead = session.execute(
+                select(func.min(Lead.created_at)).where(Lead.workspace_id == ws_id)
+            ).scalar()
+        if first_lead is not None and hours_saved > 0:
+            if first_lead.tzinfo is None:
+                first_lead = first_lead.replace(tzinfo=timezone.utc)
+            days_active = max(1.0, (datetime.now(timezone.utc) - first_lead).total_seconds() / 86400)
+            daily_pace_hours = hours_saved / days_active
+            yearly_hours = daily_pace_hours * 365
+            yearly_saved_pln = {
+                "min_wage_brutto": int(round(yearly_hours * min_wage_h)),
+                "min_wage_employer_cost": int(round(yearly_hours * min_wage_h * employer_mult)),
+                "sales_rate": int(round(yearly_hours * sales_rate_h)),
+            }
+    except Exception as exc:
+        log.warning(f"yearly projection failed: {exc}")
+
     return {
         "workspace": {"id": ws_id, "name": cur.workspace_name, "plan": cur.workspace_plan},
         "stats": {
@@ -806,8 +886,8 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
             "bounced": c["bounced"], "running_jobs": running_jobs,
         },
         # ROI - "ile agent juz zaoszczedzil" widget na pulpicie.
-        # Wszystko configurable przez env (LABOR_*) zeby latwo dostosowac
-        # na przyszlosc (zmiana najnizszej krajowej, inna stawka handlowca).
+        # Stawki + czasy automatycznie z mapping per rok (bez env vars).
+        # Labelki user-friendly z perspektywy klienta, nie pipeline'u.
         "roi": {
             "hours_saved": hours_saved,
             "minutes_saved": minutes_saved,
@@ -817,38 +897,47 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
                 "min_wage_employer_cost": int(saved_min_wage_employer),
                 "sales_rate": int(saved_sales),
             },
-            # Breakdown w jezyku ludzkim - tak jakby tlumaczyl to kolezance:
-            # "kazda firma sprawdzona, do tylu napisane spersonalizowane maile..."
+            # Roczna projekcja - "w tym tempie w skali roku zaoszczedzisz X PLN".
+            # None gdy brak danych do oszacowania pace'u (workspace pusty / 0 leadow).
+            "yearly_saved_pln": yearly_saved_pln,
+            "daily_pace_hours": round(daily_pace_hours, 2) if daily_pace_hours else None,
+            # Breakdown z perspektywy uzytkownika ("co dokladnie agent robi") -
+            # NIE z perspektywy pipeline'u (np. nie pisz "wyciagniecie z google maps"
+            # bo user nie obchodzi nasz scraper, ani "filtrowanie" bo to brzmi negatywnie).
             "breakdown": [
                 {
-                    "label": "Sprawdzenie firmy (kto to jest, czym sie zajmuje, czy pasuje)",
+                    "label": "Znalezienie firmy z pożądanej branży w internecie",
                     "count": roi_c["researched"],
                     "min_each": min_per_research,
                     "total_min": min_research,
                 },
                 {
-                    "label": "Znalezienie adresu mailowego na stronie",
+                    "label": "Znalezienie adresu mailowego firmy",
                     "count": roi_c["enriched_success"],
                     "min_each": min_per_enrich,
                     "total_min": min_enrich,
                 },
                 {
-                    "label": "Napisanie maila pod konkretną firmę (personalizacja)",
+                    "label": "Napisanie spersonalizowanego maila",
                     "count": roi_c["drafts_total"],
                     "min_each": min_per_draft,
                     "total_min": min_drafts,
                 },
                 {
-                    "label": "Wysłanie maila i zapisanie w historii",
+                    "label": "Wysłanie maila i zapisanie w historii kontaktu",
                     "count": roi_c["sent_drafts"],
                     "min_each": min_per_sent,
                     "total_min": min_sent,
                 },
             ],
-            # Stawki uzyte (auto-pick z current year)
+            # Stawki uzyte (auto-pick z current year). min_wage_pln_per_h
+            # to OFICJALNA stawka godzinowa (31.40 dla 2026), NIE wyliczona
+            # z miesiecznej - oba sa publikowane w Rozporzadzeniu RM i godzinowa
+            # rosnie szybciej niz miesieczna.
             "rates": {
                 "year": rates["year"],
                 "min_wage_monthly": rates["min_wage_monthly"],
+                "min_wage_monthly_net": rates["min_wage_monthly_net"],
                 "min_wage_pln_per_h": min_wage_h,
                 "min_wage_employer_pln_per_h": round(min_wage_h * employer_mult, 2),
                 "employer_cost_multiplier": employer_mult,
@@ -957,7 +1046,10 @@ def list_leads(
             ((empty_email & empty_phone), 1),
             else_=0,
         )
-        base = select(Lead).where(Lead.workspace_id == cur.workspace_id)
+        base = select(Lead).where(
+            Lead.workspace_id == cur.workspace_id,
+            Lead.deleted_at.is_(None),  # ukryj kosz
+        )
         if segment: base = base.where(Lead.segment == segment)
         if status: base = base.where(Lead.status == status)
         if min_score > 0: base = base.where(Lead.score >= min_score)
@@ -1068,6 +1160,8 @@ def get_lead(lead_id: int, cur: CurrentUser = Depends(get_current_user)) -> dict
     bez native alert'a.
     """
     with SessionLocal() as session:
+        # Detail dostepny tez dla leadow w trash (user moze klikac z /leady/trash).
+        # Filtruje deleted_at jedynie listing /api/leads (lista glowna).
         lead = session.execute(
             select(Lead).where(Lead.id == lead_id, Lead.workspace_id == cur.workspace_id)
         ).scalar_one_or_none()
@@ -1209,10 +1303,11 @@ def update_lead(
         lead = session.execute(
             select(Lead).where(
                 Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),  # nie edytuj leadow w koszu - musi byc restore
             )
         ).scalar_one_or_none()
         if lead is None:
-            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+            raise HTTPException(status_code=404, detail="Lead nie istnieje (lub w koszu).")
 
         # Normalizuj puste stringi do None (zgodnie z _clean() w save_lead)
         for k, v in list(update_data.items()):
@@ -1263,38 +1358,255 @@ def update_lead(
         }
 
 
+# ─── Kosz (soft-delete + 7-day auto-purge) ────────────────────────────────
+#
+# User usuwa lead -> deleted_at = utcnow() (soft-delete). Lead znika z list
+# i dashboardu ale zostaje w DB przez RECYCLE_BIN_DAYS dni. Worker tick auto-purge
+# co 1h hard-deletuje stare wpisy z trash (drafty cascade).
+#
+# User moze:
+#   - restore z trash (deleted_at -> None, status zachowany)
+#   - permanent delete (hard delete + cascade)
+#   - empty trash (hard delete wszystkie w trash workspace'u)
+#   - bulk delete (lista lead_ids -> wszystkie do trash)
+
+RECYCLE_BIN_DAYS = int(os.getenv("RECYCLE_BIN_DAYS") or 7)
+
+
 @app.delete("/api/leads/{lead_id}")
 def delete_lead(
     lead_id: int, cur: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Usun lead z bazy. Cascade na drafty (relationship cascade='all, delete-orphan').
+    """Soft-delete: lead trafia do kosza (deleted_at = now()). Hard delete dopiero
+    przez /api/leads/{id}/permanent albo automatyczny worker auto-purge po
+    RECYCLE_BIN_DAYS dniach (default 7).
 
-    Eventy lead_id zostaja jako null (FK ondelete=SET NULL by bylo lepsze ale
-    w obecnym schemacie po prostu ID umiera). Audit log emit przed delete.
+    Drafty zostaja - mozemy je obejrzec gdy lead jest w trash, restore przywroci
+    je z powrotem.
     """
     with SessionLocal() as session:
         lead = session.execute(
             select(Lead).where(
                 Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),  # nie mozna soft-delete drugi raz
             )
         ).scalar_one_or_none()
         if lead is None:
-            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+            raise HTTPException(status_code=404, detail="Lead nie istnieje (lub juz w koszu).")
 
         company = lead.company_name
-        # Audit event - lead_id=None bo zaraz znika
+        lead.deleted_at = datetime.now(timezone.utc)
         session.add(Event(
             workspace_id=cur.workspace_id,
             user_id=cur.user_id,
-            type="lead.deleted",
+            lead_id=lead.id,
+            type="lead.moved_to_trash",
+            level="INFO",
+            source="user",
+            message=f"Lead #{lead_id} ({company}) przeniesiony do kosza",
+            payload={
+                "lead_id": lead_id, "company": company,
+                "auto_purge_in_days": RECYCLE_BIN_DAYS,
+            },
+        ))
+        session.commit()
+        return {
+            "ok": True, "lead_id": lead_id, "company": company,
+            "auto_purge_in_days": RECYCLE_BIN_DAYS,
+        }
+
+
+class BulkDeleteIn(BaseModel):
+    lead_ids: list[int]
+
+
+@app.post("/api/leads/bulk-delete")
+def bulk_delete_leads(
+    payload: BulkDeleteIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk soft-delete (z bulk-bar w /leady - przycisk 'Usun (N)').
+
+    Filtruje: tylko leady ktore naleza do workspace i nie sa juz w koszu.
+    Skip'uje cicho reszte. Max 100 naraz (ochrona przed bulk-misclick).
+    """
+    if not payload.lead_ids:
+        raise HTTPException(status_code=400, detail="Brak lead_ids.")
+    if len(payload.lead_ids) > 100:
+        raise HTTPException(status_code=400, detail="Max 100 leadow naraz.")
+
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as session:
+        eligible = session.execute(
+            select(Lead).where(
+                Lead.id.in_(payload.lead_ids),
+                Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        deleted_ids: list[int] = []
+        for lead in eligible:
+            lead.deleted_at = now
+            deleted_ids.append(lead.id)
+        if deleted_ids:
+            session.add(Event(
+                workspace_id=cur.workspace_id,
+                user_id=cur.user_id,
+                type="lead.bulk_moved_to_trash",
+                level="INFO",
+                source="user",
+                message=f"User przeniosl {len(deleted_ids)} leadow do kosza",
+                payload={"lead_ids": deleted_ids, "auto_purge_in_days": RECYCLE_BIN_DAYS},
+            ))
+        session.commit()
+    return {
+        "ok": True,
+        "requested": len(payload.lead_ids),
+        "moved_to_trash": len(deleted_ids),
+        "skipped": len(payload.lead_ids) - len(deleted_ids),
+        "auto_purge_in_days": RECYCLE_BIN_DAYS,
+    }
+
+
+@app.post("/api/leads/{lead_id}/restore")
+def restore_lead(
+    lead_id: int, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Przywroc lead z kosza: deleted_at = None, status zachowany."""
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_not(None),
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead nie jest w koszu.")
+        lead.deleted_at = None
+        session.add(Event(
+            workspace_id=cur.workspace_id,
+            user_id=cur.user_id,
+            lead_id=lead.id,
+            type="lead.restored",
+            level="INFO",
+            source="user",
+            message=f"Lead #{lead_id} ({lead.company_name}) przywrocony z kosza",
+            payload={"lead_id": lead_id, "company": lead.company_name},
+        ))
+        session.commit()
+        return {"ok": True, "lead_id": lead_id, "company": lead.company_name}
+
+
+@app.delete("/api/leads/{lead_id}/permanent")
+def permanent_delete_lead(
+    lead_id: int, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Hard delete - tylko leady JUZ w koszu. Cascade na drafty.
+
+    Eventy lead_id zostaja jako null (FK on lead.id, brak ondelete cascade
+    w schemacie - w przyszlosci dorzucic).
+    """
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_not(None),
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Lead nie jest w koszu. Przenies do kosza (DELETE /api/leads/{id}) najpierw.",
+            )
+
+        company = lead.company_name
+        session.add(Event(
+            workspace_id=cur.workspace_id,
+            user_id=cur.user_id,
+            type="lead.permanently_deleted",
             level="WARNING",
             source="user",
-            message=f"User usunal lead #{lead_id} ({company})",
+            message=f"User usunal PERMANENTNIE lead #{lead_id} ({company})",
             payload={"deleted_lead_id": lead_id, "company": company},
         ))
         session.delete(lead)  # cascade -> drafty
         session.commit()
         return {"ok": True, "deleted_lead_id": lead_id, "company": company}
+
+
+@app.get("/api/leads/trash")
+def list_trash(
+    limit: int = 100, offset: int = 0,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Lista leadow w koszu (deleted_at IS NOT NULL), ordered by deleted_at DESC.
+
+    Kazdy wiersz zawiera 'days_until_purge' - frontend pokazuje countdown
+    "auto-usuniecie za X dni".
+    """
+    limit = max(1, min(limit, 500)); offset = max(0, offset)
+    now = datetime.now(timezone.utc)
+    cutoff_days = RECYCLE_BIN_DAYS
+    with SessionLocal() as session:
+        base = select(Lead).where(
+            Lead.workspace_id == cur.workspace_id,
+            Lead.deleted_at.is_not(None),
+        ).order_by(desc(Lead.deleted_at))
+        total = int(session.scalar(
+            select(func.count()).select_from(base.subquery())
+        ) or 0)
+        rows = session.execute(base.limit(limit).offset(offset)).scalars().all()
+
+        items = []
+        for l in rows:
+            del_at = l.deleted_at
+            if del_at is not None and del_at.tzinfo is None:
+                del_at = del_at.replace(tzinfo=timezone.utc)
+            days_since_delete = (now - del_at).total_seconds() / 86400 if del_at else 0
+            days_until_purge = max(0, cutoff_days - days_since_delete)
+            items.append({
+                "id": l.id, "segment": l.segment,
+                "company_name": l.company_name,
+                "contact_name": l.contact_name,
+                "email": l.email, "phone": l.phone, "website": l.website,
+                "city": l.city, "status": l.status,
+                "score": float(l.score) if l.score is not None else None,
+                "deleted_at": iso_utc(l.deleted_at),
+                "days_until_purge": round(days_until_purge, 1),
+                "created_at": iso_utc(l.created_at),
+            })
+    return {
+        "total": total,
+        "items": items,
+        "recycle_bin_days": cutoff_days,
+    }
+
+
+@app.post("/api/leads/trash/empty")
+def empty_trash(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Hard delete wszystkich leadow w koszu workspace'u. Cascade na drafty."""
+    with SessionLocal() as session:
+        trash = session.execute(
+            select(Lead).where(
+                Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_not(None),
+            )
+        ).scalars().all()
+        deleted_count = len(trash)
+        deleted_ids = [l.id for l in trash]
+        for lead in trash:
+            session.delete(lead)  # cascade -> drafty
+        if deleted_count:
+            session.add(Event(
+                workspace_id=cur.workspace_id,
+                user_id=cur.user_id,
+                type="trash.emptied",
+                level="WARNING",
+                source="user",
+                message=f"User wyczyscil kosz: {deleted_count} leadow usunietych permanentnie",
+                payload={"deleted_count": deleted_count, "lead_ids": deleted_ids},
+            ))
+        session.commit()
+    return {"ok": True, "deleted_count": deleted_count}
 
 
 @app.get("/api/drafts")
@@ -1491,11 +1803,15 @@ class CreateDraftIn(BaseModel):
 def create_draft(payload: CreateDraftIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     """Tworzy GENERATE_DRAFT job."""
     with SessionLocal() as session:
-        # Sprawdź czy lead należy do workspace
+        # Sprawdź czy lead należy do workspace i nie jest w koszu
         lead = session.execute(
-            select(Lead).where(Lead.id == payload.lead_id, Lead.workspace_id == cur.workspace_id)
+            select(Lead).where(
+                Lead.id == payload.lead_id,
+                Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),
+            )
         ).scalar_one_or_none()
-        if lead is None: raise HTTPException(status_code=404, detail="Lead nie istnieje w Twoim workspace.")
+        if lead is None: raise HTTPException(status_code=404, detail="Lead nie istnieje w Twoim workspace (lub w koszu).")
         job = create_job(
             session, job_type=JobType.GENERATE_DRAFT,
             workspace_id=cur.workspace_id, user_id=cur.user_id,
@@ -1538,6 +1854,7 @@ def create_drafts_bulk(
                 Lead.status == LeadStatus.RESEARCHED.value,
                 Lead.email.isnot(None),
                 Lead.email != "",
+                Lead.deleted_at.is_(None),  # nie draftuj leadow z kosza
             )
         ).scalars().all()
 
@@ -1593,7 +1910,11 @@ class DiscoverIn(BaseModel):
 
 
 def _discovery_today_count(workspace_id: int) -> int:
-    """Ile leadów workspace pozyskał już dziś (cap dzienny)."""
+    """Ile leadów workspace pozyskał już dziś (cap dzienny).
+
+    Liczy WSZYSTKIE pozyskane dzis, NAWET trash - user nie obchodzi limit
+    Apify/LLM (token spalony to spalony, nawet jak lead potem do kosza).
+    """
     with SessionLocal() as session:
         return int(session.scalar(
             select(func.count(Lead.id)).where(
@@ -1776,6 +2097,10 @@ class BulkResearchIn(BaseModel):
     segment_hint: str | None = None
     city_hint: str | None = None
     auto_draft_threshold: int | None = None
+    # User zaznaczyl duplikat w pozyskiwaniu -> chce re-research mimo ze
+    # lead juz w bazie. Spala tokeny LLM ponownie, ale aktualizuje
+    # research_data + score. Default False (zachowaj stare zachowanie).
+    force_refresh: bool = False
 
 
 @app.post("/api/research/bulk")
@@ -1821,6 +2146,7 @@ def bulk_research(payload: BulkResearchIn, cur: CurrentUser = Depends(get_curren
                 "segment_hint": payload.segment_hint,
                 "city_hint": payload.city_hint,
                 "auto_draft_threshold": payload.auto_draft_threshold,
+                "force_refresh": payload.force_refresh,
             },
         )
     return {"ok": True, "job_id": job.id, "total": len(urls)}
@@ -1841,10 +2167,11 @@ def enrich_one(payload: EnrichOneIn, cur: CurrentUser = Depends(get_current_user
             select(Lead).where(
                 Lead.id == payload.lead_id,
                 Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),  # nie enrichuj leadow w koszu
             )
         ).scalar_one_or_none()
         if lead is None:
-            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+            raise HTTPException(status_code=404, detail="Lead nie istnieje (lub w koszu).")
         job = create_job(
             session, job_type=JobType.ENRICH_LEAD,
             workspace_id=cur.workspace_id, user_id=cur.user_id,

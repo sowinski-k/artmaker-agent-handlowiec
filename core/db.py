@@ -167,6 +167,11 @@ class Lead(Base):
     # (uwaga: created_at index ponizej, dla sparkline range queries)
     # Dead-end leady recheckujemy po 90 dniach (firmy aktualizuja wizytowki).
     last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Soft-delete: user usuwa lead -> deleted_at = now(), lead znika z list/dashboard
+    # ale zostaje w DB przez RECYCLE_BIN_DAYS dni (7 dzien). Worker auto-purgeuje
+    # leady ze starym deleted_at -> hard delete (cascade na drafty). User moze
+    # restore (deleted_at = None) zanim auto-purge ich tknie.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -177,6 +182,9 @@ class Lead(Base):
     __table_args__ = (
         # Compound idx: lead lists + sparklines (WHERE workspace_id = ? ORDER BY created_at DESC)
         Index("ix_leads_workspace_created", "workspace_id", "created_at"),
+        # Trash view: WHERE workspace_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC
+        # + auto-purge query: WHERE deleted_at < cutoff (worker tick co 1h)
+        Index("ix_leads_workspace_deleted", "workspace_id", "deleted_at"),
     )
 
 
@@ -428,6 +436,7 @@ def _migrate_workspace_columns() -> None:
         ("leads", "research_data", "JSON" if is_pg else "TEXT"),
         ("leads", "notes", "TEXT"),
         ("leads", "last_enriched_at", "TIMESTAMP" if is_pg else "DATETIME"),
+        ("leads", "deleted_at", "TIMESTAMP" if is_pg else "DATETIME"),
         ("email_drafts", "workspace_id", "INTEGER"),
         ("email_drafts", "snippet4", "TEXT"),
         ("email_drafts", "snippet5", "TEXT"),
@@ -461,6 +470,8 @@ def _migrate_workspace_columns() -> None:
         # Lead lists + sparklines
         ("ix_leads_workspace_created", "leads", "(workspace_id, created_at)"),
         ("ix_leads_created_at", "leads", "(created_at)"),
+        # Trash view + worker auto-purge
+        ("ix_leads_workspace_deleted", "leads", "(workspace_id, deleted_at)"),
         # Draft lists
         ("ix_drafts_workspace_status_created", "email_drafts", "(workspace_id, status, created_at)"),
         ("ix_email_drafts_created_at", "email_drafts", "(created_at)"),

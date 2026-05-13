@@ -32,6 +32,12 @@ interface DashboardData {
       min_wage_employer_cost: number;
       sales_rate: number;
     };
+    yearly_saved_pln: {
+      min_wage_brutto: number;
+      min_wage_employer_cost: number;
+      sales_rate: number;
+    } | null;
+    daily_pace_hours: number | null;
     breakdown: Array<{
       label: string;
       count: number;
@@ -41,6 +47,7 @@ interface DashboardData {
     rates: {
       year: number;
       min_wage_monthly: number;
+      min_wage_monthly_net: number;
       min_wage_pln_per_h: number;
       min_wage_employer_pln_per_h: number;
       employer_cost_multiplier: number;
@@ -170,7 +177,9 @@ export default function PulpitPage() {
               </div>
             </div>
 
-            {/* 3 stawki - od konserwatywnej do realistycznej */}
+            {/* 3 stawki - od konserwatywnej do realistycznej.
+                Pod kazda: roczna projekcja "w tym tempie zaoszczedzisz X PLN/rok"
+                - efekt psychologiczny: 600 zl wyglada slabo, 73 000 zl/rok wow. */}
             <div className="roi-amounts roi-amounts-3">
               <div className="roi-amount-block">
                 <div className="ra-label">Gdybyś zatrudnił kogoś na najniższą krajową</div>
@@ -179,8 +188,14 @@ export default function PulpitPage() {
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
-                  {data.roi.rates.min_wage_pln_per_h.toFixed(1)} zł/h brutto
+                  {data.roi.rates.min_wage_pln_per_h.toFixed(2)} zł/h brutto · {data.roi.rates.min_wage_monthly.toLocaleString('pl-PL')} zł/mies. brutto ({data.roi.rates.min_wage_monthly_net.toLocaleString('pl-PL')} zł netto)
                 </div>
+                {data.roi.yearly_saved_pln && (
+                  <div className="ra-yearly">
+                    <i className="ti ti-trending-up" />
+                    W tym tempie <strong>{data.roi.yearly_saved_pln.min_wage_brutto.toLocaleString('pl-PL')} zł/rok</strong>
+                  </div>
+                )}
               </div>
               <div className="roi-amount-block">
                 <div className="ra-label">Realny koszt etatu (z ZUS pracodawcy)</div>
@@ -189,9 +204,14 @@ export default function PulpitPage() {
                   <span className="ra-unit"> zł</span>
                 </div>
                 <div className="ra-rate">
-                  {data.roi.rates.min_wage_employer_pln_per_h.toFixed(1)} zł/h
-                  {' '}(brutto +33% na ZUS)
+                  {data.roi.rates.min_wage_employer_pln_per_h.toFixed(2)} zł/h (brutto +{Math.round((data.roi.rates.employer_cost_multiplier - 1) * 100)}% ZUS pracodawcy)
                 </div>
+                {data.roi.yearly_saved_pln && (
+                  <div className="ra-yearly">
+                    <i className="ti ti-trending-up" />
+                    W tym tempie <strong>{data.roi.yearly_saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')} zł/rok</strong>
+                  </div>
+                )}
               </div>
               <div className="roi-amount-block primary">
                 <div className="ra-label">Gdybyś wynajął dobrego handlowca</div>
@@ -202,6 +222,12 @@ export default function PulpitPage() {
                 <div className="ra-rate">
                   {data.roi.rates.sales_rate_pln_per_h.toFixed(0)} zł/h netto
                 </div>
+                {data.roi.yearly_saved_pln && (
+                  <div className="ra-yearly primary">
+                    <i className="ti ti-trending-up" />
+                    W tym tempie <strong>{data.roi.yearly_saved_pln.sales_rate.toLocaleString('pl-PL')} zł/rok</strong>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -224,8 +250,9 @@ export default function PulpitPage() {
             </div>
             <div className="roi-footer-note">
               <i className="ti ti-info-circle" />
-              Liczone wg minimalnej krajowej {data.roi.rates.year} ({data.roi.rates.min_wage_monthly.toLocaleString('pl-PL')} zł brutto / m-c)
-              i przeciętnej stawki handlowca B2B. Aktualizujemy automatycznie co rok.
+              Liczone wg oficjalnej stawki godzinowej {data.roi.rates.year}: {data.roi.rates.min_wage_pln_per_h.toFixed(2)} zł/h brutto
+              (Rozp. Rady Ministrów){data.roi.daily_pace_hours ? ` · obecne tempo: ${data.roi.daily_pace_hours.toFixed(2)} h/dzień` : ''}.
+              Aktualizujemy automatycznie co rok.
             </div>
           </div>
         )}
@@ -647,7 +674,28 @@ const PULPIT_CSS = `
 .ra-rate {
   font-size: 11px; color: #6B7280;
   font-family: 'JetBrains Mono', monospace;
+  line-height: 1.4;
 }
+/* Roczna projekcja - osobny wiersz pod stawka godzinowa, wyrazniejszy
+   wizualnie zeby user widzial KRAJOBRAZ ROCZNY (efekt psychologiczny:
+   600 zl per kontekst to nic, 73 000 zl/rok to argument). */
+.ra-yearly {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  font-size: 11px; color: #D1D5DB;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.ra-yearly i { font-size: 12px; color: #86EFAC; }
+.ra-yearly strong { color: #fff; font-weight: 600; }
+.ra-yearly.primary {
+  background: rgba(252, 165, 165, 0.12);
+  border-color: rgba(252, 165, 165, 0.25);
+}
+.ra-yearly.primary strong { color: #FCA5A5; }
+.ra-yearly.primary i { color: #FCA5A5; }
 
 .roi-breakdown-list {
   padding-top: 14px;

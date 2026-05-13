@@ -60,6 +60,14 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+// Mock useConfirm - w testach nie potrzebujemy faktycznego dialogu, tylko
+// zeby hook nie rzucal blędu "must be used inside ConfirmProvider". Tests
+// nie klikają destruktywnych akcji, wiec confirm() nigdy nie zostanie wywolany.
+vi.mock('@/lib/confirm', () => ({
+  useConfirm: () => async () => true,
+  ConfirmProvider: ({ children }: { children: unknown }) => children,
+}));
+
 // Domyslny mock fetch - zwroty per-test override'owane.
 beforeEach(() => {
   global.fetch = vi.fn();

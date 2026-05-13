@@ -50,7 +50,9 @@ describe('/pozyskiwanie smoke', () => {
     } as Response);
     render(<PozyskiwaniePage />);
 
-    expect(screen.getByText(/TOS LinkedIn/i)).toBeInTheDocument();
+    // "TOS LinkedIn" pojawia sie w desc + warning chip. Sprawdzamy ze przynajmniej
+    // jedna instancja istnieje (getAllByText - tolerancja na duplikaty).
+    expect(screen.getAllByText(/TOS LinkedIn/i).length).toBeGreaterThan(0);
   });
 
   it('cost estimate pokazuje "wybierz źródła" gdy żadne nie zaznaczone', async () => {
