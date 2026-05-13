@@ -1,4 +1,4 @@
-Subject: Produkcja farb pod Wasza marka - 35% taniej
+Subject: Farby pod marka Atelier ZS - 35% taniej?
 Segment: marka_wlasna
 Offer track: private_label
 Lead context: Marka tworzaca zestawy DIY dla doroslych. Maja na stronie 4 wlasne
@@ -9,20 +9,24 @@ naklejke - placa za to.
 Panie Tomaszu,
 
 zerknalem na Wasze zestawy startowe pod marka Atelier ZS - swietnie pomyslane,
-ale podejrzewam ze farby kupujecie u polskiego dystrybutora i tylko nalepiacie
+ale podejrzewam ze farby kupujecie u polskiego dystrybutora i tylko naklejaecie
 swoja etykiete. Placicie wtedy 2-3 posrednikow w lancuchu.
 
-Pisze z Artmakera - mamy zakontraktowane fabryki w Chinach (te same skad
-biora wieksi gracze) i produkujemy farby akrylowe + zestawy DIY pod marke
-wlasna klienta. Wasze kolory, Wasze pojemniki, Wasze logo.
+Pisze z Artmakera. Jestesmy importerem i producentem - mamy zakontraktowane
+fabryki w Chinach (fabryka swiata, wszystko mozemy w roznych jakosciach pod
+specyfikacje klienta). Konkretnie: produkujemy farby akrylowe, plotna, pedzle,
+zestawy DIY pod marke wlasna klienta. Wasze kolory, Wasze pojemniki, Wasze
+opakowania, Wasze logo - nie etykietka naklejona na cudzy produkt.
 
-Konkretnie: dla 500 sztuk zestawu (farby + plotno + pedzle pakowane razem) -
-30-50% taniej niz zamowicie u polskiej hurtowni z tym samym brandingiem.
-MOQ od 300 sztuk, lead time 5-7 tygodni produkcji plus transport.
+Dla 500 sztuk zestawu (farby + plotno + pedzle pakowane razem pod marka
+Atelier ZS) - 30-50% taniej niz teraz placicie u polskiego dystrybutora z
+tym samym brandingiem. MOQ od 300 sztuk per produkt, lead time 5-7 tygodni
+produkcji plus transport morski. Wycene moge zrobic na kazdy produkt z
+Waszej oferty osobno.
 
-Jak wolicie cos OD RAZU bez czekania - mamy tez panel B2B (b2b.sowins.pl,
-magazyn w PL, dostawa 24h, minimum 1000 zl netto na zamowienie) - ale to
-raczej do uzupelniania braków, glowna gra to produkcja pod Wasza marke.
+Na biezace uzupelnianie braków mamy tez panel b2b.sowins.pl (magazyn PL,
+dostawa 24h, minimum 1000 zl + gratis transport), ale to drugorzedne -
+glowna gra to produkcja pod Wasza marke.
 
 Wyslac wstepna wycene dla 500 zestawow Atelier ZS do porownania z tym co
 teraz placicie?

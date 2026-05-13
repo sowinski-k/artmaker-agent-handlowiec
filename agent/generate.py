@@ -252,7 +252,50 @@ def validate_draft(payload: "EmailDraftPayload") -> list[str]:
                 "odwrotnej kolejnosci"
             )
 
+    # HARD RULE: KAZDY mail musi wspomniec o naszej zdolnosci do produkcji w
+    # Chinach / private label. To nasz CORE differentiator vs "kazda inna
+    # hurtownia". Mail bez tej wzmianki traci 80% wartosci propozycji.
+    #
+    # WAZNE (regression dla Seneks-mailu): SAM "importer" / "importujemy"
+    # NIE WYSTARCZA bo polska hurtownia tez importuje. Wymagamy keyword'ow
+    # konkretnie wskazujacych na nasze unikalne wartosci:
+    #   - geo: Chin*
+    #   - capability: fabryk*, produkc*, private label, marka wlasna, MOQ
+    #   - mechanizm: pod ich/Wasza/Panstwa specyfikacja/marka, branding,
+    #     wlasna etykieta, wlasne opakowania
+    track_a_keywords = [
+        # Geo - kluczowe
+        "chin",                          # Chinach, chinskich
+        # Capability - co umiemy zrobic
+        "fabryk",                        # fabryki, fabryka swiata
+        "private label", "private-label",
+        "produkc",                       # produkcja, produkujemy
+        "moq",
+        # Branding - jak to robimy dla klienta
+        "marka wlasna", "marka własna", "wlasn", "własn",
+        "specyfikacj",                   # pod specyfikacje, pod ich specyfikacje
+        "branding",
+        "etykiet",                       # wlasne etykiety, etykietowanie
+        "pod wasza", "pod państwa", "pod waszą",
+    ]
+    if not _has_any_keyword(full_body, track_a_keywords):
+        warnings.append(
+            "BRAK wzmianki o Chinach/produkcji/private label w mailu. "
+            "To nasz CORE differentiator - bez tego mail wyglada jak generic "
+            "hurtownik (sam 'importer' nie wystarcza, bo polska hurtownia tez "
+            "importuje). Dorzuc minimum 1 zdanie o naszej zdolnosci produkcji "
+            "w Chinach / private label / wlasna marka / pod ich specyfikacje."
+        )
+
     return warnings
+
+
+def _has_any_keyword(text: str, keywords: list[str]) -> bool:
+    """Czy text zawiera ktorekolwiek ze slow z listy (case-insensitive)."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(k.lower() in low for k in keywords)
 
 
 def _earliest_index(text: str, needles: list[str]) -> int | None:
@@ -271,10 +314,16 @@ class EmailDraftPayload(BaseModel):
 
     offer_track: Literal["b2b_panel", "private_label", "both"] = Field(
         description=(
-            "Która oferta Artmakera jest dla tego leada: "
-            "'b2b_panel' = panel B2B z magazynu PL + dostawa 24h (Track B, default), "
-            "'private_label' = produkcja w Chinach pod marka własną (Track A), "
-            "'both' = sugerujemy obie, B teraz + A jako rozwoj na pozniej."
+            "Glowna sciezka oferty w tym mailu. PRZYPOMNIENIE FILOZOFII: "
+            "'private_label' (Track A) to PLAN A - import + produkcja w naszych "
+            "chinskich fabrykach pod marka klienta. 'both' to dwa pitche w jednym - "
+            "Track A glowny + Track B (panel B2B z magazynu) jako dodatek. "
+            "'b2b_panel' - TYLKO gdy lead jest jednoznacznie maly i jasno nie pasuje "
+            "do private label (np. solowy paint&sip 1-2 wieczory miesiecznie). "
+            "DEFAULT dla 90% leadow: 'private_label' lub 'both'. "
+            "Niezaleznie od wyboru, KAZDY mail MUSI zawierac co najmniej 1 zdanie "
+            "o naszej zdolnosci produkcji w Chinach (fabryka swiata, private label, "
+            "wlasna marka) - to nasz core differentiator i tego sa szukajacy klienci."
         )
     )
     subject: str = Field(
@@ -373,67 +422,106 @@ def _build_user_prompt(lead: Lead) -> str:
         f"## Co o nich wiemy z researchu\n"
         f"{rationale}\n\n"
         f"## KROK 1: Wybór ścieżki sprzedaży (offer_track)\n"
-        f"FILOZOFIA SPRZEDAZY ARTMAKERA: Track A (private_label) to nasz PLAN A. "
-        f"Track B (b2b_panel) to PLAN B - 'cos od reki z magazynu'. Domyslnie "
-        f"proponujemy OBIE opcje, ale z preferencja Track A jako sciezki "
-        f"glownej (private label, marka wlasna, produkcja w Chinach - to dla "
-        f"klienta WIEKSZY biznes dlugoterminowy i wieksza wartosc dla nas).\n\n"
+        f"FILOZOFIA SPRZEDAZY ARTMAKERA (CRITICAL):\n\n"
+        f"Jestesmy IMPORTEREM i PRODUCENTEM, nie polska hurtownia. Mamy "
+        f"zakontraktowane FABRYKI w Chinach (fabryka swiata - wszystko mozemy "
+        f"wyprodukowac w roznych jakosciach pod specyfikacje klienta). Nasz "
+        f"core pitch to PRIVATE LABEL i IMPORT NA ZAMOWIENIE. Panel B2B (magazyn "
+        f"PL) to dodatek 'na biezaco', nie glowna oferta.\n\n"
+        f"ZLOTA ZASADA: KAZDY mail MUSI zawierac co najmniej 1 zdanie o naszej "
+        f"zdolnosci produkcji w Chinach / private label / importu na zamowienie. "
+        f"Niezaleznie od offer_track. Mail bez tej wzmianki = mail-slop. Tego "
+        f"szukaja klienci - to nasz prawdziwy differentiator vs 'jeszcze jedna "
+        f"hurtownia z katalogiem'.\n\n"
         f"Sugestia heurystyki: {track_hint}\n\n"
         f"Definicje track:\n"
-        f"- 'private_label' (Track A, PREFEROWANY) = produkujemy farby, "
-        f"  sztalugi, plotna, akcesoria DIY w naszych zakontraktowanych "
-        f"  fabrykach w Chinach pod specyfikacje klienta. Wlasna marka, "
-        f"  personalizowane opakowania, etykiety, 30-50% taniej niz polska "
-        f"  hurtownia bo omijamy 2-3 posrednikow. MOQ 300-1000 szt, "
-        f"  lead time 4-8 tygodni produkcji + transport.\n"
-        f"- 'b2b_panel' (Track B, PLAN B) = stala oferta z naszego magazynu "
-        f"  w Polsce, dostawa w 24h, ceny hurtowe. Panel pod "
-        f"  https://b2b.sowins.pl. Minimum logistyczne 1000 zl netto, "
-        f"  dostawa GRATIS od tego minimum. NIE pisz 'bez minimum'.\n"
-        f"- 'both' (DEFAULT dla wiekszosci leadow) = w jednym mailu wymien "
-        f"  OBIE opcje. Kolejnosc: NAJPIERW Track A jako glowna propozycja "
-        f"  (budowanie wlasnej marki + wieksze marze), POTEM Track B jako "
-        f"  'a jak czegos potrzebujecie OD RAZU z magazynu, to mamy panel B2B'. "
-        f"  Track A jako rozwoj/strategia, Track B jako szybkie wejscie/uzupelnienie.\n\n"
+        f"- 'private_label' (Track A, GLOWNY pitch dla 90% leadow) = "
+        f"  produkujemy farby, sztalugi, plotna, akcesoria DIY, papier "
+        f"  kreatywny, dziurkacze - PRAKTYCZNIE WSZYSTKO - w naszych "
+        f"  zakontraktowanych fabrykach w Chinach pod specyfikacje klienta. "
+        f"  Rozne jakosci (budget / standard / premium - klient wybiera). "
+        f"  Wlasna marka klienta, personalizowane opakowania, etykiety, gift-boxy. "
+        f"  30-50% taniej niz kupowanie u polskiego dystrybutora bo omijamy "
+        f"  2-3 posrednikow. MOQ od 300-1000 szt (zalezy od kategorii), "
+        f"  lead time 4-8 tygodni produkcji + transport morski. Indywidualna "
+        f"  wycena KAZDEGO produktu z ich oferty na zyczenie.\n"
+        f"- 'b2b_panel' (Track B, dodatek) = stala oferta z naszego magazynu "
+        f"  w Polsce, dostawa w 24h, ceny hurtowe (rowniez ponizej polskiej "
+        f"  hurtowni, ale wyzsze niz Track A bo to ready stock, nie produkcja "
+        f"  pod nich). Panel pod https://b2b.sowins.pl. Minimum logistyczne "
+        f"  1000 zl netto, dostawa GRATIS od tego minimum. NIE pisz 'bez minimum'.\n"
+        f"- 'both' = mail z OBIEMA opcjami w jednej wiadomosci. NAJPIERW Track A "
+        f"  jako glowny pitch (produkcja w Chinach, private label, 30-50% taniej, "
+        f"  indywidualna wycena), POTEM Track B jako alternatywa na biezaco. "
+        f"  Track A to ROZWOJ + WLASNA MARKA, Track B to UZUPELNIENIE BIEZACE. "
+        f"  Nigdy nie odwrotnie.\n\n"
         f"## KROK 2: Cold mail do {lead.company_name}\n\n"
         f"### Struktura snippetów (każdy = jeden akapit, każdy krótki):\n"
         f"- subject: temat maila. Max 50 znaków. Format: pytanie/liczba/konkret. "
-        f"  Test: jeśli zobaczyłbyś ten subject w skrzynce, otworzyłbyś bez "
-        f"  wahania? Jak nie - przeformułuj.\n"
-        f"- snippet1: pierwsze zdanie/dwa. MUSI nawiązać do konkretnego haka. "
-        f"  Bez 'Dzień dobry', bez 'Szanowni Panstwo'. Zacznij od mięsa - "
-        f"  pytania, obserwacji, konkretu z ich strony.\n"
-        f"- snippet2: kim jesteś (krótko, 1 zdanie) i dlaczego piszesz "
-        f"  AKURAT do nich (połącz to z hakiem). Max 2 zdania.\n"
-        f"- snippet3: KONKRETNA oferta zgodna z wybraną offer_track:\n"
-        f"  * private_label: produkcja w naszych chinskich fabrykach pod ich "
-        f"    specyfikacje + wlasna marka, opakowania, 30-50% taniej niz "
-        f"    polska hurtownia. Wspomnij MOQ tylko jesli realnie pasuje "
-        f"    (300-1000 szt). Konkretne kategorie produktow ktore moglibysmy "
-        f"    dla nich produkowac (na podstawie ich oferty - hooks).\n"
-        f"  * b2b_panel: panel B2B Artmakera POD URL **https://b2b.sowins.pl** "
-        f"    (MUSISZ podac ten URL w mailu - to nasz konkretny adres, "
-        f"    nie generic 'panel B2B'). Magazyn w PL, wysylka w 24h, "
-        f"    ceny hurtowe od producenta. Minimum logistyczne: 1000 zl "
-        f"    netto na zamowienie. Dostawa GRATIS przy zamowieniach "
-        f"    od minimum. NIE pisz 'bez minimum zamowienia'.\n"
-        f"  * both: NAJPIERW 1-2 zdania o private_label (produkcja pod ich "
-        f"    marka w Chinach, 30-50% taniej, indywidualne wyceny, zbudowanie "
-        f"    wlasnej marki), POTEM 1 zdanie o b2b_panel jako alternatywie "
-        f"    'na juz' (URL b2b.sowins.pl, magazyn PL, dostawa 24h, "
-        f"    minimum 1000 zl + gratis transport). Ton: Track A to plan, "
-        f"    Track B to dodatek/uzupelnienie. NIE odwrotnie.\n"
-        f"- snippet4: opcjonalny social proof / liczba (np. 'Obsługujemy "
-        f"  ponad 200 sklepów papierniczych w Polsce.'). Tylko jeśli AUTENTYCZNE. "
-        f"  Lepsze null niż wymyślone. NIE WYMYŚLAJ liczb.\n"
-        f"- snippet5: CTA-PYTANIE. Niski wysilek dla odbiorcy. Przyklady:\n"
-        f"  - 'Podeslac kilka realizacji private label ktore robilismy "
-        f"    w zeszlym roku?'\n"
-        f"  - 'Otworzyloby sie Panstwu 15 minut w czwartek po 14 na krotka "
-        f"    rozmowe?'\n"
-        f"  - 'Mam wstepna wycene produkcyjna dla 500 sztuk - wyslac do "
-        f"    porownania z tym co teraz placicie?'\n\n"
+        f"  Test: jesli zobaczylbys ten subject w skrzynce, otworzylbys bez wahania? "
+        f"  Przyklady mocnych subjectow z Track A flavorze:\n"
+        f"  * 'Produkcja farb pod {lead.company_name} - 35% taniej?'\n"
+        f"  * 'Wlasna marka materialow - mockup na 5 dni?'\n"
+        f"  * 'Wycenicie 500 sztuk plocien pod Wasza marka?'\n"
+        f"  * 'Importujecie sami z Chin czy przez posrednika?'\n"
+        f"- snippet1: pierwsze zdanie/dwa. MUSI nawiazac do konkretnego haka. "
+        f"  Bez 'Dzien dobry', bez 'Szanowni Panstwo'. Zacznij od miesa - "
+        f"  pytania, obserwacji, konkretu z ich strony. Idealnie wciagnij od razu "
+        f"  signal ze zauwazyles ich SKALE/ASORTYMENT/AKTYWNOSC.\n"
+        f"- snippet2: kim jestes - 1 zdanie. KRYTYCZNE: napisz NIE 'mamy "
+        f"  hurtownie' ale 'importujemy bezposrednio z naszych zakontraktowanych "
+        f"  fabryk w Chinach' lub 'produkujemy w Chinach pod marka klienta'. "
+        f"  Ta jedna fraza odroznia nas od kazdej innej oferty co dostali.\n"
+        f"- snippet3: KONKRETNA propozycja:\n"
+        f"  * Dla private_label/both: OPISZ co konkretnie mozemy dla nich "
+        f"    wyprodukowac w Chinach (bazuj na ich asortymencie z hookow). "
+        f"    Konkretne kategorie: 'farby akrylowe pod Wasza marka', "
+        f"    'plotna 30x40 z brandingiem WineArt', 'zestawy startowe DIY w "
+        f"    Waszych kolorach'. Wspomnij MOQ jak pasuje (300-1000). Wspomnij "
+        f"    indywidualna wycene. Wspomnij ze omijaja posrednikow = 30-50% taniej.\n"
+        f"  * Dla 'both': dorzuc 1 zdanie o panel B2B (URL b2b.sowins.pl, "
+        f"    magazyn PL, dostawa 24h, minimum 1000zl + gratis transport) "
+        f"    jako 'a na biezace uzupelnianie braków mamy tez panel B2B'. "
+        f"    NIGDY jako glowna oferta.\n"
+        f"  * Dla pure b2b_panel (RZADKO!): nawet wtedy DORZUC 1 zdanie "
+        f"    'a jak chcielibyscie zbudowac wlasna marke, mozemy tez produkowac "
+        f"    pod Wasza specyfikacje w Chinach - wycenimy chetnie'.\n"
+        f"- snippet4: opcjonalny social proof / liczba. Tylko jesli AUTENTYCZNE. "
+        f"  Lepsze null niz wymyslone. NIE WYMYSLAJ liczb.\n"
+        f"- snippet5: CTA-PYTANIE. Niski wysilek dla odbiorcy. WAZNE: ZADNYCH "
+        f"  PROBEK / SAMPLI / GIFTOW / GRATIS-MOCKUPOW. Nie wysylamy fizycznych "
+        f"  rzeczy w cold mailu - to zostaje bezzwrotnie i konwersja zerowa. "
+        f"  CTA ma byc CZYSTO MAILOWE / TELEFONICZNE / SPOTKANIOWE. Opcje "
+        f"  (wybierz JEDNA, dopasuj do leada):\n"
+        f"  * WYCENA PRODUKCYJNA (najmocniejsze, dla private_label/both):\n"
+        f"    - 'Wyslac wstepna wycene produkcyjna dla Waszych top-3 SKU "
+        f"      pod marka {lead.company_name}?'\n"
+        f"    - 'Mam orientacyjna wycene 500 sztuk farb akrylowych pod "
+        f"      Wasza marke - wyslac do porownania z tym co teraz placicie?'\n"
+        f"    - 'Mozemy wycenic dowolny produkt z Waszej oferty pod Wasza marke "
+        f"      - chcecie zobaczyc dla 2-3 przykladowych SKU jak wychodzi?'\n"
+        f"  * INDYWIDUALNA OFERTA EMAIL:\n"
+        f"    - 'Podeslac mailem zestawienie kategorii ktore moglibysmy "
+        f"      produkowac dla Was w Chinach pod Wasza marke?'\n"
+        f"    - 'Wyslac case study ostatniej realizacji private label "
+        f"      ze sklepem podobnym do Waszego?'\n"
+        f"  * KROTKA ROZMOWA (gdy lead duzo wart):\n"
+        f"    - 'Otworzyloby sie Panstwu 15 minut w czwartek po 14 - "
+        f"      pokaze realizacje private label z ostatniego pol roku?'\n"
+        f"    - 'Krotka rozmowa telefoniczna - 10 minut - pokazac wycene "
+        f"      produkcyjna pod Wasza marke?'\n"
+        f"  * DOSTEP DO PANELU (gdy chcemy zostawic Track B opcje):\n"
+        f"    - 'Wyslac dostep do naszego panelu B2B, zeby porownal Pan/Pani "
+        f"      ceny z tym co teraz placicie u dystrybutora?'\n"
+        f"    - 'Mam tez ofertę z magazynu PL - wyslac link do panelu?'\n"
+        f"  * ZAINTERESOWANIE (najlzejsze, dla niepewnych leadow):\n"
+        f"    - 'Czy temat produkcji pod Wasza marke jest dla Was w ogole "
+        f"      ciekawym kierunkiem? Krotka odpowiedz wystarczy, dopytam.'\n"
+        f"    - 'Interesuje Was import z Chin pod wlasna marke czy raczej "
+        f"      hurt z magazynu PL? Dostosuje co Wam podesle.'\n\n"
         f"### Cały mail (snippet1+2+3+4?+5) MUSI mieć 80-140 słów. KRÓTKO.\n"
+        f"### KAZDY mail MUSI wspomniec o Chinach / produkcji / private label / "
+        f"imporcie / fabrykach. To nie sugestia, to twardy wymog.\n"
         f"### NIGDY nie używaj długiego myślnika ani średniego myślnika w żadnym snippecie. Tylko zwykły dywiz -.\n"
     )
 
@@ -464,31 +552,52 @@ def _suggest_track_hint(
     bulk_potential: float | None,
     scale: float | None,
 ) -> str:
-    """Track suggestion. NOWE FILOZOFICZNE PODEJSCIE (commit ten):
+    """Track suggestion v2 (po feedbacku usera: AI nadal wybiera czysty Track B).
 
-    Default = 'both' z preferencja Track A (private_label). Track B jest
-    PLANEM B, nie planem A. Track A ma byc proponowany WSZEDZIE GDZIE JEST
-    POTENCJAL - czyli wszedzie gdzie nie wyklucza tego natura biznesu.
+    NOWY DEFAULT: 'private_label' dla wiekszosci leadow. 'both' tylko gdy
+    naprawde widac silny use-case dla Track B (np. paint&sip - konsumpcyjne
+    zuzycie regularne). 'b2b_panel' samodzielny NIGDY nie wybierany przez
+    heurystyke - jak LLM chce, niech sam wymusi z bardzo silnymi sygnalami.
 
-    Reguly w kolejnosci checking:
-    1. marka_wlasna -> private_label (segment z definicji = Track A)
-    2. bulk_potential >= 1.5 LUB scale >= 1.5 LUB volume >= 2000zl
-       -> 'both' z mocnym Track A first (skalowalny biznes)
-    3. paint_and_sip/warsztaty/animatorzy (typowa konsumpcja od reki)
-       -> 'both' ale Track B pierwsze (wewn. zuzycie), Track A wspomniany
-        jako opcja na przyszlosc (zestawy edycyjne, marka warsztatu)
-    4. sklep_papierniczy / sklep_plastyczny / szkola / inne
-       -> domyslnie 'both', Track A first (private label = wiekszy biznes)
+    Filozofia: import z Chin + private label to nasz CORE pitch. Nawet maly
+    sklep moze chciec wlasna marke. Nawet duzy sklep moze chciec wlasna marke.
+    Panel B2B jest "wygoda na biezaco" - drugorzedny zawsze.
 
-    LLM zawsze ma final say - to suggestion not mandate.
+    Reguly:
+    1. marka_wlasna -> private_label (oczywiste, z definicji)
+    2. paint_and_sip/warsztaty/animatorzy/szkola -> 'both' (regularne zuzycie
+       konsumpcyjne usprawiedliwia Track B obok produkcji)
+    3. Reszta (sklep_*, marka_wlasna, inne) -> private_label glownie
     """
     if segment == "marka_wlasna":
         return (
-            "private_label (segment marka_wlasna - z definicji Track A). "
-            "Track B mozesz wspomniec ZWIEZLE jako 'a jak chcecie cos OD REKI z magazynu PL "
-            "do uzupelnienia oferty, mamy panel'."
+            "private_label (segment marka_wlasna - z definicji Track A, "
+            "klient juz buduje wlasna marke). "
+            "Track B wspomnij MARGINALNIE 1 zdaniem jako 'a jesli chcecie cos OD REKI "
+            "z magazynu PL do uzupelnienia oferty, mamy tez panel b2b.sowins.pl'."
         )
 
+    if segment in {"paint_and_sip", "warsztaty_dzieci", "animatorzy_eventy"}:
+        return (
+            f"both - dla segmentu {segment} Track B (panel B2B) ma sens "
+            "(konsumpcyjne zuzycie farb/platen na regularnych wieczorach/warsztatach), "
+            "ALE Track A (private_label) jest tak samo wazny - zestawy startowe "
+            "z ich logo, kartonowe pudelka z brandingiem, gift-boxy dla goscia "
+            "ktory wychodzi z eventu z fizyczna pamiatka. Wymien Track A PIERWSZE, "
+            "Track B jako drugi wariant."
+        )
+
+    if segment == "szkola_artystyczna":
+        return (
+            "private_label glownie. Szkoly to idealny case dla zestawow "
+            "edukacyjnych z logo szkoly + merch dla uczniow/absolwentow. "
+            "Panel B2B mozesz wspomniec marginalnie jako uzupelnienie biezacych "
+            "potrzeb, ale to drugorzedne. NIE odwrotnie."
+        )
+
+    # Sklepy plastyczne, papiernicze, inne - domyslnie private_label glownie.
+    # Sprawdz sygnaly skali - gdy duzo, dorzuc 'both' bo widac ze maja juz
+    # przeplyw towarow z magazynu.
     vol_pln = _parse_volume_pln(monthly_volume)
     big_signal = (
         (bulk_potential is not None and bulk_potential >= 1.5)
@@ -498,32 +607,18 @@ def _suggest_track_hint(
 
     if big_signal:
         return (
-            "both - Track A (private_label) PIERWSZE bo widac potencjal skali "
-            f"(bulk_potential={bulk_potential}, scale={scale}, vol={monthly_volume!r}). "
-            "Track B wspomniany na koncu jako 'a jak chcecie cos juz teraz z magazynu'."
+            f"both - dla segmentu {segment} z duzym wolumenem "
+            f"(bulk_potential={bulk_potential}, scale={scale}, vol={monthly_volume!r}) "
+            "Track A (private_label, produkcja w Chinach pod ich marka) jest "
+            "GLOWNYM pitchem, Track B (panel B2B z magazynu) drugorzednym "
+            "'na biezaco/uzupelnienie'. Najpierw Chiny, potem magazyn."
         )
 
-    if segment in {"paint_and_sip", "warsztaty_dzieci", "animatorzy_eventy"}:
-        return (
-            f"both - dla segmentu {segment} Track B (b2b_panel) jest naturalny "
-            "(konsumpcyjne zuzycie farb/platen), ALE Track A wspominamy zawsze "
-            "(zestawy startowe z ich logo, marka warsztatu, gift-boxy na eventy). "
-            "Track A jako mocna mozliwosc rozwoju, nie afterthought."
-        )
-
-    if segment == "szkola_artystyczna":
-        return (
-            "both - szkoly maja oba zastosowania: Track B (regularne uzupelnianie "
-            "materialow), Track A (zestawy edukacyjne z brandingiem szkoly, "
-            "merch dla absolwentow). Wymien obie, prefer Track A jako 'rozwoj'."
-        )
-
-    # sklep_plastyczny / sklep_papierniczy / inne - domyslnie 'both', Track A first
     return (
-        f"both - dla segmentu {segment} ZAWSZE proponuj OBIE opcje. "
-        "Track A (private_label) PIERWSZY: produkujemy pod ich marka w Chinach, "
-        "30-50% taniej niz polska hurtownia, zbudowanie wlasnej marki. "
-        "Track B (b2b_panel) jako szybkie wejscie 'na juz' / uzupelnienie asortymentu."
+        f"private_label - dla segmentu {segment} domyslnie pchamy import z Chin "
+        "+ private label jako GLOWNY pitch. To NASZ core differentiator vs "
+        "polska hurtownia. Panel B2B mozesz dorzucic 1 zdaniem marginalnie "
+        "'a jesli czegos potrzebujecie OD REKI, mamy tez panel z magazynu PL'."
     )
 
 
@@ -541,22 +636,53 @@ a nie generator.
 
 ## FILOZOFIA SPRZEDAZY ARTMAKERA (krytyczne)
 
-Mamy dwie sciezki. Track A = private label / produkcja w Chinach pod
-marka klienta. Track B = panel B2B z magazynu PL, dostawa 24h.
+Mamy dwie sciezki. Track A = IMPORT z Chin + PRODUKCJA pod marka klienta
+(private label). Track B = panel B2B z magazynu PL, dostawa 24h.
 
 **Plan A = Track A. Plan B = Track B. NIE odwrotnie.**
 
 Wiekszosc cold maili w naszej branzy proponuje TYLKO Track B - "kupcie
 od nas hurt, wysylamy". To zostawia 80% wartosci na stole. My idziemy
-inaczej:
+inaczej. Sa dwa Powody:
 
-- Domyslnie wymieniamy OBIE opcje
-- ZAWSZE Track A pierwszy (wieksze biznes, wieksza marza, wieksza
-  wartosc dla klienta)
-- Track B jako "a jak czegos potrzebujecie OD RAZU z magazynu, mamy
-  panel"
-- TYLKO marka_wlasna dostaje WYLACZNIE Track A
-- TYLKO bardzo male single-shop bez aspiracji moze dostac tylko Track B
+1. **Track A daje wieksze biznes klientowi.** Wlasna marka, kontrola "
+   nad jakoscia i marketingiem, 30-50% nizsze koszty bo omijaja
+   posrednikow. To dla nich PRAWDZIWA strategia rozwoju.
+
+2. **Track A daje wieksza marze nam.** Produkcja pod ich brand = dluga
+   relacja, regularne zamowienia, retencja klienta. Panel B2B to
+   single-transaction zarobek.
+
+Reguly:
+- KAZDY mail MUSI zawierac co najmniej 1 zdanie o produkcji w Chinach
+  / private label / imporcie / fabrykach / wlasnej marce / specyfikacji
+  klienta. Niezaleznie od offer_track. **Bez tej wzmianki mail jest do
+  kosza - to nasz core differentiator.**
+- Domyslnie pchamy private_label jako GLOWNY pitch
+- Track B wymieniamy jako DODATEK 1 zdaniem ('a jak chcecie cos od reki
+  z magazynu, mamy tez panel b2b.sowins.pl')
+- 'both' uzywamy gdy widac sygnaly skali (regularny przeplyw +
+  perspektywa wlasnej marki)
+- 'b2b_panel' samodzielnie - RZADKO, tylko gdy lead ewidentnie maly
+  i nie pasuje do produkcji
+- Marka_wlasna -> WYLACZNIE Track A (ich biznes jest budowanie marki)
+
+Fraza "fabryka swiata" jest dozwolona i polecana - opisuje DOKLADNIE
+co Chiny robia (wszystko, w roznych jakosciach, na zamowienie).
+
+## ZASADY SPRZEDAZOWE - czego NIE robic w cold mailu
+
+- **NIE proponujemy probek/sampli/giftow.** Wysylanie fizycznych rzeczy
+  na cold mail to spalone pieniadze: probka pojdzie, oni nigdy nie odpisza.
+  Probki dopiero gdy klient ZAINTERESOWANY i wymienilismy 2-3 maile.
+- **NIE proponujemy "darmowych mockupow projektowych"** w cold mailu z
+  tego samego powodu (5 dni mojego graphic designera za zero komitmentu).
+- **TAK proponujemy:**
+  - Wstepna WYCENA produkcyjna (email) - tani, daje konkretna liczbe.
+  - INDYWIDUALNA OFERTA emailem - kategorie pasujace do ich biznesu.
+  - KROTKA ROZMOWA telefoniczna / spotkanie (15 min) - dla wartych leadow.
+  - DOSTEP DO PANELU B2B (link) - dla leadow ktore chca tylko hurt-od-reki.
+  - PYTANIE O ZAINTERESOWANIE - najlzejsze, dla leadow niepewnych.
 
 To rozroznia nas od kazdego "hurtownika" co bombarduje katalogiem.
 My pomagamy zbudowac IM marke, oni placa nam za produkcje. To inny

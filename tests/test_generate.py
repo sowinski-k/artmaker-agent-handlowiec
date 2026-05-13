@@ -95,12 +95,18 @@ class TestSuggestTrackHint:
         assert "private_label" in hint
         assert "Track A" in hint
 
-    def test_default_segmentu_to_both_not_b2b(self):
-        """KRYTYCZNE: default NIE moze byc b2b_panel. To bylo zlamane wczesniej."""
+    def test_default_segmentu_to_private_label_not_b2b(self):
+        """KRYTYCZNE (regression v2 dla Seneks-mailu): default to private_label
+        NIE 'both' i NIE 'b2b_panel'. Maile typu Seneks mialy tylko Track B
+        bo heurystyka pchala 'both' i LLM defaultowal do panel'a."""
         hint = _suggest_track_hint("sklep_papierniczy", None, None, None)
-        assert hint.startswith("both")
-        # b2b_panel moze byc wzmiankowany jako alternatywa, ale Track A pierwsze
-        assert "Track A" in hint or "PIERWSZY" in hint or "private_label" in hint
+        # Nie b2b_panel
+        assert not hint.startswith("b2b_panel")
+        # Track A (private_label) GLOWNY
+        assert "private_label" in hint
+        # I to jako glowny pitch, nie marginalny
+        assert ("GLOWNY" in hint or "pchamy" in hint
+                or hint.startswith("private_label"))
 
     def test_high_bulk_potential_suggests_both_track_a(self):
         """bulk_potential=2 -> both z mocnym Track A signal."""
@@ -113,10 +119,14 @@ class TestSuggestTrackHint:
         hint = _suggest_track_hint("sklep_plastyczny", "5000 PLN", 1.0, 1.0)
         assert hint.startswith("both")
 
-    def test_low_volume_small_shop_still_both(self):
-        """Nawet maly sklep dostaje both, nie tylko b2b_panel."""
+    def test_low_volume_small_shop_still_private_label(self):
+        """Nawet maly sklep dostaje private_label suggestion (v2), nie 'both'
+        ani 'b2b_panel'. Domyslna sciezka to import z Chin pod marka klienta."""
         hint = _suggest_track_hint("sklep_plastyczny", "300 PLN", 0.5, 0.5)
-        assert hint.startswith("both")
+        # NIE b2b_panel solo (to byloby zlamanie filozofii Plan A)
+        assert not hint.startswith("b2b_panel")
+        # Private label powinien byc glowny pitch
+        assert "private_label" in hint
 
     def test_paint_and_sip_both_with_track_b_first(self):
         """Paint&sip konsumuja od reki, ale Track A wciaz w sugestii."""
@@ -207,6 +217,43 @@ class TestValidateDraft:
         )
         warns = validate_draft(wrong)
         assert any("Track B" in w and "Track A" in w for w in warns)
+
+    def test_pure_b2b_panel_without_china_warns(self):
+        """KRYTYCZNE (regression dla Seneks-style maila): mail bez wzmianki o
+        Chinach / private label / produkcji - nawet jak offer_track=b2b_panel -
+        traci nasz core differentiator. Musi byc warning."""
+        pure_b2b = self._make_payload(
+            offer_track="b2b_panel",
+            snippet2="Pisze z Artmakera, jesteśmy bezpośrednim importerem.",
+            snippet3="Zamowienia obslugujemy przez panel b2b.sowins.pl. "
+                    "Magazyn w PL, dostawa 24h, minimum 1000 zł netto. "
+                    "Transport gratis przy zamowieniach od minimum.",
+            snippet5="Podrzucic Panu dostep do platformy?",
+        )
+        warns = validate_draft(pure_b2b)
+        assert any("BRAK wzmianki" in w or "differentiator" in w for w in warns), \
+            f"Expected Track A warning, got: {warns}"
+
+    def test_mail_with_chiny_passes_track_a_check(self):
+        """Mail wspominajacy Chiny / produkcje powinien przejsc check."""
+        with_china = self._make_payload(
+            offer_track="private_label",
+            snippet3="Produkujemy w naszych fabrykach w Chinach pod Wasza marke. "
+                    "30-50% taniej, MOQ 300 sztuk. Wycene zrobimy na kazdy produkt.",
+        )
+        warns = validate_draft(with_china)
+        # Sprawdz ze BRAKU Track A keywords nie ma w warningach
+        assert not any("BRAK wzmianki" in w for w in warns), \
+            f"Should not warn about missing Track A keywords, got: {warns}"
+
+    def test_mail_with_private_label_passes_track_a_check(self):
+        with_pl = self._make_payload(
+            offer_track="both",
+            snippet3="Mozemy zrobic private label dla Państwa - własna marka, "
+                    "własne opakowania. Plus panel B2B na uzupełnianie.",
+        )
+        warns = validate_draft(with_pl)
+        assert not any("BRAK wzmianki" in w for w in warns)
 
 
 class TestEdgeCases:
