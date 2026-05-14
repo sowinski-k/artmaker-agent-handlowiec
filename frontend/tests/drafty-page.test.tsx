@@ -1,14 +1,16 @@
 /**
- * Smoke testy /drafty - email-style preview.
+ * Smoke testy /drafty - compact list view + expand-on-click.
  *
  * Co lapie:
  * - Renderuje sie po zalogowaniu
  * - Empty state gdy brak draftow
- * - Email card z subject + body + kontekst leada
+ * - Compact row z subject + company + email (collapsed by default)
+ * - Click row otwiera body + akcje
  * - Track badge (Private Label / Panel B2B / Obie)
  */
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import DraftyPage from '@/app/(app)/drafty/page';
 
@@ -32,11 +34,11 @@ describe('/drafty smoke', () => {
     render(<DraftyPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/brak draftów do review/i)).toBeInTheDocument();
+      expect(screen.getByText(/brak draftów/i)).toBeInTheDocument();
     });
   });
 
-  it('renderuje email card z subject + body', async () => {
+  it('renderuje compact row z subject + company + email', async () => {
     loginUser();
     mockFetchSequence(
       [{
@@ -63,6 +65,15 @@ describe('/drafty smoke', () => {
     await waitFor(() => {
       expect(screen.getByText(/test artbox/i)).toBeInTheDocument();
       expect(screen.getByText('Test subject')).toBeInTheDocument();
+      expect(screen.getByText(/a@artbox\.pl/)).toBeInTheDocument();
+    });
+
+    // Body NIE jest widoczne dopoki nie kliknie wiersza (collapsed by default)
+    expect(screen.queryByText(/zerknalem na Wasza strone/i)).not.toBeInTheDocument();
+
+    // Klik na compact row rozwija pelen mail
+    await userEvent.click(screen.getByText('Test subject'));
+    await waitFor(() => {
       expect(screen.getByText(/zerknalem na Wasza strone/i)).toBeInTheDocument();
     });
   });
