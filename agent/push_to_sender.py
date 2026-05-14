@@ -128,6 +128,14 @@ def push_draft(draft_id: int, campaign_id: int) -> str:
             raise RuntimeError(
                 f"Draft #{draft_id} ma status '{draft.status}', oczekuję 'draft' lub 'approved'."
             )
+        # Twardo wymagamy subject (snippet6 w Woodpeckerze). Nasze prompty zawsze
+        # generuja indywidualny subject - pusty to bug, NIE okazja do fallbacka
+        # w template kampanii. Lepiej zatrzymac wysylke niz puscic generic temat.
+        if not (draft.subject or "").strip():
+            raise RuntimeError(
+                f"Draft #{draft_id} ma pusty temat - nie wysylamy. "
+                "Wygeneruj nowy draft albo dopisz temat recznie w edycji."
+            )
         lead = session.get(Lead, draft.lead_id)
         if lead is None or not (lead.email or "").strip():
             raise RuntimeError(
