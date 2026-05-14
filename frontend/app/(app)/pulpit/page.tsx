@@ -11,6 +11,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { useConfirm } from '@/lib/confirm';
 import Loading from './loading';
 
 interface Module {
@@ -77,12 +78,21 @@ const JOB_LABELS: Record<string, string> = {
 
 export default function HalaPulpit() {
   const router = useRouter();
+  const confirm = useConfirm();
   const [data, setData] = useState<Overview | null>(null);
   const [events, setEvents] = useState<ActivityItem[]>([]);
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
+  // Flash banner zamiast native alert() - spojny z reszta apki
+  const [flash, setFlash] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 5000);
+    return () => clearTimeout(t);
+  }, [flash]);
 
   const fetchActiveJobs = async () => {
     try {
@@ -97,13 +107,25 @@ export default function HalaPulpit() {
   };
 
   const cancelJob = async (id: number) => {
-    if (!confirm(`Anulować job #${id}? Już zrobione leady zostaną w bazie.`)) return;
+    const ok = await confirm({
+      title: `Anulować job #${id}?`,
+      message: 'Już zrobione leady zostaną w bazie. Praca w toku zostanie przerwana.',
+      confirmLabel: 'Anuluj job',
+      cancelLabel: 'Nie',
+      destructive: true,
+      icon: 'player-stop',
+    });
+    if (!ok) return;
     setCancellingId(id);
     try {
       await api(`/api/jobs/${id}/cancel`, { method: 'POST' });
       await fetchActiveJobs();
+      setFlash({ kind: 'success', text: `Job #${id} anulowany.` });
     } catch (err) {
-      alert('Nie udało się anulować: ' + (err instanceof Error ? err.message : 'błąd'));
+      setFlash({
+        kind: 'error',
+        text: 'Nie udało się anulować: ' + (err instanceof Error ? err.message : 'błąd'),
+      });
     } finally {
       setCancellingId(null);
     }
@@ -154,6 +176,23 @@ export default function HalaPulpit() {
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: HALA_CSS }} />
+
+      {/* Globalny flash banner - zamiast alert(). Auto-dismiss 5s. */}
+      {flash && (
+        <div className={`pulpit-flash flash-${flash.kind}`}>
+          {flash.kind === 'success' && <i className="ti ti-check" />}
+          {flash.kind === 'error' && <i className="ti ti-alert-circle" />}
+          {flash.kind === 'info' && <i className="ti ti-info-circle" />}
+          <span style={{ flex: 1 }}>{flash.text}</span>
+          <button
+            className="flash-close"
+            onClick={() => setFlash(null)}
+            aria-label="Zamknij"
+          >
+            <i className="ti ti-x" />
+          </button>
+        </div>
+      )}
 
       <div className="topbar">
         <div className="crumb">
@@ -356,6 +395,30 @@ function ModuleCard({ module: m }: { module: Module }) {
 }
 
 const HALA_CSS = `
+/* Globalny flash (toast) - same styling co w /leady, top-center, auto-dismiss */
+.pulpit-flash {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  z-index: 200; min-width: 320px; max-width: 600px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-radius: 8px;
+  font-size: 13.5px; font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  animation: pulpitFlashIn 0.2s ease-out;
+}
+.pulpit-flash i { font-size: 18px; flex-shrink: 0; }
+.pulpit-flash.flash-success { background: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
+.pulpit-flash.flash-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+.pulpit-flash.flash-info { background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE; }
+.pulpit-flash .flash-close {
+  background: none; border: none; cursor: pointer; color: inherit;
+  opacity: 0.7; padding: 4px; display: flex; font-size: 16px;
+}
+.pulpit-flash .flash-close:hover { opacity: 1; }
+@keyframes pulpitFlashIn {
+  from { transform: translate(-50%, -6px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
 .topbar {
   background: var(--panel);
   border-bottom: 1px solid var(--border);

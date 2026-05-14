@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { useConfirm } from '@/lib/confirm';
 
 interface Patrol {
   id: number;
@@ -78,12 +79,21 @@ const EMPTY_FORM: Form = {
 
 export default function PatrolPage() {
   const router = useRouter();
+  const confirm = useConfirm();
   const [patrols, setPatrols] = useState<Patrol[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
+  // Flash banner zamiast native alert() - spojny ux z reszta apki
+  const [flash, setFlash] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 5000);
+    return () => clearTimeout(t);
+  }, [flash]);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -147,8 +157,15 @@ export default function PatrolPage() {
       }
       setShowForm(false);
       void fetchPatrols();
+      setFlash({
+        kind: 'success',
+        text: editingId ? 'Patrol zaktualizowany.' : 'Patrol utworzony - agent zaczyna pracę w tle.',
+      });
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd zapisu');
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Błąd zapisu',
+      });
     } finally {
       setSubmitting(false);
     }
@@ -169,34 +186,79 @@ export default function PatrolPage() {
         }),
       });
       void fetchPatrols();
+      setFlash({
+        kind: 'success',
+        text: `Patrol "${p.name}" ${!p.enabled ? 'włączony' : 'wyłączony'}.`,
+      });
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd');
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Błąd',
+      });
     }
   }
 
-  async function deletePatrol(id: number) {
-    if (!confirm('Usunąć patrol? Już zebrane leady zostaną w bazie.')) return;
+  async function deletePatrol(id: number, name: string) {
+    const ok = await confirm({
+      title: 'Usunąć patrol?',
+      message: (
+        <>
+          Patrol <strong>{name}</strong> zostanie usunięty.
+          Już zebrane leady <strong>zostaną w bazie</strong> - tylko schedule znika.
+        </>
+      ),
+      confirmLabel: 'Usuń patrol',
+      cancelLabel: 'Anuluj',
+      destructive: true,
+      icon: 'radar-off',
+    });
+    if (!ok) return;
     try {
       await api(`/api/patrol/${id}`, { method: 'DELETE' });
       void fetchPatrols();
+      setFlash({ kind: 'success', text: `Patrol "${name}" usunięty.` });
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd');
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Błąd',
+      });
     }
   }
 
   async function runNow(id: number) {
     try {
       const r = await api<{ msg: string }>(`/api/patrol/${id}/run-now`, { method: 'POST' });
-      alert(r.msg);
+      setFlash({ kind: 'success', text: r.msg });
       void fetchPatrols();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Błąd');
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Błąd',
+      });
     }
   }
 
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
+
+      {/* Globalny flash banner - zamiast alert() */}
+      {flash && (
+        <div className={`patrol-flash flash-${flash.kind}`}>
+          {flash.kind === 'success' && <i className="ti ti-check" />}
+          {flash.kind === 'error' && <i className="ti ti-alert-circle" />}
+          {flash.kind === 'info' && <i className="ti ti-info-circle" />}
+          <span style={{ flex: 1 }}>{flash.text}</span>
+          <button
+            className="flash-close"
+            onClick={() => setFlash(null)}
+            aria-label="Zamknij"
+          >
+            <i className="ti ti-x" />
+          </button>
+        </div>
+      )}
+
       <div className="topbar">
         <div className="crumb">
           <strong>Handlowiec</strong>
@@ -278,7 +340,7 @@ export default function PatrolPage() {
                     <button className="btn-icon" onClick={() => openEdit(p)} title="Edytuj">
                       <i className="ti ti-edit" />
                     </button>
-                    <button className="btn-icon danger" onClick={() => deletePatrol(p.id)} title="Usuń">
+                    <button className="btn-icon danger" onClick={() => deletePatrol(p.id, p.name)} title="Usuń">
                       <i className="ti ti-trash" />
                     </button>
                   </div>
@@ -519,6 +581,30 @@ function formatRelative(iso: string): string {
 }
 
 const CSS = `
+/* Globalny flash (toast) - top-center, auto-dismiss 5s, zamiast native alert */
+.patrol-flash {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  z-index: 200; min-width: 320px; max-width: 600px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-radius: 8px;
+  font-size: 13.5px; font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  animation: patrolFlashIn 0.2s ease-out;
+}
+.patrol-flash i { font-size: 18px; flex-shrink: 0; }
+.patrol-flash.flash-success { background: #DCFCE7; color: #166534; border: 1px solid #86EFAC; }
+.patrol-flash.flash-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+.patrol-flash.flash-info { background: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE; }
+.patrol-flash .flash-close {
+  background: none; border: none; cursor: pointer; color: inherit;
+  opacity: 0.7; padding: 4px; display: flex; font-size: 16px;
+}
+.patrol-flash .flash-close:hover { opacity: 1; }
+@keyframes patrolFlashIn {
+  from { transform: translate(-50%, -6px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
 .topbar {
   background: #FFFFFF;
   border-bottom: 1px solid #E5E7EB;
