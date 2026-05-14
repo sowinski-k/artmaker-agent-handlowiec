@@ -773,7 +773,7 @@ export default function PozyskiwaniePage() {
                   onChange={(e) => setRelevanceThreshold(parseInt(e.target.value))}
                 />
                 <span className="field-hint">
-                  {relevanceThreshold <= 4 && 'Luźny - zostawi prawie wszystko, możesz mieć śmieci.'}
+                  {relevanceThreshold <= 4 && 'Luźny - sprawdzimy też mniej dopasowane firmy.'}
                   {relevanceThreshold === 5 && 'Średni - rozsądny default.'}
                   {relevanceThreshold === 6 && 'Standardowy - typowy próg "dobry lead".'}
                   {relevanceThreshold === 7 && 'Wymagający - tylko jasno pasujące firmy.'}
