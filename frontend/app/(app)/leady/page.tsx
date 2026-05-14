@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { AccountMenu } from '@/lib/AccountMenu';
 import { useConfirm } from '@/lib/confirm';
 
 interface LeadRow {
@@ -718,7 +719,7 @@ export default function LeadyPage() {
           Workspace <i className="ti ti-chevron-right" /> <strong>Ecombinat</strong>
           <i className="ti ti-chevron-right" /> Leady
         </div>
-        <div className="avatar">EC</div>
+        <AccountMenu />
       </div>
 
       {/* Globalny flash */}

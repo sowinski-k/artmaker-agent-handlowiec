@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { AccountMenu } from '@/lib/AccountMenu';
 
 interface Draft {
   id: number;
@@ -268,7 +269,7 @@ export default function DraftyPage() {
             <i className="ti ti-alert-triangle" /> Brak kampanii
           </div>
         )}
-        <div className="avatar">EC</div>
+        <AccountMenu />
       </div>
 
       {/* Globalny flash (top-fixed) */}

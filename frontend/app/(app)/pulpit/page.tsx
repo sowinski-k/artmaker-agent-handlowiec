@@ -11,6 +11,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { AccountMenu } from '@/lib/AccountMenu';
 import { useConfirm } from '@/lib/confirm';
 import Loading from './loading';
 
@@ -204,6 +205,9 @@ export default function HalaPulpit() {
           <i className="ti ti-building-warehouse"></i>
           {workspace.name}
           <span className="plan-pill">{workspace.plan}</span>
+        </div>
+        <div style={{ marginLeft: 'auto' }}>
+          <AccountMenu />
         </div>
       </div>
 

@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { AccountMenu } from '@/lib/AccountMenu';
 import Loading from './loading';
 
 interface DashboardData {
@@ -126,10 +127,10 @@ export default function PulpitPage() {
           Szukaj leadów, kampanii, ustawień…
           <span className="kbd">⌘K</span>
         </div>
-        <button className="topbtn" title="Nowy projekt"><i className="ti ti-plus"></i></button>
-        <button className="topbtn" title="Powiadomienia"><i className="ti ti-bell"></i><span className="dot"></span></button>
-        <button className="topbtn" title="Pomoc"><i className="ti ti-help"></i></button>
-        <div className="avatar">EC</div>
+        {/* Nieklikalne ikony (plus/bell/help) wycofane do czasu implementacji.
+            Avatar zastapiony dynamicznym AccountMenu - inicjaly z user.name,
+            dropdown -> /konto + wyloguj. */}
+        <AccountMenu />
       </div>
 
       <div className="content">
@@ -166,93 +167,122 @@ export default function PulpitPage() {
             Wyswietla tylko gdy hours_saved > 0 (nie pokazujemy 0 zl). */}
         {data.roi && data.roi.hours_saved > 0 && (
           <div className="roi-card">
+            {/* Header - duzy hours_saved + obecne tempo jako sub */}
             <div className="roi-head">
               <div className="roi-title">
-                <i className="ti ti-coin"></i>
+                <i className="ti ti-sparkles"></i>
                 <span>Agent zaoszczędził Ci do tej pory</span>
               </div>
-              <div className="roi-time">
-                <i className="ti ti-clock"></i>
-                <strong>{data.roi.hours_saved}h</strong> roboczogodzin
+              <div className="roi-time-stack">
+                <div className="roi-time-big">
+                  <strong>{data.roi.hours_saved}</strong>
+                  <span className="rt-unit">h</span>
+                </div>
+                <div className="roi-time-sub">
+                  <i className="ti ti-clock-bolt" />
+                  pracy {data.roi.daily_pace_hours ? `· ${data.roi.daily_pace_hours.toFixed(1)} h/dzień` : ''}
+                </div>
               </div>
             </div>
 
-            {/* 3 stawki - od konserwatywnej do realistycznej.
-                Pod kazda: roczna projekcja "w tym tempie zaoszczedzisz X PLN/rok"
-                - efekt psychologiczny: 600 zl wyglada slabo, 73 000 zl/rok wow. */}
-            <div className="roi-amounts roi-amounts-3">
-              <div className="roi-amount-block">
-                <div className="ra-label">Gdybyś zatrudnił kogoś na najniższą krajową</div>
-                <div className="ra-value">
-                  <strong>{data.roi.saved_pln.min_wage_brutto.toLocaleString('pl-PL')}</strong>
-                  <span className="ra-unit"> zł</span>
+            {/* HERO: stawka handlowca = realna wartosc rynkowa, najwiekszy argument.
+                Wybity na lewo - duza kwota + roczna projekcja primary. Drugorzedne
+                stawki (najnizsza krajowa + etat) na prawo jako kolumna. */}
+            <div className="roi-hero-grid">
+              {/* Hero card - sales rate */}
+              <div className="roi-hero">
+                <div className="rh-tag">
+                  <i className="ti ti-trophy" /> Stawka handlowca B2B
                 </div>
-                <div className="ra-rate">
-                  {data.roi.rates.min_wage_pln_per_h.toFixed(2)} zł/h brutto · {data.roi.rates.min_wage_monthly.toLocaleString('pl-PL')} zł/mies. brutto ({data.roi.rates.min_wage_monthly_net.toLocaleString('pl-PL')} zł netto)
-                </div>
-                {data.roi.yearly_saved_pln && (
-                  <div className="ra-yearly">
-                    <i className="ti ti-trending-up" />
-                    W tym tempie <strong>{data.roi.yearly_saved_pln.min_wage_brutto.toLocaleString('pl-PL')} zł/rok</strong>
-                  </div>
-                )}
-              </div>
-              <div className="roi-amount-block">
-                <div className="ra-label">Realny koszt etatu (z ZUS pracodawcy)</div>
-                <div className="ra-value">
-                  <strong>{data.roi.saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')}</strong>
-                  <span className="ra-unit"> zł</span>
-                </div>
-                <div className="ra-rate">
-                  {data.roi.rates.min_wage_employer_pln_per_h.toFixed(2)} zł/h (brutto +{Math.round((data.roi.rates.employer_cost_multiplier - 1) * 100)}% ZUS pracodawcy)
-                </div>
-                {data.roi.yearly_saved_pln && (
-                  <div className="ra-yearly">
-                    <i className="ti ti-trending-up" />
-                    W tym tempie <strong>{data.roi.yearly_saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')} zł/rok</strong>
-                  </div>
-                )}
-              </div>
-              <div className="roi-amount-block primary">
-                <div className="ra-label">Gdybyś wynajął dobrego handlowca</div>
-                <div className="ra-value">
+                <div className="rh-value">
                   <strong>{data.roi.saved_pln.sales_rate.toLocaleString('pl-PL')}</strong>
-                  <span className="ra-unit"> zł</span>
+                  <span className="rh-unit">zł</span>
                 </div>
-                <div className="ra-rate">
-                  {data.roi.rates.sales_rate_pln_per_h.toFixed(0)} zł/h netto
+                <div className="rh-rate">
+                  cena rynkowa za tę pracę · {data.roi.rates.sales_rate_pln_per_h.toFixed(0)} zł/h netto
                 </div>
                 {data.roi.yearly_saved_pln && (
-                  <div className="ra-yearly primary">
-                    <i className="ti ti-trending-up" />
-                    W tym tempie <strong>{data.roi.yearly_saved_pln.sales_rate.toLocaleString('pl-PL')} zł/rok</strong>
+                  <div className="rh-yearly">
+                    <div className="rhy-icon"><i className="ti ti-trending-up" /></div>
+                    <div className="rhy-body">
+                      <div className="rhy-label">W obecnym tempie zaoszczędzisz w skali roku</div>
+                      <div className="rhy-value">
+                        <strong>{data.roi.yearly_saved_pln.sales_rate.toLocaleString('pl-PL')}</strong>
+                        <span className="rhy-unit"> zł/rok</span>
+                      </div>
+                    </div>
                   </div>
                 )}
+              </div>
+
+              {/* Dwie mniejsze karty - porownanie z etatem */}
+              <div className="roi-side-stack">
+                <div className="roi-side">
+                  <div className="rs-tag">Najniższa krajowa</div>
+                  <div className="rs-value">
+                    <strong>{data.roi.saved_pln.min_wage_brutto.toLocaleString('pl-PL')}</strong>
+                    <span className="rs-unit"> zł</span>
+                  </div>
+                  <div className="rs-rate">
+                    {data.roi.rates.min_wage_pln_per_h.toFixed(2)} zł/h brutto · {data.roi.rates.min_wage_monthly.toLocaleString('pl-PL')} zł/mies. ({data.roi.rates.min_wage_monthly_net.toLocaleString('pl-PL')} netto)
+                  </div>
+                  {data.roi.yearly_saved_pln && (
+                    <div className="rs-yearly">
+                      <i className="ti ti-trending-up" />
+                      <strong>{data.roi.yearly_saved_pln.min_wage_brutto.toLocaleString('pl-PL')} zł</strong>
+                      <span> / rok</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="roi-side">
+                  <div className="rs-tag">
+                    Koszt etatu <span className="rs-tag-sub">(brutto + ZUS pracodawcy)</span>
+                  </div>
+                  <div className="rs-value">
+                    <strong>{data.roi.saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')}</strong>
+                    <span className="rs-unit"> zł</span>
+                  </div>
+                  <div className="rs-rate">
+                    {data.roi.rates.min_wage_employer_pln_per_h.toFixed(2)} zł/h · +{Math.round((data.roi.rates.employer_cost_multiplier - 1) * 100)}% narzutu ZUS
+                  </div>
+                  {data.roi.yearly_saved_pln && (
+                    <div className="rs-yearly">
+                      <i className="ti ti-trending-up" />
+                      <strong>{data.roi.yearly_saved_pln.min_wage_employer_cost.toLocaleString('pl-PL')} zł</strong>
+                      <span> / rok</span>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
             {/* Breakdown - co skladalo sie na ten ROI (user-friendly) */}
             <div className="roi-breakdown-list">
               <div className="rbl-head">
-                <i className="ti ti-list-details" /> Co dokładnie zrobił za Ciebie:
+                <i className="ti ti-list-details" /> Z czego to się składa
               </div>
-              {data.roi.breakdown.filter(b => b.count > 0).map((b) => (
-                <div className="rbl-row" key={b.label}>
-                  <span className="rbl-label">{b.label}</span>
-                  <span className="rbl-formula">
-                    <strong>{b.count}</strong> × {b.min_each} min
-                  </span>
-                  <span className="rbl-total">
-                    = {Math.round(b.total_min / 60 * 10) / 10}h
-                  </span>
-                </div>
-              ))}
+              {data.roi.breakdown.filter(b => b.count > 0).map((b) => {
+                const hours = Math.round(b.total_min / 60 * 10) / 10;
+                return (
+                  <div className="rbl-row" key={b.label}>
+                    <span className="rbl-label">{b.label}</span>
+                    <span className="rbl-formula">
+                      <strong>{b.count.toLocaleString('pl-PL')}</strong>
+                      <span className="rbl-mul"> × </span>
+                      {b.min_each} min
+                    </span>
+                    <span className="rbl-total">
+                      = <strong>{hours}h</strong>
+                    </span>
+                  </div>
+                );
+              })}
             </div>
             <div className="roi-footer-note">
               <i className="ti ti-info-circle" />
               Liczone wg oficjalnej stawki godzinowej {data.roi.rates.year}: {data.roi.rates.min_wage_pln_per_h.toFixed(2)} zł/h brutto
-              (Rozp. Rady Ministrów){data.roi.daily_pace_hours ? ` · obecne tempo: ${data.roi.daily_pace_hours.toFixed(2)} h/dzień` : ''}.
-              Aktualizujemy automatycznie co rok.
+              (Rozp. Rady Ministrów). Aktualizujemy automatycznie co rok.
             </div>
           </div>
         )}
@@ -603,11 +633,18 @@ const PULPIT_CSS = `
 .card-body { padding: 16px; }
 
 /* ============ ROI WIDGET ============ */
+/* ============ ROI WIDGET v3 ============
+ * Hierarchia: header + 2 kolumny -
+ *   LEWA (2x szerokość): hero z sales_rate (najsilniejszy argument)
+ *   PRAWA: stack 2 mniejszych kart (najniższa krajowa + koszt etatu)
+ * Wszystkie 3 ze swoją roczną projekcją.
+ * Dół: breakdown - "z czego to się składa" + footer note.
+ */
 .roi-card {
-  background: linear-gradient(135deg, #1C1C1C 0%, #2A2A2A 50%, #1C1C1C 100%);
+  background: linear-gradient(135deg, #1C1C1C 0%, #252525 50%, #1C1C1C 100%);
   border: 1px solid #2A2A2A;
-  border-radius: 14px;
-  padding: 20px 24px;
+  border-radius: 16px;
+  padding: 22px 24px 18px;
   margin-bottom: 24px;
   color: #fff;
   position: relative;
@@ -615,87 +652,174 @@ const PULPIT_CSS = `
 }
 .roi-card::before {
   content: '';
-  position: absolute; inset: 0;
-  background: radial-gradient(circle at top right, rgba(212,33,44,0.18), transparent 50%);
+  position: absolute; top: -100px; right: -120px;
+  width: 360px; height: 360px;
+  background: radial-gradient(circle, rgba(212,33,44,0.20) 0%, transparent 60%);
   pointer-events: none;
 }
+.roi-card::after {
+  content: '';
+  position: absolute; bottom: -180px; left: -120px;
+  width: 320px; height: 320px;
+  background: radial-gradient(circle, rgba(212,33,44,0.08) 0%, transparent 60%);
+  pointer-events: none;
+}
+
 .roi-head {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 16px; gap: 12px; flex-wrap: wrap;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 18px; gap: 12px; flex-wrap: wrap;
   position: relative;
 }
 .roi-title {
-  display: flex; align-items: center; gap: 10px;
-  font-size: 14px; color: #D1D5DB;
+  display: flex; align-items: center; gap: 12px;
+  font-size: 15px; color: #E5E7EB; font-weight: 500;
+  letter-spacing: -0.1px;
 }
 .roi-title i {
-  font-size: 22px; color: #D4212C;
-  background: rgba(212,33,44,0.15);
-  padding: 8px; border-radius: 50%;
+  font-size: 20px; color: #FCA5A5;
+  background: rgba(212,33,44,0.18);
+  padding: 9px; border-radius: 50%;
 }
-.roi-time {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 13px; color: #9CA3AF;
+.roi-time-stack {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 2px;
 }
-.roi-time i { color: #D4212C; font-size: 14px; }
-.roi-time strong { color: #fff; font-size: 16px; font-family: 'JetBrains Mono', monospace; }
+.roi-time-big {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 30px; line-height: 1;
+  color: #fff;
+}
+.roi-time-big strong { font-weight: 700; }
+.roi-time-big .rt-unit {
+  font-size: 18px; color: #FCA5A5; margin-left: 2px;
+}
+.roi-time-sub {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: #9CA3AF;
+}
+.roi-time-sub i { font-size: 12px; color: #86EFAC; }
 
-.roi-amounts {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
-  margin-bottom: 14px; position: relative;
+/* HERO grid - 2:3 (sides:hero) na desktopie, kolumna na mobile */
+.roi-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 14px;
+  position: relative;
+  margin-bottom: 16px;
 }
-.roi-amounts-3 { grid-template-columns: 1fr 1fr 1fr; }
-@media (max-width: 900px) {
-  .roi-amounts-3 { grid-template-columns: 1fr; }
+@media (max-width: 980px) {
+  .roi-hero-grid { grid-template-columns: 1fr; }
 }
-.roi-amount-block {
+
+/* HERO card (sales rate) - dominujaca, czerwony gradient, duza kwota */
+.roi-hero {
+  background: linear-gradient(135deg, rgba(212,33,44,0.22) 0%, rgba(212,33,44,0.06) 100%);
+  border: 1px solid rgba(212,33,44,0.40);
+  border-radius: 12px;
+  padding: 18px 20px 16px;
+  position: relative;
+}
+.rh-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 600;
+  color: #FCA5A5;
+  background: rgba(212,33,44,0.18);
+  padding: 4px 10px; border-radius: 12px;
+  letter-spacing: 0.3px;
+  margin-bottom: 14px;
+}
+.rh-tag i { font-size: 13px; }
+.rh-value {
+  font-family: 'JetBrains Mono', monospace;
+  display: flex; align-items: baseline; gap: 4px;
+  font-size: 44px; line-height: 1;
+  margin-bottom: 6px;
+}
+.rh-value strong { font-weight: 700; color: #fff; letter-spacing: -1px; }
+.rh-unit { font-size: 22px; color: #FCA5A5; font-weight: 500; }
+.rh-rate {
+  font-size: 11.5px; color: #9CA3AF;
+  letter-spacing: 0.2px;
+  margin-bottom: 14px;
+}
+.rh-yearly {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(252,165,165,0.25);
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+}
+.rh-yearly::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: linear-gradient(180deg, #FCA5A5, #D4212C);
+}
+.rhy-icon {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: rgba(252,165,165,0.15);
+  display: flex; align-items: center; justify-content: center;
+  color: #86EFAC; font-size: 16px; flex-shrink: 0;
+}
+.rhy-body { flex: 1; min-width: 0; }
+.rhy-label {
+  font-size: 10.5px; color: #9CA3AF;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  margin-bottom: 4px;
+}
+.rhy-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px; line-height: 1;
+}
+.rhy-value strong { color: #fff; font-weight: 700; }
+.rhy-unit { font-size: 13px; color: #FCA5A5; }
+
+/* Side cards stack - 2 mniejsze karty pod hero, drugorzedne stawki */
+.roi-side-stack {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.roi-side {
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 10px;
-  padding: 14px 16px;
+  padding: 12px 14px;
 }
-.roi-amount-block.primary {
-  background: linear-gradient(135deg, rgba(212,33,44,0.18) 0%, rgba(212,33,44,0.08) 100%);
-  border-color: rgba(212,33,44,0.35);
+.rs-tag {
+  font-size: 11px; color: #D1D5DB; font-weight: 600;
+  letter-spacing: 0.4px;
+  margin-bottom: 6px;
 }
-.ra-label {
-  font-size: 11px; color: #9CA3AF;
-  text-transform: uppercase; letter-spacing: 0.6px;
-  margin-bottom: 8px;
+.rs-tag-sub {
+  font-size: 10px; color: #6B7280; font-weight: 400;
+  margin-left: 2px;
 }
-.ra-value {
+.rs-value {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 28px; color: #fff; line-height: 1;
+  display: flex; align-items: baseline;
+  font-size: 22px; line-height: 1;
   margin-bottom: 4px;
 }
-.ra-value strong { font-weight: 700; }
-.roi-amount-block.primary .ra-value strong { color: #FCA5A5; }
-.ra-unit { font-size: 16px; color: #6B7280; }
-.ra-rate {
-  font-size: 11px; color: #6B7280;
-  font-family: 'JetBrains Mono', monospace;
+.rs-value strong { color: #fff; font-weight: 700; }
+.rs-unit { font-size: 13px; color: #6B7280; }
+.rs-rate {
+  font-size: 10.5px; color: #6B7280;
+  letter-spacing: 0.15px;
+  margin-bottom: 8px;
   line-height: 1.4;
 }
-/* Roczna projekcja - osobny wiersz pod stawka godzinowa, wyrazniejszy
-   wizualnie zeby user widzial KRAJOBRAZ ROCZNY (efekt psychologiczny:
-   600 zl per kontekst to nic, 73 000 zl/rok to argument). */
-.ra-yearly {
+.rs-yearly {
   display: inline-flex; align-items: center; gap: 5px;
-  margin-top: 8px;
-  padding: 5px 10px;
-  border-radius: 12px;
-  background: rgba(255,255,255,0.06);
-  font-size: 11px; color: #D1D5DB;
+  padding: 4px 9px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.05);
   border: 1px solid rgba(255,255,255,0.08);
+  font-size: 11px; color: #9CA3AF;
+  font-family: 'JetBrains Mono', monospace;
 }
-.ra-yearly i { font-size: 12px; color: #86EFAC; }
-.ra-yearly strong { color: #fff; font-weight: 600; }
-.ra-yearly.primary {
-  background: rgba(252, 165, 165, 0.12);
-  border-color: rgba(252, 165, 165, 0.25);
-}
-.ra-yearly.primary strong { color: #FCA5A5; }
-.ra-yearly.primary i { color: #FCA5A5; }
+.rs-yearly i { color: #86EFAC; font-size: 12px; }
+.rs-yearly strong { color: #fff; font-weight: 600; }
 
 .roi-breakdown-list {
   padding-top: 14px;
@@ -705,34 +829,43 @@ const PULPIT_CSS = `
 }
 .rbl-head {
   display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: #6B7280;
-  text-transform: uppercase; letter-spacing: 0.6px;
-  margin-bottom: 8px;
+  font-size: 11px; color: #9CA3AF;
+  text-transform: uppercase; letter-spacing: 0.7px;
+  margin-bottom: 10px;
+  font-weight: 600;
 }
-.rbl-head i { font-size: 13px; }
+.rbl-head i { font-size: 13px; color: #FCA5A5; }
 .rbl-row {
-  display: grid; grid-template-columns: 1fr auto auto;
-  gap: 12px; align-items: baseline;
-  padding: 6px 0;
+  display: grid; grid-template-columns: 1fr auto 70px;
+  gap: 16px; align-items: baseline;
+  padding: 8px 0;
   border-bottom: 1px solid rgba(255,255,255,0.04);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .rbl-row:last-child { border-bottom: none; }
-.rbl-label { color: #D1D5DB; }
-.rbl-formula { color: #9CA3AF; font-family: 'JetBrains Mono', monospace; }
-.rbl-formula strong { color: #fff; }
-.rbl-total {
-  color: #FCA5A5; font-family: 'JetBrains Mono', monospace;
-  font-weight: 600; min-width: 50px; text-align: right;
+.rbl-label { color: #E5E7EB; }
+.rbl-formula {
+  color: #9CA3AF;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
 }
+.rbl-formula strong { color: #fff; font-weight: 600; }
+.rbl-mul { color: #6B7280; padding: 0 2px; }
+.rbl-total {
+  color: #FCA5A5;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  text-align: right;
+}
+.rbl-total strong { font-weight: 700; }
+
 .roi-footer-note {
   display: flex; align-items: flex-start; gap: 8px;
   font-size: 10.5px; color: #6B7280;
-  line-height: 1.4;
-  padding-top: 8px;
+  line-height: 1.5;
+  padding-top: 10px;
   border-top: 1px solid rgba(255,255,255,0.05);
   position: relative;
-  font-style: italic;
 }
 .roi-footer-note i { color: #6B7280; flex-shrink: 0; margin-top: 1px; font-size: 12px; }
 
