@@ -172,7 +172,6 @@ class TestValidateDraft:
                     "Trzydzieści procent taniej niż polska hurtownia. "
                     "MOQ i terminy ustalimy indywidualnie zależnie od produktu. "
                     "A jak czegoś potrzebujecie z magazynu PL, mamy też panel B2B.",
-            snippet4=None,
             snippet5="Wysłać wstępną wycenę produkcyjną?",
         )
         defaults.update(overrides)
@@ -308,7 +307,6 @@ class TestMoqHalucynacjaCheck:
             snippet1="Zerknąłem na Państwa stronę i mam pytanie.",
             snippet2="Piszę z Artmakera, jesteśmy producentem w Chinach.",
             snippet3=s3,
-            snippet4=None,
             snippet5="Wysłać wycenę produkcyjną?",
         )
 

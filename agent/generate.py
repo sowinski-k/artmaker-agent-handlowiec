@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -257,7 +257,6 @@ def validate_draft(payload: "EmailDraftPayload") -> list[str]:
         ("snippet1", payload.snippet1),
         ("snippet2", payload.snippet2),
         ("snippet3", payload.snippet3),
-        ("snippet4", payload.snippet4),
         ("snippet5", payload.snippet5),
     ]
     body_concat_parts: list[str] = []
@@ -423,10 +422,6 @@ class EmailDraftPayload(BaseModel):
     snippet3: str = Field(
         description="Konkretna propozycja wartości - liczby, terminy, czym się różnimy."
     )
-    snippet4: Optional[str] = Field(
-        default=None,
-        description="Opcjonalny social proof / liczba (jeśli pasuje, inaczej null)."
-    )
     snippet5: str = Field(
         description="CTA jako pytanie - niskim wysiłkiem dla odbiorcy."
     )
@@ -590,8 +585,6 @@ def _build_user_prompt(lead: Lead) -> str:
         f"  * Dla pure b2b_panel (RZADKO!): nawet wtedy DORZUC 1 zdanie "
         f"    'a jak chcielibyscie zbudowac wlasna marke, mozemy tez produkowac "
         f"    pod Wasza specyfikacje w Chinach - wycenimy chetnie'.\n"
-        f"- snippet4: opcjonalny social proof / liczba. Tylko jesli AUTENTYCZNE. "
-        f"  Lepsze null niz wymyslone. NIE WYMYSLAJ liczb.\n"
         f"- snippet5: CTA-PYTANIE. Niski wysilek dla odbiorcy. WAZNE: ZADNYCH "
         f"  PROBEK / SAMPLI / GIFTOW / GRATIS-MOCKUPOW. Nie wysylamy fizycznych "
         f"  rzeczy w cold mailu - to zostaje bezzwrotnie i konwersja zerowa. "
@@ -994,7 +987,6 @@ def generate_draft_for_lead(
         snippet1=_strip_ai_artifacts(payload.snippet1) or payload.snippet1,
         snippet2=_strip_ai_artifacts(payload.snippet2) or payload.snippet2,
         snippet3=_strip_ai_artifacts(payload.snippet3) or payload.snippet3,
-        snippet4=_strip_ai_artifacts(payload.snippet4),
         snippet5=_strip_ai_artifacts(payload.snippet5) or payload.snippet5,
     )
 
@@ -1022,7 +1014,6 @@ def generate_draft_for_lead(
             snippet1=payload.snippet1,
             snippet2=payload.snippet2,
             snippet3=payload.snippet3,
-            snippet4=payload.snippet4,
             snippet5=payload.snippet5,
             full_preview=full_preview,
             status=DraftStatus.DRAFT.value,
@@ -1057,10 +1048,6 @@ SNIPPET_INSTRUCTIONS = {
         "BEZ podawania URL panelu w mailu, linki w cold mailu = ryzyko spam; "
         "private_label = produkcja Chiny + MOQ 300-1000szt). "
         "Liczby, terminy. Bez 'rewolucyjny', 'wyjątkowy', 'innowacyjny'."
-    ),
-    "snippet4": (
-        "Wygeneruj alternatywny social proof / konkretną liczbę. Tylko AUTENTYCZNE - "
-        "lepiej zwróć pusty string jeśli nic prawdziwego nie ma sensu wpisać."
     ),
     "snippet5": (
         "Wygeneruj alternatywne CTA. MUSI być pytaniem z niskim wysiłkiem dla "
@@ -1121,7 +1108,6 @@ def regenerate_snippet(
             "snippet1": draft.snippet1 or "",
             "snippet2": draft.snippet2 or "",
             "snippet3": draft.snippet3 or "",
-            "snippet4": draft.snippet4 or "",
             "snippet5": draft.snippet5 or "",
         }
         current_block = "\n".join(
@@ -1181,8 +1167,6 @@ def _assemble_preview(payload: EmailDraftPayload) -> str:
         "",
         payload.snippet3,
     ]
-    if payload.snippet4:
-        parts.extend(["", payload.snippet4])
     parts.extend(["", payload.snippet5])
     return "\n".join(parts)
 

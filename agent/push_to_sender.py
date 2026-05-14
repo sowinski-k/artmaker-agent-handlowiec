@@ -71,7 +71,6 @@ def _build_prospect(lead: Lead, draft: EmailDraft) -> WoodpeckerProspect:
         snippet1=draft.snippet1,
         snippet2=draft.snippet2,
         snippet3=draft.snippet3,
-        snippet4=draft.snippet4,
         snippet5=draft.snippet5,
         snippet6=draft.subject,
         snippet7=lead.city or None,

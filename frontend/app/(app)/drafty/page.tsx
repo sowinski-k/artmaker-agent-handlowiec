@@ -20,7 +20,6 @@ interface Draft {
   snippet1: string;
   snippet2: string;
   snippet3: string;
-  snippet4: string | null;
   snippet5: string;
   full_preview: string;
   status: string;
@@ -57,7 +56,6 @@ const FIELD_LABELS: Record<string, string> = {
   snippet1: 'Otwarcie',
   snippet2: 'Most do oferty',
   snippet3: 'Propozycja wartości',
-  snippet4: 'Social proof (opcjonalny)',
   snippet5: 'CTA',
 };
 
@@ -66,7 +64,6 @@ const FIELD_HINTS: Record<string, string> = {
   snippet1: 'Musi nawiązać do konkretnego haka z researchu.',
   snippet2: 'Kim jesteś + dlaczego piszesz akurat do nich.',
   snippet3: 'Konkretna oferta: Chiny / private label + opcjonalnie panel B2B.',
-  snippet4: 'Pomiń jeśli nie ma autentycznego social proof.',
   snippet5: 'Pytanie z niskim wysiłkiem (wycena? rozmowa? zainteresowanie?).',
 };
 
@@ -163,7 +160,6 @@ export default function DraftyPage() {
       snippet1: d.snippet1 || '',
       snippet2: d.snippet2 || '',
       snippet3: d.snippet3 || '',
-      snippet4: d.snippet4 || '',
       snippet5: d.snippet5 || '',
     });
   }
@@ -177,10 +173,7 @@ export default function DraftyPage() {
     try {
       await api(`/api/drafts/${draftId}`, {
         method: 'PATCH',
-        body: JSON.stringify({
-          ...editValues,
-          snippet4: editValues.snippet4 || null,
-        }),
+        body: JSON.stringify(editValues),
       });
       setEditing(null);
       setFlash({ kind: 'success', text: `Draft #${draftId} zapisany.` });
@@ -485,7 +478,7 @@ export default function DraftyPage() {
                 {/* BODY: edycja lub preview */}
                 {isEditing ? (
                   <div className="ec-edit">
-                    {(['subject', 'snippet1', 'snippet2', 'snippet3', 'snippet4', 'snippet5'] as const).map((field) => (
+                    {(['subject', 'snippet1', 'snippet2', 'snippet3', 'snippet5'] as const).map((field) => (
                       <div className="edit-field" key={field}>
                         <div className="edit-field-head">
                           <label>{FIELD_LABELS[field]}</label>
@@ -524,7 +517,7 @@ export default function DraftyPage() {
                       <span className="ec-subject-v">{d.subject || <em>(brak tematu)</em>}</span>
                     </div>
                     <div className="ec-mail">
-                      {[d.snippet1, d.snippet2, d.snippet3, d.snippet4, d.snippet5]
+                      {[d.snippet1, d.snippet2, d.snippet3, d.snippet5]
                         .filter(Boolean)
                         .map((p, i) => (
                           <p key={i}>{p}</p>
