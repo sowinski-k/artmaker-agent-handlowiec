@@ -24,7 +24,7 @@ do sprzedazy detalicznej i wewnatrz warsztatow. MOQ, terminy i wycene
 ustalimy zaleznie od konkretnego produktu i stopnia personalizacji - mozecie
 zaczac od top-3 SKU jakie najlepiej Wam schodza.
 
-Na biezace uzupelnianie - mamy tez panel b2b.sowins.pl, magazyn w Polsce,
+Na biezace uzupelnianie - mamy tez nasz wlasny panel B2B, magazyn w Polsce,
 dostawa w 24h, minimum 1000 zl netto + transport gratis. To "Plan B"
 gdy czegos brakuje OD RAZU.
 

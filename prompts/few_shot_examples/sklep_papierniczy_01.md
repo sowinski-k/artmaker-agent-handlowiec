@@ -25,7 +25,7 @@ taniej niz importujecie teraz przez dystrybutora. Buduje to Wasza wlasna linie,
 nie zostawia marze polskiemu importerowi. MOQ, terminy i wycene zalezne od
 produktu - ustalimy indywidualnie po wskazaniu konkretnego SKU.
 
-A jak chcecie cos OD REKI na biezace uzupelnianie - mamy tez panel b2b.sowins.pl
+A jak chcecie cos OD REKI na biezace uzupelnianie - mamy tez wlasny panel B2B
 z magazynu w PL, minimum 1000 zl + transport gratis.
 
 Wycenic dla porownania Wasze top-3 najlepiej rotujace papiery pod marka Synchronik?

@@ -1840,18 +1840,42 @@ def list_drafts(
     status_filter: str | None = "draft", limit: int = 50,
     cur: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    """Lista draftow + KONTEKST leada (kontakt, email, segment, miasto, score).
+    """Lista draftow + KONTEKST leada (kontakt, email, segment, miasto, score)
+    + status wysylki do Woodpeckera (pending job / ostatni error).
 
-    Frontend potrzebuje tego do email-style header (DO/FIRMA/SCORE), zeby user
-    od razu widzial DO KOGO mail leci, BEZ klikania na lead.
+    status_filter: "draft" | "approved" | "sent" | "rejected" | "all" (lub None).
     """
     limit = max(1, min(limit, 200))
     with SessionLocal() as session:
         q = select(EmailDraft).options(joinedload(EmailDraft.lead)) \
             .where(EmailDraft.workspace_id == cur.workspace_id) \
             .order_by(desc(EmailDraft.created_at)).limit(limit)
-        if status_filter: q = q.where(EmailDraft.status == status_filter)
+        if status_filter and status_filter != "all":
+            q = q.where(EmailDraft.status == status_filter)
         drafts = session.execute(q).unique().scalars().all()
+        draft_ids = [d.id for d in drafts]
+
+        # Status SEND_DRAFT jobow dla tych draftow - kolejka i ostatni blad.
+        # Worker triggeruje push_draft() ktore moze sie wywalic (DRY_RUN, brak
+        # WOODPECKER_API_KEY, lead bez emaila, STOP.txt). Pokazujemy to userowi.
+        last_send_error: dict[int, str] = {}
+        send_in_progress: set[int] = set()
+        if draft_ids:
+            send_jobs = session.execute(
+                select(Job).where(
+                    Job.workspace_id == cur.workspace_id,
+                    Job.type == JobType.SEND_DRAFT.value,
+                ).order_by(desc(Job.created_at)).limit(500)
+            ).scalars().all()
+            for j in send_jobs:
+                did = j.payload.get("draft_id") if isinstance(j.payload, dict) else None
+                if not isinstance(did, int) or did not in draft_ids:
+                    continue
+                if j.status in (JobStatus.PENDING.value, JobStatus.RUNNING.value):
+                    send_in_progress.add(did)
+                elif j.status == JobStatus.FAILED.value and did not in last_send_error:
+                    last_send_error[did] = j.last_error or "Wysylka sie nie powiodla."
+
         return [{
             "id": d.id, "lead_id": d.lead_id,
             "company": d.lead.company_name if d.lead else "(unknown)",
@@ -1869,6 +1893,10 @@ def list_drafts(
             "generated_by_model": d.generated_by_model,
             "created_at": iso_utc(d.created_at),
             "sent_at": iso_utc(d.sent_at),
+            # Sygnaly wysylki - kluczowe by user widzial co sie dzieje:
+            "woodpecker_prospect_id": d.woodpecker_prospect_id,
+            "send_in_progress": d.id in send_in_progress,
+            "last_send_error": last_send_error.get(d.id),
         } for d in drafts]
 
 
@@ -1978,7 +2006,10 @@ class SendDraftIn(BaseModel):
 @app.post("/api/drafts/{draft_id}/send")
 def send_draft(draft_id: int, payload: SendDraftIn,
                cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
-    """Tworzy SEND_DRAFT job - worker pushuje do Woodpecker, user może wyjść."""
+    """Tworzy SEND_DRAFT job - worker pushuje do Woodpecker, user może wyjść.
+
+    Blokuje re-send: jesli draft juz SENT lub jest aktywny SEND_DRAFT job
+    w kolejce - zwraca 409 zeby user nie zaspamowal tej samej osoby."""
     with SessionLocal() as session:
         draft = session.execute(
             select(EmailDraft).where(
@@ -1986,6 +2017,34 @@ def send_draft(draft_id: int, payload: SendDraftIn,
             )
         ).scalar_one_or_none()
         if draft is None: raise HTTPException(status_code=404, detail="Draft nie istnieje.")
+        if draft.status == DraftStatus.SENT.value:
+            raise HTTPException(
+                status_code=409,
+                detail=("Draft juz wyslany do Woodpecker"
+                        f"{' ' + iso_utc(draft.sent_at) if draft.sent_at else ''}. "
+                        "Nie wysylamy tej samej wiadomosci drugi raz - "
+                        "uzyj follow-upu jesli chcesz wrocic do tego leada."),
+            )
+        if draft.status == DraftStatus.REJECTED.value:
+            raise HTTPException(
+                status_code=409,
+                detail="Draft odrzucony - przywroc go (lub wygeneruj nowy) zanim wyslesz.",
+            )
+
+        active_send_job = session.execute(
+            select(Job).where(
+                Job.workspace_id == cur.workspace_id,
+                Job.type == JobType.SEND_DRAFT.value,
+                Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+            )
+        ).scalars().all()
+        for j in active_send_job:
+            if isinstance(j.payload, dict) and j.payload.get("draft_id") == draft_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Wysylka tego draftu jest juz w kolejce (job #{j.id}).",
+                )
+
         job = create_job(
             session, job_type=JobType.SEND_DRAFT,
             workspace_id=cur.workspace_id, user_id=cur.user_id,

@@ -283,6 +283,14 @@ def validate_draft(payload: "EmailDraftPayload") -> list[str]:
     if not _check_forma_consistency(full_body):
         warnings.append("body miesza forme 'Panstwo' i 'Wy/Was' - wybierz jedna")
 
+    # URL panelu B2B w body = wpada w spam-filtery (linki w cold mailu)
+    if re.search(r"b2b\.sowins\.pl", full_body, flags=re.IGNORECASE):
+        warnings.append(
+            "URL panelu B2B (b2b.sowins.pl) w body - linki w pierwszym kontakcie "
+            "podnosza ryzyko spam-filterow Gmail/Outlook. Wspomnij ze panel "
+            "B2B mamy, ale URL wysylamy dopiero po odpowiedzi klienta."
+        )
+
     # Track A priority check: jesli offer_track=both, snippet3 powinien
     # zaczynac od Track A signalow przed Track B (heurystyka)
     if payload.offer_track == "both" and payload.snippet3:
@@ -533,8 +541,12 @@ def _build_user_prompt(lead: Lead) -> str:
         f"- 'b2b_panel' (Track B, dodatek) = stala oferta z naszego magazynu "
         f"  w Polsce, dostawa w 24h, ceny hurtowe (rowniez ponizej polskiej "
         f"  hurtowni, ale wyzsze niz Track A bo to ready stock, nie produkcja "
-        f"  pod nich). Panel pod https://b2b.sowins.pl. Minimum logistyczne "
-        f"  1000 zl netto, dostawa GRATIS od tego minimum. NIE pisz 'bez minimum'.\n"
+        f"  pod nich). Mamy dedykowany panel B2B online. **NIE WOLNO podawac "
+        f"  URL panelu w cold mailu (linki w pierwszym kontakcie podnosza "
+        f"  ryzyko spam-filterow i obnizaja deliverability).** Tylko wzmianka "
+        f"  ze panel mamy - URL wysylamy dopiero gdy klient sie zainteresuje "
+        f"  i odpisze. Minimum logistyczne 1000 zl netto, dostawa GRATIS od "
+        f"  tego minimum. NIE pisz 'bez minimum'.\n"
         f"- 'both' = mail z OBIEMA opcjami w jednej wiadomosci. NAJPIERW Track A "
         f"  jako glowny pitch (produkcja w Chinach, private label, 30-50% taniej, "
         f"  indywidualna wycena), POTEM Track B jako alternatywa na biezaco. "
@@ -570,10 +582,11 @@ def _build_user_prompt(lead: Lead) -> str:
         f"    'plotna 30x40 z brandingiem WineArt', 'zestawy startowe DIY w "
         f"    Waszych kolorach'. Wspomnij MOQ jak pasuje (300-1000). Wspomnij "
         f"    indywidualna wycene. Wspomnij ze omijaja posrednikow = 30-50% taniej.\n"
-        f"  * Dla 'both': dorzuc 1 zdanie o panel B2B (URL b2b.sowins.pl, "
-        f"    magazyn PL, dostawa 24h, minimum 1000zl + gratis transport) "
-        f"    jako 'a na biezace uzupelnianie braków mamy tez panel B2B'. "
-        f"    NIGDY jako glowna oferta.\n"
+        f"  * Dla 'both': dorzuc 1 zdanie o panel B2B (magazyn PL, dostawa "
+        f"    24h, minimum 1000zl + gratis transport) jako 'a na biezace "
+        f"    uzupelnianie braków mamy tez panel B2B'. **NIE PODAWAJ URL "
+        f"    panelu - link wysylamy dopiero po pierwszej odpowiedzi klienta, "
+        f"    linki w cold mailu = ryzyko spam.** NIGDY jako glowna oferta.\n"
         f"  * Dla pure b2b_panel (RZADKO!): nawet wtedy DORZUC 1 zdanie "
         f"    'a jak chcielibyscie zbudowac wlasna marke, mozemy tez produkowac "
         f"    pod Wasza specyfikacje w Chinach - wycenimy chetnie'.\n"
@@ -665,7 +678,8 @@ def _suggest_track_hint(
             "private_label (segment marka_wlasna - z definicji Track A, "
             "klient juz buduje wlasna marke). "
             "Track B wspomnij MARGINALNIE 1 zdaniem jako 'a jesli chcecie cos OD REKI "
-            "z magazynu PL do uzupelnienia oferty, mamy tez panel b2b.sowins.pl'."
+            "z magazynu PL do uzupelnienia oferty, mamy tez panel B2B' "
+            "(BEZ podawania URL panelu w mailu - linki w cold mailu = ryzyko spam)."
         )
 
     if segment in {"paint_and_sip", "warsztaty_dzieci", "animatorzy_eventy"}:
@@ -751,7 +765,9 @@ Reguly:
   kosza - to nasz core differentiator.**
 - Domyslnie pchamy private_label jako GLOWNY pitch
 - Track B wymieniamy jako DODATEK 1 zdaniem ('a jak chcecie cos od reki
-  z magazynu, mamy tez panel b2b.sowins.pl')
+  z magazynu, mamy tez panel B2B z magazynu PL'). **NIGDY nie podawaj URL
+  panelu w mailu - linki w pierwszym kontakcie podnosza ryzyko spam-filterow.
+  Link wysylamy dopiero gdy klient sie odezwie.**
 - 'both' uzywamy gdy widac sygnaly skali (regularny przeplyw +
   perspektywa wlasnej marki)
 - 'b2b_panel' samodzielnie - RZADKO, tylko gdy lead ewidentnie maly
@@ -1037,8 +1053,9 @@ SNIPPET_INSTRUCTIONS = {
     ),
     "snippet3": (
         "Wygeneruj alternatywną konkretną ofertę zgodną z offer_track (b2b_panel "
-        "= panel B2B z magazynu, dostawa 24h, minimum 1000 zł, gratis transport, "
-        "URL b2b.sowins.pl; private_label = produkcja Chiny + MOQ 300-1000szt). "
+        "= panel B2B z magazynu, dostawa 24h, minimum 1000 zł, gratis transport - "
+        "BEZ podawania URL panelu w mailu, linki w cold mailu = ryzyko spam; "
+        "private_label = produkcja Chiny + MOQ 300-1000szt). "
         "Liczby, terminy. Bez 'rewolucyjny', 'wyjątkowy', 'innowacyjny'."
     ),
     "snippet4": (

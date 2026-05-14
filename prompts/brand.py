@@ -47,8 +47,13 @@ Dla klientów którzy potrzebują towaru OD RĘKI bez czekania na produkcję.
   na magazynie w Polsce - towar wysyłamy w 24h od złożenia zamówienia.
 - Ceny hurtowe od producenta (omijamy pośredników, więc taniej niż polska
   hurtownia).
-- Dedykowany panel B2B online: **https://b2b.sowins.pl** - aktualny stan
-  magazynowy, ceny po zalogowaniu, historia zamówień, e-faktury.
+- Dedykowany panel B2B online (aktualny stan magazynowy, ceny po
+  zalogowaniu, historia zamówień, e-faktury). **WAŻNE dla cold-mail: URL
+  panelu (b2b.sowins.pl) NIE wolno umieszczać w pierwszym kontakcie -
+  linki w cold mailu podnoszą ryzyko wpadnięcia w spam-filtery Gmail/
+  Outlook.** W cold mailu tylko wspominamy że taki panel mamy ("mamy
+  też dedykowany panel B2B"); URL podsyłamy dopiero gdy klient odpisze
+  i wyrazi zainteresowanie.
 - **Minimum logistyczne: 1000 zł netto** na zamówienie.
 - **Dostawa GRATIS** przy zamówieniach od minimum (1000 zł netto) - my
   pokrywamy koszt transportu kurierskim na terenie PL.
