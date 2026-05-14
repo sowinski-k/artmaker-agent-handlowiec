@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'eCombinat - narzędziownik dla e-commerce',
-  description: 'Polski narzędziownik AI dla e-commerce. Generuj zdjęcia, wideo i opisy w 60 sekund.',
+  title: 'eCombinat — kombinujemy za Ciebie. Zautomatyzuj swój biznes.',
+  description: 'Polski kombinat agentów AI dla firm. Cold-email, kreacja, compliance — pod jednym dachem.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
