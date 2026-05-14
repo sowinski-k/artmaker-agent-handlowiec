@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
 import { AccountMenu } from '@/lib/AccountMenu';
+import { useConfirm } from '@/lib/confirm';
 
 interface Draft {
   id: number;
@@ -28,7 +29,20 @@ interface Draft {
   generated_by_model: string | null;
   created_at: string | null;
   sent_at: string | null;
+  woodpecker_prospect_id: string | null;
+  send_in_progress: boolean;
+  last_send_error: string | null;
 }
+
+type StatusFilter = 'draft' | 'approved' | 'sent' | 'rejected' | 'all';
+
+const STATUS_TABS: { key: StatusFilter; label: string; icon: string }[] = [
+  { key: 'draft', label: 'Do review', icon: 'mail' },
+  { key: 'approved', label: 'Zatwierdzone', icon: 'check' },
+  { key: 'sent', label: 'Wysłane', icon: 'send' },
+  { key: 'rejected', label: 'Odrzucone', icon: 'x' },
+  { key: 'all', label: 'Wszystkie', icon: 'list' },
+];
 
 interface Campaign {
   id: number;
@@ -87,6 +101,7 @@ function trackBadge(variant: string | null) {
 
 export default function DraftyPage() {
   const router = useRouter();
+  const confirm = useConfirm();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaign, setSelectedCampaign] = useState<number | null>(null);
@@ -96,6 +111,7 @@ export default function DraftyPage() {
   const [regenerating, setRegenerating] = useState<string | null>(null);
   const [flash, setFlash] = useState<Flash | null>(null);
   const [expandedView, setExpandedView] = useState<Record<number, boolean>>({});
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('draft');
   // Deep-link: ?open=42 z drawera lead'a
   const [highlightId, setHighlightId] = useState<number | null>(null);
 
@@ -113,7 +129,7 @@ export default function DraftyPage() {
     setLoading(true);
     try {
       const [d, c] = await Promise.all([
-        api<Draft[]>('/api/drafts'),
+        api<Draft[]>(`/api/drafts?status_filter=${statusFilter}`),
         api<Campaign[]>('/api/woodpecker/campaigns').catch(() => []),
       ]);
       setDrafts(d);
@@ -126,7 +142,7 @@ export default function DraftyPage() {
     }
   }
 
-  useEffect(() => { void load(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { void load(); /* eslint-disable-next-line */ }, [statusFilter]);
 
   // Po załadowaniu, scroll do highlighted draft (deep link)
   useEffect(() => {
@@ -200,7 +216,14 @@ export default function DraftyPage() {
   }
 
   async function reject(draftId: number) {
-    if (!confirm('Odrzucić draft? Nie da się tego cofnąć.')) return;
+    const ok = await confirm({
+      title: 'Odrzucić draft?',
+      message: 'Draft zostanie oznaczony jako odrzucony i nie wyślemy go. Nie da się tego cofnąć.',
+      confirmLabel: 'Odrzuć draft',
+      destructive: true,
+      icon: 'x',
+    });
+    if (!ok) return;
     try {
       await api(`/api/drafts/${draftId}/reject`, { method: 'POST' });
       setFlash({ kind: 'info', text: `Draft #${draftId} odrzucony.` });
@@ -215,7 +238,22 @@ export default function DraftyPage() {
       setFlash({ kind: 'error', text: 'Wybierz najpierw kampanię Woodpecker u góry strony.' });
       return;
     }
-    if (!confirm('Wysłać draft do Woodpecker? Lead trafi do sekwencji follow-upów.')) return;
+    const draft = drafts.find((d) => d.id === draftId);
+    const campaign = campaigns.find((c) => c.id === selectedCampaign);
+    const ok = await confirm({
+      title: 'Wysłać draft do Woodpeckera?',
+      message: (
+        <>
+          Wyślemy <strong>Draft #{draftId}</strong>
+          {draft?.lead_email && <> do <strong>{draft.lead_email}</strong></>}
+          {campaign && <> w kampanii <strong>{campaign.name}</strong></>}.
+          {'\n'}Lead trafi do sekwencji follow-upów Woodpeckera.
+        </>
+      ),
+      confirmLabel: 'Wyślij',
+      icon: 'send',
+    });
+    if (!ok) return;
     try {
       const res = await api<{ job_id: number }>(`/api/drafts/${draftId}/send`, {
         method: 'POST',
@@ -290,11 +328,32 @@ export default function DraftyPage() {
           <div>
             <h1>Drafty cold-email</h1>
             <p>
-              {drafts.length === 0
+              {statusFilter === 'sent'
+                ? `${drafts.length} wysłanych · nie wyślemy ich drugi raz (dedup po draft.status)`
+                : statusFilter === 'rejected'
+                ? `${drafts.length} odrzuconych`
+                : statusFilter === 'approved'
+                ? `${drafts.length} zatwierdzonych, czekają na wysyłkę`
+                : statusFilter === 'all'
+                ? `${drafts.length} draftów łącznie`
+                : drafts.length === 0
                 ? 'Brak draftów do review'
                 : `${drafts.length} ${drafts.length === 1 ? 'draft' : drafts.length < 5 ? 'drafty' : 'draftów'} do review · po Twojej akceptacji idzie do Woodpecker`}
             </p>
           </div>
+        </div>
+
+        <div className="status-tabs">
+          {STATUS_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              className={`status-tab ${statusFilter === tab.key ? 'active' : ''}`}
+              onClick={() => setStatusFilter(tab.key)}
+            >
+              <i className={`ti ti-${tab.icon}`} />
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {loading ? (
@@ -344,7 +403,17 @@ export default function DraftyPage() {
                   <div className="ec-id">
                     <i className="ti ti-mail" />
                     <span className="ec-num">Draft #{d.id}</span>
-                    <span className={`status-pill status-${d.status}`}>{d.status}</span>
+                    <span className={`status-pill status-${d.status}`}>
+                      {d.status === 'draft' && 'do review'}
+                      {d.status === 'approved' && 'zatwierdzony'}
+                      {d.status === 'sent' && 'wysłany'}
+                      {d.status === 'rejected' && 'odrzucony'}
+                    </span>
+                    {d.send_in_progress && (
+                      <span className="status-pill status-queued" title="W kolejce - worker pushuje do Woodpeckera">
+                        <i className="ti ti-loader" /> wysyłka w toku
+                      </span>
+                    )}
                     {trackBadge(d.template_variant)}
                     {d.edited_by_user && (
                       <span className="ec-edited" title="Edytowany ręcznie">
@@ -356,6 +425,32 @@ export default function DraftyPage() {
                     {d.created_at && <span title={new Date(d.created_at).toLocaleString('pl-PL')}>{timeAgo(d.created_at)}</span>}
                   </div>
                 </div>
+
+                {/* Banery statusu wysylki - widoczne by user nie wysylal drugi raz */}
+                {d.status === 'sent' && (
+                  <div className="send-banner send-banner-success">
+                    <i className="ti ti-circle-check" />
+                    <div>
+                      <strong>Wysłano do Woodpeckera</strong>
+                      {d.sent_at && <> · {timeAgo(d.sent_at)}</>}
+                      {d.woodpecker_prospect_id && (
+                        <> · prospect <code>#{d.woodpecker_prospect_id}</code></>
+                      )}
+                      <div className="send-banner-sub">
+                        Ten lead nie zostanie zaspamowany powtórnie - wyślij follow-up świeżą wiadomością.
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {d.last_send_error && d.status !== 'sent' && (
+                  <div className="send-banner send-banner-error">
+                    <i className="ti ti-alert-triangle" />
+                    <div>
+                      <strong>Ostatnia próba wysyłki nie powiodła się</strong>
+                      <div className="send-banner-sub">{d.last_send_error}</div>
+                    </div>
+                  </div>
+                )}
 
                 {/* META: Do kogo, firma, segment, score, link do leada */}
                 <div className="ec-meta">
@@ -479,14 +574,37 @@ export default function DraftyPage() {
                           <i className="ti ti-check" /> Zatwierdź
                         </button>
                       )}
-                      <button
-                        className="btn btn-primary"
-                        disabled={!selectedCampaign}
-                        onClick={() => send(d.id)}
-                        title={selectedCampaign ? 'Wyślij teraz do Woodpecker' : 'Wybierz kampanię u góry strony'}
-                      >
-                        <i className="ti ti-send" /> Wyślij do Woodpecker
-                      </button>
+                      {(() => {
+                        const alreadySent = d.status === 'sent';
+                        const isRejected = d.status === 'rejected';
+                        const queued = d.send_in_progress;
+                        const disabled = !selectedCampaign || alreadySent || isRejected || queued;
+                        const title = alreadySent
+                          ? `Już wysłany${d.sent_at ? ' ' + new Date(d.sent_at).toLocaleString('pl-PL') : ''} - nie wysyłamy drugi raz`
+                          : isRejected
+                          ? 'Draft odrzucony - przywróć go zanim wyślesz'
+                          : queued
+                          ? 'Wysyłka już w kolejce - poczekaj na zakończenie'
+                          : !selectedCampaign
+                          ? 'Wybierz kampanię u góry strony'
+                          : 'Wyślij teraz do Woodpeckera';
+                        const label = alreadySent
+                          ? 'Wysłano'
+                          : queued
+                          ? 'W kolejce…'
+                          : 'Wyślij do Woodpecker';
+                        const icon = alreadySent ? 'circle-check' : queued ? 'loader' : 'send';
+                        return (
+                          <button
+                            className="btn btn-primary"
+                            disabled={disabled}
+                            onClick={() => send(d.id)}
+                            title={title}
+                          >
+                            <i className={`ti ti-${icon}`} /> {label}
+                          </button>
+                        );
+                      })()}
                     </>
                   )}
                 </div>
@@ -609,6 +727,61 @@ const CSS = `
 .status-approved { background: #DCFCE7; color: #166534; }
 .status-sent { background: #E0E7FF; color: #4338CA; }
 .status-rejected { background: #FEE2E2; color: #991B1B; }
+.status-queued {
+  background: #FEF3C7; color: #92400E;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.status-queued i {
+  font-size: 11px;
+  animation: spin 1.2s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Tabki filtra statusow */
+.status-tabs {
+  display: flex; gap: 2px; margin-bottom: 16px;
+  background: #F3F4F6; padding: 4px; border-radius: 10px;
+  width: fit-content;
+}
+.status-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: 7px;
+  background: transparent; border: none; cursor: pointer;
+  font-size: 13px; font-weight: 500; color: #6B7280;
+  font-family: inherit; transition: background 0.12s, color 0.12s;
+}
+.status-tab i { font-size: 14px; }
+.status-tab:hover { color: #111; }
+.status-tab.active {
+  background: #fff; color: #111;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+
+/* Banery statusu wysylki na karcie drafta */
+.send-banner {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 12px 18px; border-bottom: 1px solid #F3F4F6;
+  font-size: 13px; line-height: 1.5;
+}
+.send-banner i { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+.send-banner strong { color: #111; }
+.send-banner code {
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  background: rgba(0,0,0,0.04); padding: 1px 5px; border-radius: 3px;
+}
+.send-banner-sub {
+  font-size: 12px; color: #6B7280; margin-top: 4px;
+}
+.send-banner-success {
+  background: #ECFDF5; color: #065F46;
+  border-left: 3px solid #10B981;
+}
+.send-banner-success i { color: #10B981; }
+.send-banner-error {
+  background: #FEF2F2; color: #991B1B;
+  border-left: 3px solid #DC2626;
+}
+.send-banner-error i { color: #DC2626; }
 
 .track-badge {
   display: inline-flex; align-items: center; gap: 5px;
