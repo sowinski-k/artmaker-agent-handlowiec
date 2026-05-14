@@ -2149,6 +2149,98 @@ class SendDraftIn(BaseModel):
     campaign_id: int
 
 
+class BulkSendDraftsIn(BaseModel):
+    draft_ids: list[int]
+    campaign_id: int
+
+
+@app.post("/api/drafts/bulk-send")
+def bulk_send_drafts(
+    payload: BulkSendDraftsIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk push wielu draftow do Woodpeckera. Tworzy N osobnych SEND_DRAFT
+    jobow (worker przetwarza pojedynczo z rate-limitem 1.2s do Woodpeckera).
+
+    Filtruje:
+      - status musi byc 'draft' albo 'approved'
+      - lead musi miec email
+      - draft musi miec subject (twarda walidacja w push_draft i tak by zablokowala)
+      - nie wysylamy ponownie tego co juz SENT
+      - nie kolejkujemy drugi raz draftu ktory ma aktywny SEND_DRAFT job
+    Skipowane wracaja jako lista {draft_id, reason} - user widzi czemu cos
+    nie poszlo, ale operacja sie nie blokuje na pojedynczym blędzie.
+    """
+    if not payload.draft_ids:
+        raise HTTPException(status_code=400, detail="Brak draft_ids.")
+    if len(payload.draft_ids) > 50:
+        raise HTTPException(status_code=400, detail="Max 50 draftow naraz.")
+
+    with SessionLocal() as session:
+        drafts = session.execute(
+            select(EmailDraft).options(joinedload(EmailDraft.lead)).where(
+                EmailDraft.id.in_(payload.draft_ids),
+                EmailDraft.workspace_id == cur.workspace_id,
+            )
+        ).unique().scalars().all()
+
+        found_ids = {d.id for d in drafts}
+        missing_ids = set(payload.draft_ids) - found_ids
+
+        # Drafty z aktywnym SEND_DRAFT jobem - zeby nie kolejkowac drugi raz.
+        active_send_jobs = session.execute(
+            select(Job).where(
+                Job.workspace_id == cur.workspace_id,
+                Job.type == JobType.SEND_DRAFT.value,
+                Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+            )
+        ).scalars().all()
+        active_draft_ids: set[int] = set()
+        for j in active_send_jobs:
+            did = j.payload.get("draft_id") if isinstance(j.payload, dict) else None
+            if isinstance(did, int):
+                active_draft_ids.add(did)
+
+        skipped: list[dict[str, Any]] = []
+        for mid in missing_ids:
+            skipped.append({"draft_id": mid, "reason": "nie istnieje w tym workspace"})
+
+        job_ids: list[int] = []
+        queued_draft_ids: list[int] = []
+        for d in drafts:
+            if d.status == DraftStatus.SENT.value:
+                skipped.append({"draft_id": d.id, "reason": "juz wyslany"})
+                continue
+            if d.status == DraftStatus.REJECTED.value:
+                skipped.append({"draft_id": d.id, "reason": "odrzucony"})
+                continue
+            if d.id in active_draft_ids:
+                skipped.append({"draft_id": d.id, "reason": "wysylka juz w kolejce"})
+                continue
+            if not (d.subject or "").strip():
+                skipped.append({"draft_id": d.id, "reason": "pusty temat - wygeneruj ponownie"})
+                continue
+            if not d.lead or not (d.lead.email or "").strip():
+                skipped.append({"draft_id": d.id, "reason": "lead bez emaila"})
+                continue
+
+            job = create_job(
+                session, job_type=JobType.SEND_DRAFT,
+                workspace_id=cur.workspace_id, user_id=cur.user_id,
+                payload={"draft_id": d.id, "campaign_id": payload.campaign_id},
+            )
+            job_ids.append(job.id)
+            queued_draft_ids.append(d.id)
+
+    return {
+        "ok": True,
+        "requested": len(payload.draft_ids),
+        "queued": len(job_ids),
+        "skipped": skipped,
+        "queued_draft_ids": queued_draft_ids,
+        "job_ids": job_ids,
+    }
+
+
 @app.post("/api/drafts/{draft_id}/send")
 def send_draft(draft_id: int, payload: SendDraftIn,
                cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
