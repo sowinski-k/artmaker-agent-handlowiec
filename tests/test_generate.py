@@ -171,7 +171,7 @@ class TestValidateDraft:
             snippet3="Możemy dla Państwa produkować farby pod własną marką. "
                     "Trzydzieści procent taniej niż polska hurtownia. "
                     "MOQ i terminy ustalimy indywidualnie zależnie od produktu. "
-                    "A jak czegoś potrzebujecie z magazynu PL, mamy panel B2B b2b.sowins.pl.",
+                    "A jak czegoś potrzebujecie z magazynu PL, mamy też panel B2B.",
             snippet4=None,
             snippet5="Wysłać wstępną wycenę produkcyjną?",
         )
@@ -217,7 +217,7 @@ class TestValidateDraft:
         """offer_track=both ale Track B wymieniony PRZED Track A - to wbrew filozofii."""
         wrong = self._make_payload(
             offer_track="both",
-            snippet3="Mamy panel B2B b2b.sowins.pl z magazynu, dostawa 24h. "
+            snippet3="Mamy panel B2B z magazynu, dostawa 24h. "
                     "A jak chcecie wiekszy biznes - produkcja w Chinach pod wlasna marke.",
         )
         warns = validate_draft(wrong)
@@ -230,7 +230,7 @@ class TestValidateDraft:
         pure_b2b = self._make_payload(
             offer_track="b2b_panel",
             snippet2="Pisze z Artmakera, jesteśmy bezpośrednim importerem.",
-            snippet3="Zamowienia obslugujemy przez panel b2b.sowins.pl. "
+            snippet3="Zamowienia obslugujemy przez nasz panel B2B. "
                     "Magazyn w PL, dostawa 24h, minimum 1000 zł netto. "
                     "Transport gratis przy zamowieniach od minimum.",
             snippet5="Podrzucic Panu dostep do platformy?",
@@ -259,6 +259,41 @@ class TestValidateDraft:
         )
         warns = validate_draft(with_pl)
         assert not any("BRAK wzmianki" in w for w in warns)
+
+    def test_panel_url_in_body_warns(self):
+        """URL panelu B2B (b2b.sowins.pl) w body cold-maila podnosi ryzyko
+        wpadniecia w spam (linki w pierwszym kontakcie). Walidator musi to
+        zaznaczyc - tylko WZMIANKA o panelu, URL wysylamy po odpowiedzi."""
+        with_url = self._make_payload(
+            offer_track="both",
+            snippet3="Produkujemy w Chinach pod Waszą marką, 30-50% taniej. "
+                    "A na bieżąco mamy panel B2B b2b.sowins.pl z magazynu PL.",
+        )
+        warns = validate_draft(with_url)
+        assert any("URL" in w and "panel" in w.lower() for w in warns), \
+            f"Expected panel URL warning, got: {warns}"
+
+    def test_panel_url_case_insensitive_warns(self):
+        """Walidator URL powinien lapac rowniez warianty z https:// i CAPS."""
+        with_url = self._make_payload(
+            offer_track="both",
+            snippet3="Produkujemy w Chinach pod Waszą marką, 30-50% taniej. "
+                    "Panel: https://B2B.SOWINS.PL - zapraszamy.",
+        )
+        warns = validate_draft(with_url)
+        assert any("URL" in w and "panel" in w.lower() for w in warns), \
+            f"Expected panel URL warning (case-insensitive), got: {warns}"
+
+    def test_panel_mentioned_without_url_passes(self):
+        """Sama wzmianka 'panel B2B' bez URL - powinno przejsc bez URL-warning."""
+        no_url = self._make_payload(
+            offer_track="both",
+            snippet3="Produkujemy w Chinach pod Waszą marką, 30-50% taniej. "
+                    "A na bieżąco mamy też własny panel B2B z magazynu PL.",
+        )
+        warns = validate_draft(no_url)
+        assert not any("URL" in w and "panel" in w.lower() for w in warns), \
+            f"Should not warn about URL when no URL present, got: {warns}"
 
 
 class TestMoqHalucynacjaCheck:

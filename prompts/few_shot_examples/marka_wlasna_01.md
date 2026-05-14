@@ -23,8 +23,8 @@ Mozemy dla Was wyprodukowac zestaw "Atelier ZS" w pelni pod Wasza specyfikacje
 brandingiem. MOQ, terminy i wycene ustalimy indywidualnie zaleznie od stopnia
 personalizacji i wybranej jakosci.
 
-Na biezace uzupelnianie braków mamy tez panel b2b.sowins.pl (magazyn PL,
-dostawa 24h, minimum 1000 zl + gratis transport), ale to drugorzedne -
+Na biezace uzupelnianie braków mamy tez wlasny panel B2B z magazynu PL
+(dostawa 24h, minimum 1000 zl + gratis transport), ale to drugorzedne -
 glowna gra to produkcja pod Wasza marke.
 
 Wyslac wstepna wycene dla Waszych top-2 produktow zestawu, do porownania z

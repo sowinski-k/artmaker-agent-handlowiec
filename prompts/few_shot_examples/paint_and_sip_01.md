@@ -25,7 +25,7 @@ Typowo o 30-40% taniej niz kupowanie tego osobno + branding gdzies indziej.
 MOQ, terminy i wycena - ustalimy indywidualnie zaleznie od stopnia
 personalizacji zestawu.
 
-Na biezace uzupelnianie - mamy tez panel b2b.sowins.pl z magazynu PL, dostawa
+Na biezace uzupelnianie - mamy tez wlasny panel B2B z magazynu PL, dostawa
 24h, minimum 1000 zl + transport gratis. Idealnie kiedy macie nagly event
 i potrzebujecie czegos NA JUZ.
 
