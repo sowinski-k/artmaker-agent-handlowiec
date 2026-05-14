@@ -110,6 +110,33 @@ const SORTS: Array<{ value: string; label: string }> = [
 type DraftFlash = { kind: 'success' | 'error' | 'info'; text: string; draftId?: number };
 type GlobalFlash = { kind: 'success' | 'error' | 'info'; text: string };
 
+type AddLeadForm = {
+  company_name: string;
+  contact_name: string;
+  email: string;
+  phone: string;
+  website: string;
+  city: string;
+  segment: string;
+  notes: string;
+};
+
+const SEGMENT_OPTIONS: { value: string; label: string }[] = [
+  { value: 'sklep_plastyczny', label: 'Sklep plastyczny' },
+  { value: 'sklep_papierniczy', label: 'Sklep papierniczy' },
+  { value: 'paint_and_sip', label: 'Paint & Sip' },
+  { value: 'warsztaty_dzieci', label: 'Warsztaty dla dzieci' },
+  { value: 'animatorzy_eventy', label: 'Animatorzy / Eventy' },
+  { value: 'szkola_artystyczna', label: 'Szkoła artystyczna' },
+  { value: 'marka_wlasna', label: 'Marka własna' },
+  { value: 'inne', label: 'Inne' },
+];
+
+const EMPTY_ADD_LEAD_FORM: AddLeadForm = {
+  company_name: '', contact_name: '', email: '', phone: '',
+  website: '', city: '', segment: 'inne', notes: '',
+};
+
 export default function LeadyPage() {
   const router = useRouter();
   const confirm = useConfirm();
@@ -118,6 +145,10 @@ export default function LeadyPage() {
   const [view, setView] = useState<'all' | 'trash'>('all');
   const [leads, setLeads] = useState<LeadRow[]>([]);
   const [trash, setTrash] = useState<TrashLeadRow[]>([]);
+  // Modal "Dodaj lead recznie" - bez discovery, bez Apify, user wpisuje sam.
+  const [showAddLead, setShowAddLead] = useState(false);
+  const [addLeadForm, setAddLeadForm] = useState<AddLeadForm>(EMPTY_ADD_LEAD_FORM);
+  const [addLeadSubmitting, setAddLeadSubmitting] = useState(false);
   const [trashTotal, setTrashTotal] = useState(0);
   const [recycleBinDays, setRecycleBinDays] = useState(7);
   const [total, setTotal] = useState(0);
@@ -427,6 +458,54 @@ export default function LeadyPage() {
       } catch {
         /* network glitch - probuj dalej */
       }
+    }
+  }
+
+  async function submitAddLead(e: React.FormEvent) {
+    e.preventDefault();
+    const company = addLeadForm.company_name.trim();
+    if (!company) {
+      setFlash({ kind: 'error', text: 'Nazwa firmy jest wymagana.' });
+      return;
+    }
+    setAddLeadSubmitting(true);
+    try {
+      type AddLeadResp = {
+        ok: boolean;
+        lead: { id: number; company_name: string; status: string; email: string | null };
+      };
+      const res = await api<AddLeadResp>('/api/leads', {
+        method: 'POST',
+        body: JSON.stringify({
+          company_name: company,
+          contact_name: addLeadForm.contact_name.trim() || null,
+          email: addLeadForm.email.trim() || null,
+          phone: addLeadForm.phone.trim() || null,
+          website: addLeadForm.website.trim() || null,
+          city: addLeadForm.city.trim() || null,
+          segment: addLeadForm.segment || null,
+          notes: addLeadForm.notes.trim() || null,
+        }),
+      });
+      setFlash({
+        kind: 'success',
+        text: (
+          res.lead.status === 'researched'
+            ? `Lead "${res.lead.company_name}" dodany (#${res.lead.id}). Możesz od razu wygenerować draft.`
+            : `Lead "${res.lead.company_name}" dodany (#${res.lead.id}). Bez emaila - uruchom enrichment z drawera.`
+        ),
+      });
+      setShowAddLead(false);
+      setAddLeadForm(EMPTY_ADD_LEAD_FORM);
+      await load();
+      // Otworz drawer nowego leada zeby user widzial co dodal
+      setSelectedId(res.lead.id);
+    } catch (err) {
+      // 409 = duplikat strony www
+      const msg = err instanceof Error ? err.message : 'Błąd zapisu';
+      setFlash({ kind: 'error', text: msg });
+    } finally {
+      setAddLeadSubmitting(false);
     }
   }
 
@@ -753,9 +832,18 @@ export default function LeadyPage() {
               )}
             </p>
           </div>
-          <a href="/pozyskiwanie" className="btn btn-secondary">
-            <i className="ti ti-search" /> Znajdź nowe leady
-          </a>
+          <div className="page-head-actions">
+            <button
+              className="btn btn-secondary"
+              onClick={() => { setAddLeadForm(EMPTY_ADD_LEAD_FORM); setShowAddLead(true); }}
+              title="Dodaj lead ręcznie - bez Apify, bez kredytów"
+            >
+              <i className="ti ti-plus" /> Dodaj lead ręcznie
+            </button>
+            <a href="/pozyskiwanie" className="btn btn-secondary">
+              <i className="ti ti-search" /> Znajdź nowe leady
+            </a>
+          </div>
         </div>
 
         {/* View toggle: Wszystkie vs Kosz */}
@@ -1478,6 +1566,152 @@ export default function LeadyPage() {
           </div>
         </div>
       )}
+
+      {/* Modal "Dodaj lead ręcznie" - center modal, NIE drawer (form jest dluzszy) */}
+      {showAddLead && (
+        <div
+          className="modal-overlay"
+          onClick={() => !addLeadSubmitting && setShowAddLead(false)}
+          role="presentation"
+        >
+          <div
+            className="modal add-lead-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-labelledby="add-lead-title"
+          >
+            <div className="modal-head">
+              <h2 id="add-lead-title">
+                <i className="ti ti-plus" /> Dodaj lead ręcznie
+              </h2>
+              <button
+                className="modal-close"
+                onClick={() => setShowAddLead(false)}
+                disabled={addLeadSubmitting}
+                aria-label="Zamknij"
+              >
+                <i className="ti ti-x" />
+              </button>
+            </div>
+            <form className="modal-body add-lead-form" onSubmit={submitAddLead}>
+              <p className="add-lead-hint">
+                Bez discovery, bez kredytów Apify. Wpisz tyle ile wiesz — minimum to nazwa firmy.
+                Jeśli podasz email, lead od razu będzie gotowy do draftowania.
+              </p>
+
+              <div className="form-row">
+                <label>
+                  Nazwa firmy <span className="req">*</span>
+                  <input
+                    type="text" required maxLength={255} autoFocus
+                    value={addLeadForm.company_name}
+                    onChange={(e) => setAddLeadForm({ ...addLeadForm, company_name: e.target.value })}
+                    placeholder="np. ArtBox Studio"
+                  />
+                </label>
+                <label>
+                  Segment
+                  <select
+                    value={addLeadForm.segment}
+                    onChange={(e) => setAddLeadForm({ ...addLeadForm, segment: e.target.value })}
+                  >
+                    {SEGMENT_OPTIONS.map((s) => (
+                      <option key={s.value} value={s.value}>{s.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="form-row">
+                <label>
+                  Strona www
+                  <input
+                    type="text"
+                    value={addLeadForm.website}
+                    onChange={(e) => setAddLeadForm({ ...addLeadForm, website: e.target.value })}
+                    placeholder="artbox.pl"
+                  />
+                </label>
+                <label>
+                  Miasto
+                  <input
+                    type="text" maxLength={100}
+                    value={addLeadForm.city}
+                    onChange={(e) => setAddLeadForm({ ...addLeadForm, city: e.target.value })}
+                    placeholder="Kraków"
+                  />
+                </label>
+              </div>
+
+              <div className="form-row">
+                <label>
+                  Imię i nazwisko kontaktu
+                  <input
+                    type="text" maxLength={255}
+                    value={addLeadForm.contact_name}
+                    onChange={(e) => setAddLeadForm({ ...addLeadForm, contact_name: e.target.value })}
+                    placeholder="Anna Kowalska"
+                  />
+                </label>
+                <label>
+                  Telefon
+                  <input
+                    type="text" maxLength={50}
+                    value={addLeadForm.phone}
+                    onChange={(e) => setAddLeadForm({ ...addLeadForm, phone: e.target.value })}
+                    placeholder="+48 123 456 789"
+                  />
+                </label>
+              </div>
+
+              <label>
+                Email
+                <input
+                  type="email" maxLength={255}
+                  value={addLeadForm.email}
+                  onChange={(e) => setAddLeadForm({ ...addLeadForm, email: e.target.value })}
+                  placeholder="kontakt@artbox.pl"
+                />
+                <span className="field-hint">
+                  Bez emaila lead pójdzie do enrichmentu. Z emailem - od razu gotowy do draftowania.
+                </span>
+              </label>
+
+              <label>
+                Notatki
+                <textarea
+                  rows={3}
+                  value={addLeadForm.notes}
+                  onChange={(e) => setAddLeadForm({ ...addLeadForm, notes: e.target.value })}
+                  placeholder="Skąd lead? Co Ci o nich wiadomo?"
+                />
+              </label>
+
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setShowAddLead(false)}
+                  disabled={addLeadSubmitting}
+                >
+                  Anuluj
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={addLeadSubmitting || !addLeadForm.company_name.trim()}
+                >
+                  {addLeadSubmitting ? (
+                    <><i className="ti ti-loader" /> Zapisuję…</>
+                  ) : (
+                    <><i className="ti ti-check" /> Dodaj lead</>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1767,6 +2001,91 @@ table.tbl .row-check input[type="checkbox"] {
 .status-replied { background: #FDECED; color: #8F1018; border: 1px solid #FCA5A5; }
 .status-bounced { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
 .status-blacklisted { background: #1C1C1C; color: #fff; }
+
+.page-head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Modal "Dodaj lead recznie" - center modal, klikalny backdrop */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(17, 17, 17, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: ml-fade 0.12s ease-out;
+}
+@keyframes ml-fade { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  background: #fff; border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.1);
+  width: 100%; max-width: 560px;
+  max-height: calc(100vh - 48px);
+  display: flex; flex-direction: column;
+  animation: ml-pop 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes ml-pop {
+  from { opacity: 0; transform: scale(0.94) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.modal-head {
+  padding: 16px 20px; border-bottom: 1px solid #E5E7EB;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.modal-head h2 {
+  font-size: 16px; font-weight: 600; margin: 0;
+  display: flex; align-items: center; gap: 8px; letter-spacing: -0.2px;
+}
+.modal-head h2 i { color: #D4212C; font-size: 18px; }
+.modal-close {
+  background: none; border: none; cursor: pointer; padding: 4px;
+  color: #6B7280; border-radius: 6px; display: flex;
+}
+.modal-close:hover:not(:disabled) { background: #F3F4F6; color: #111; }
+.modal-close:disabled { opacity: 0.5; cursor: not-allowed; }
+.modal-body {
+  padding: 20px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.add-lead-hint {
+  font-size: 12.5px; color: #6B7280; margin: 0 0 4px;
+  line-height: 1.5; padding: 10px 12px;
+  background: #FAFAF7; border-left: 3px solid #D4212C; border-radius: 4px;
+}
+.add-lead-form label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: #4B5563; font-weight: 500;
+}
+.add-lead-form .req { color: #D4212C; }
+.add-lead-form input,
+.add-lead-form select,
+.add-lead-form textarea {
+  padding: 8px 10px; border: 1px solid #E5E7EB; border-radius: 6px;
+  font-size: 13.5px; font-family: inherit; color: #111;
+  background: #fff; transition: border-color 0.12s, box-shadow 0.12s;
+}
+.add-lead-form input:focus,
+.add-lead-form select:focus,
+.add-lead-form textarea:focus {
+  outline: none; border-color: #D4212C;
+  box-shadow: 0 0 0 3px rgba(212, 33, 44, 0.12);
+}
+.add-lead-form textarea { resize: vertical; min-height: 60px; font-family: inherit; }
+.add-lead-form .field-hint {
+  font-size: 11.5px; color: #9CA3AF; font-weight: 400; margin-top: 2px;
+}
+.add-lead-form .form-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+}
+@media (max-width: 520px) {
+  .add-lead-form .form-row { grid-template-columns: 1fr; }
+}
+.modal-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  margin-top: 8px; padding-top: 14px; border-top: 1px solid #F3F4F6;
+}
+.modal-actions .btn { min-width: 100px; justify-content: center; }
+.modal-actions .ti-loader { animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .drawer-overlay { position: fixed; inset: 0; background: rgba(17,17,17,0.4); z-index: 100; display: flex; justify-content: flex-end; }
 .drawer { width: 520px; max-width: 90vw; background: #fff; height: 100vh; overflow-y: auto; }
