@@ -1248,6 +1248,154 @@ def get_events(limit: int = 8, cur: CurrentUser = Depends(get_current_user)) -> 
 
 # ─── Leads ───────────────────────────────────────────────────────────────
 
+class LeadCreate(BaseModel):
+    """Reczne dodanie leada przez user'a (np. kontakt z targow, polecenia,
+    LinkedIn). Omijamy discovery/research - user wpisuje co wie.
+
+    company_name OBLIGATORYJNE - to identifikator. Reszta opcjonalna.
+    Jesli user poda email, status = RESEARCHED (gotowy do drafta).
+    Jesli nie poda emaila, status = NEW (do enrichmentu).
+    """
+    company_name: str
+    contact_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    website: str | None = None
+    city: str | None = None
+    segment: str | None = None
+    notes: str | None = None
+
+
+@app.post("/api/leads")
+def create_lead(
+    payload: LeadCreate, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Tworzy lead z reki - bez discovery, bez Apify, bez kredytow.
+
+    Walidacja:
+      - company_name required, niepusty
+      - segment musi byc w LeadSegment enum (default 'inne')
+      - email - prosty regex
+      - dedup: jesli website (znormalizowany) juz istnieje w workspace
+        i nie jest w koszu -> 409 z pointer'em do istniejacego leada
+
+    Status startowy:
+      - RESEARCHED gdy podano email (gotowy do draftowania)
+      - NEW gdy bez emaila (do enrichmentu)
+
+    source = 'manual'. Event log 'lead.manually_created'.
+    """
+    from core.urls import normalize_url
+
+    def _clean(v: str | None) -> str | None:
+        if v is None:
+            return None
+        s = v.strip()
+        return s if s else None
+
+    company_name = _clean(payload.company_name)
+    if not company_name:
+        raise HTTPException(status_code=422, detail="Nazwa firmy jest wymagana.")
+    if len(company_name) > 255:
+        raise HTTPException(status_code=422, detail="Nazwa firmy max 255 znakow.")
+
+    segment = _clean(payload.segment) or LeadSegment.INNE.value
+    valid_segments = {s.value for s in LeadSegment}
+    if segment not in valid_segments:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Nieprawidlowy segment. Dozwolone: {sorted(valid_segments)}",
+        )
+
+    email = _clean(payload.email)
+    if email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(status_code=422, detail="Nieprawidlowy format email.")
+
+    website_raw = _clean(payload.website)
+    website_norm = normalize_url(website_raw) if website_raw else ""
+
+    with SessionLocal() as session:
+        # Dedup po website (znormalizowanym) - jesli ten sam adres juz w bazie
+        # i nie w koszu -> 409 zamiast cicho tworzyc duplikat.
+        if website_norm:
+            existing = session.execute(
+                select(Lead).where(
+                    Lead.workspace_id == cur.workspace_id,
+                    Lead.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            for ex in existing:
+                if normalize_url(ex.website) == website_norm:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": (
+                                f"Lead o tym adresie www juz istnieje: "
+                                f"#{ex.id} {ex.company_name}."
+                            ),
+                            "existing_lead_id": ex.id,
+                        },
+                    )
+
+        status_value = (
+            LeadStatus.RESEARCHED.value if email else LeadStatus.NEW.value
+        )
+        lead = Lead(
+            workspace_id=cur.workspace_id,
+            segment=segment,
+            company_name=company_name,
+            contact_name=_clean(payload.contact_name),
+            email=email,
+            phone=_clean(payload.phone),
+            website=website_raw,
+            city=_clean(payload.city),
+            country="PL",
+            source="manual",
+            status=status_value,
+            notes=_clean(payload.notes),
+        )
+        session.add(lead)
+        session.flush()  # zeby miec lead.id w event log
+
+        session.add(Event(
+            workspace_id=cur.workspace_id,
+            user_id=cur.user_id,
+            lead_id=lead.id,
+            type="lead.manually_created",
+            level="INFO",
+            source="user",
+            message=(
+                f"User recznie dodal lead: {lead.company_name} "
+                f"(segment={segment}, email={'tak' if email else 'brak'})"
+            ),
+            payload={
+                "company_name": lead.company_name,
+                "segment": segment,
+                "has_email": bool(email),
+                "has_website": bool(website_raw),
+            },
+        ))
+        session.commit()
+        session.refresh(lead)
+
+        return {
+            "ok": True,
+            "lead": {
+                "id": lead.id,
+                "company_name": lead.company_name,
+                "contact_name": lead.contact_name,
+                "email": lead.email,
+                "phone": lead.phone,
+                "website": lead.website,
+                "city": lead.city,
+                "segment": lead.segment,
+                "status": lead.status,
+                "source": lead.source,
+                "notes": lead.notes,
+            },
+        }
+
+
 @app.get("/api/leads")
 def list_leads(
     limit: int = 50, offset: int = 0,
