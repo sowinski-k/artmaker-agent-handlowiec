@@ -2035,7 +2035,7 @@ def list_drafts(
             "lead_score": float(d.lead.score) if d.lead and d.lead.score is not None else None,
             # Sama tresc maila:
             "subject": d.subject, "snippet1": d.snippet1, "snippet2": d.snippet2,
-            "snippet3": d.snippet3, "snippet4": d.snippet4, "snippet5": d.snippet5,
+            "snippet3": d.snippet3, "snippet5": d.snippet5,
             "full_preview": d.full_preview, "status": d.status,
             "template_variant": d.template_variant, "edited_by_user": d.edited_by_user,
             "generated_by_model": d.generated_by_model,
@@ -2053,7 +2053,6 @@ class DraftUpdate(BaseModel):
     snippet1: str | None = None
     snippet2: str | None = None
     snippet3: str | None = None
-    snippet4: str | None = None
     snippet5: str | None = None
 
 
@@ -2075,7 +2074,6 @@ def update_draft(draft_id: int, payload: DraftUpdate,
             setattr(draft, field, _strip_ai_artifacts(value) or value)
         parts = [f"Subject: {draft.subject}", "", draft.snippet1 or "", "",
                  draft.snippet2 or "", "", draft.snippet3 or ""]
-        if draft.snippet4: parts.extend(["", draft.snippet4])
         parts.extend(["", draft.snippet5 or ""])
         draft.full_preview = "\n".join(parts)
         draft.edited_by_user = True
