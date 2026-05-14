@@ -121,6 +121,8 @@ export default function DraftyPage() {
   // Otwarte (rozwiniete inline) drafty - klik wiersza otwiera pelen mail
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  // Pojedyncza regeneracja calego draftu (per-row spinner)
+  const [regeneratingFull, setRegeneratingFull] = useState<number | null>(null);
   // Deep-link: ?open=42 z drawera leada
   const [highlightId, setHighlightId] = useState<number | null>(null);
 
@@ -273,6 +275,43 @@ export default function DraftyPage() {
       setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd regeneracji' });
     } finally {
       setRegenerating(null);
+    }
+  }
+
+  async function regenerateFullDraft(d: Draft) {
+    const ok = await confirm({
+      title: 'Wygenerować draft od nowa?',
+      message: (
+        <>
+          Aktualny <strong>Draft #{d.id}</strong> zostanie odrzucony,
+          agent napisze świeży z tego samego leada (<strong>{d.company}</strong>).
+          {'\n'}Spali to token LLM. Stary draft zostanie w zakładce "Odrzucone" jako historia.
+        </>
+      ),
+      confirmLabel: 'Wygeneruj od nowa',
+      icon: 'refresh',
+    });
+    if (!ok) return;
+    setRegeneratingFull(d.id);
+    try {
+      // 1) Odrzuc stary draft (wymagane przez dedup w bulk-send + niezagracenie listy)
+      await api(`/api/drafts/${d.id}/reject`, { method: 'POST' });
+      // 2) Zakolejkuj GENERATE_DRAFT job dla tego samego leada
+      await api<{ job_id: number }>('/api/drafts', {
+        method: 'POST',
+        body: JSON.stringify({ lead_id: d.lead_id }),
+      });
+      setFlash({
+        kind: 'success',
+        text: `Draft #${d.id} odrzucony. Agent generuje nowy dla "${d.company}" - pojawi się w "Do review" za ~5s.`,
+      });
+      // Zwin expanded i odswiez za chwile zeby zobaczyc nowy draft
+      setExpanded((p) => { const n = new Set(p); n.delete(d.id); return n; });
+      setTimeout(() => { void load(); }, 1500);
+    } catch (err) {
+      setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd regeneracji' });
+    } finally {
+      setRegeneratingFull(null);
     }
   }
 
@@ -792,6 +831,20 @@ export default function DraftyPage() {
                             <button className="btn btn-ghost" onClick={() => startEdit(d)}>
                               <i className="ti ti-edit" /> Edytuj
                             </button>
+                            {(d.status === 'draft' || d.status === 'approved') && !d.send_in_progress && (
+                              <button
+                                className="btn btn-ghost"
+                                onClick={() => regenerateFullDraft(d)}
+                                disabled={regeneratingFull === d.id}
+                                title="Odrzuć ten draft i wygeneruj świeży dla tego samego leada (spali token LLM)"
+                              >
+                                {regeneratingFull === d.id ? (
+                                  <><i className="ti ti-loader" /> Generuję…</>
+                                ) : (
+                                  <><i className="ti ti-refresh" /> Od nowa</>
+                                )}
+                              </button>
+                            )}
                             <button className="btn btn-ghost btn-danger" onClick={() => reject(d.id)}>
                               <i className="ti ti-x" /> Odrzuć
                             </button>
