@@ -99,6 +99,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <i className="ti ti-layout-dashboard"></i>
             <span className="sb-label">Pulpit</span>
           </Link>
+          <Link href="/konto" className={`sb-item ${pathname === '/konto' ? 'active' : ''}`}>
+            <i className="ti ti-user-cog"></i>
+            <span className="sb-label">Moje konto</span>
+          </Link>
           {/* Projekty / Biblioteka - ukryte do czasu implementacji.
               KUZNIA_TOOLS, KANCELARIA_TOOLS - tez ukryte. Roadmapa zostaje
               w pamieci (komentarze w kodzie + KUZNIA_TOOLS/KANCELARIA_TOOLS
@@ -129,16 +133,19 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             ))}
           </div>
 
-          {/* ─── Integracje ────────────────────────── */}
-          <div className="sb-section">Integracje</div>
-          <a className="sb-item">
-            <i className="ti ti-mail"></i>
-            <span className="sb-label">Woodpecker</span>
-          </a>
-          <a className="sb-item">
-            <i className="ti ti-package"></i>
-            <span className="sb-label">Apify</span>
-          </a>
+          {/* ─── Integracje ──────────────────────────
+              Ukryte na czas decyzji architektonicznej:
+              - Woodpecker (cold-email) - rozwazamy wlasny pipeline wysylki przez SMTP
+                albo SendGrid/Mailgun bez zewnetrznego SaaS-a. Decyzja: czy zostawiamy
+                Woodpecker bo userzy mogą juz miec konto, czy upraszczamy do wlasnego
+                API. Do pomyslenia po MVP.
+              - Apify - tak samo, mozemy zrobic wlasne scrape'y (httpx + BS4) i
+                wpisywac userom URLe + adresy bezposrednio bez Apify warstwy.
+              Backend integracje pozostaja - to tylko link UI ukryty.
+          {<><div className="sb-section">Integracje</div>
+          <a className="sb-item"><i className="ti ti-mail"></i><span className="sb-label">Woodpecker</span></a>
+          <a className="sb-item"><i className="ti ti-package"></i><span className="sb-label">Apify</span></a></>}
+          */}
 
           {activeJobs.length > 0 && (
             <Link href="/pulpit" className="sb-jobs">

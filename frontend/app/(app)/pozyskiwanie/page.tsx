@@ -19,6 +19,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { AccountMenu } from '@/lib/AccountMenu';
 import { useConfirm } from '@/lib/confirm';
 
 interface DiscoveredPlace {
@@ -483,6 +484,9 @@ export default function PozyskiwaniePage() {
             <i className="ti ti-bolt" /> {peekCap.used} / {peekCap.cap} dziś
           </div>
         )}
+        <div style={{ marginLeft: 'auto' }}>
+          <AccountMenu />
+        </div>
       </div>
 
       {/* Global flash (zamiast alert) */}

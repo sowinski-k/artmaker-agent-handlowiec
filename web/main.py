@@ -550,6 +550,232 @@ def me(cur: CurrentUser = Depends(get_current_user)) -> MeOut:
         )
 
 
+# ─── Konto / Ustawienia user ────────────────────────────────────────────
+
+class UpdateProfileIn(BaseModel):
+    name: str | None = None
+
+
+@app.patch("/api/auth/me")
+def update_profile(
+    payload: UpdateProfileIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Edycja profilu - obecnie tylko name. Email zmieniony oddzielnie (wymaga
+    weryfikacji - na razie nie udostepniamy)."""
+    new_name = (payload.name or "").strip()[:255] or None
+    with SessionLocal() as session:
+        user = session.get(User, cur.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User nie istnieje.")
+        if new_name != user.name:
+            user.name = new_name
+            session.commit()
+            _log_event(cur.workspace_id, cur.user_id, "INFO", "user", "profile_updated",
+                       f"User zaktualizowal swoj profil (name)")
+        return {"ok": True, "name": new_name}
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/change-password")
+@limiter.limit("5/15minutes")
+def change_password(
+    request: Request, payload: ChangePasswordIn,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Zmiana hasla. Wymaga current_password (anti-CSRF). Re-hash bcrypt."""
+    from web.auth import hash_password, validate_password
+    ok, err = validate_password(payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    with SessionLocal() as session:
+        user = session.get(User, cur.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User nie istnieje.")
+        if not verify_password(payload.current_password, user.password_hash):
+            _log_event(cur.workspace_id, cur.user_id, "WARNING", "auth", "password_change_failed",
+                       f"Failed password change attempt - wrong current password")
+            raise HTTPException(status_code=401, detail="Aktualne haslo nieprawidlowe.")
+        if verify_password(payload.new_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="Nowe haslo musi byc inne niz aktualne.")
+        user.password_hash = hash_password(payload.new_password)
+        session.commit()
+        _log_event(cur.workspace_id, cur.user_id, "INFO", "auth", "password_changed",
+                   f"User zmienil haslo")
+    return {"ok": True}
+
+
+# ─── Workspace settings ─────────────────────────────────────────────────
+
+class UpdateWorkspaceIn(BaseModel):
+    name: str | None = None
+    # Owner identity (do sygnatury maili wysylanych przez agenta)
+    owner_name: str | None = None
+    owner_title: str | None = None
+    company_name: str | None = None
+    company_website: str | None = None
+
+
+@app.patch("/api/workspace")
+def update_workspace(
+    payload: UpdateWorkspaceIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Edycja workspace - name + identity owner'a (uzywana w sygnaturach maili).
+
+    Identity przechowywana w Workspace.api_keys (JSON) jako sub-obiekt
+    'owner_identity'. Trzymamy razem zeby workspace mial wlasna sygnature -
+    settings.owner_name z env to globalny fallback.
+    """
+    with SessionLocal() as session:
+        ws = session.get(Workspace, cur.workspace_id)
+        if ws is None:
+            raise HTTPException(status_code=404, detail="Workspace nie istnieje.")
+        # Tylko owner moze edytowac (jak chcesz pozniej dorzucic role MEMBER ze
+        # zmiana settings dozwolona - zmien ten check).
+        if ws.owner_user_id != cur.user_id and not cur.is_admin:
+            raise HTTPException(status_code=403, detail="Tylko owner moze edytowac workspace.")
+
+        changes: list[str] = []
+        if payload.name is not None:
+            new_name = payload.name.strip()[:255]
+            if new_name and new_name != ws.name:
+                ws.name = new_name
+                changes.append("name")
+
+        # Owner identity - mergujemy w api_keys.owner_identity
+        identity_fields = {
+            "owner_name": payload.owner_name,
+            "owner_title": payload.owner_title,
+            "company_name": payload.company_name,
+            "company_website": payload.company_website,
+        }
+        if any(v is not None for v in identity_fields.values()):
+            api_keys = dict(ws.api_keys or {})
+            identity = dict(api_keys.get("owner_identity", {}))
+            for k, v in identity_fields.items():
+                if v is not None:
+                    identity[k] = v.strip()[:255] if isinstance(v, str) else v
+            api_keys["owner_identity"] = identity
+            ws.api_keys = api_keys
+            changes.append("owner_identity")
+
+        if changes:
+            session.commit()
+            _log_event(cur.workspace_id, cur.user_id, "INFO", "workspace", "settings_updated",
+                       f"Workspace settings zaktualizowane: {', '.join(changes)}")
+
+        identity = (ws.api_keys or {}).get("owner_identity", {}) if ws.api_keys else {}
+        return {
+            "ok": True,
+            "workspace": {
+                "id": ws.id, "name": ws.name, "slug": ws.slug,
+                "plan": ws.plan, "credits": ws.monthly_credits,
+                "used_credits": ws.used_credits,
+            },
+            "owner_identity": identity,
+            "changed": changes,
+        }
+
+
+# ─── API keys per workspace ─────────────────────────────────────────────
+
+# Klucze API ktore user moze ustawic per workspace. Naming dopasowane do env
+# (te same nazwy = jasne komu odpowiadaja). Wartosci sa zaszyfrowane/maskowane
+# w response (pokazujemy tylko ostatnie 4 znaki).
+WORKSPACE_API_KEY_NAMES = [
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "APIFY_API_TOKEN",
+    "GOOGLE_PLACES_API_KEY",
+    "WOODPECKER_API_KEY",
+]
+
+
+def _mask_key(value: str | None) -> str | None:
+    """Pokazuj ostatnie 4 znaki, reszta jako *. None gdy brak."""
+    if not value:
+        return None
+    if len(value) <= 4:
+        return "*" * len(value)
+    return "*" * (len(value) - 4) + value[-4:]
+
+
+@app.get("/api/workspace/api-keys")
+def get_workspace_api_keys(
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Lista API keys workspace'u + ich stan (set/unset, maska).
+
+    NIE zwraca raw wartosci - tylko ostatnie 4 znaki. User moze tylko nadpisac
+    klucz, nie odczytac. Globalny env (settings.anthropic_api_key itd) jest
+    fallbackiem - workspace key ma priorytet.
+    """
+    with SessionLocal() as session:
+        ws = session.get(Workspace, cur.workspace_id)
+        if ws is None:
+            raise HTTPException(status_code=404, detail="Workspace nie istnieje.")
+        keys = (ws.api_keys or {}).get("api_keys", {}) if ws.api_keys else {}
+        out: list[dict[str, Any]] = []
+        for name in WORKSPACE_API_KEY_NAMES:
+            ws_value = keys.get(name) or ""
+            env_value = os.getenv(name) or ""
+            out.append({
+                "name": name,
+                "workspace_set": bool(ws_value),
+                "workspace_masked": _mask_key(ws_value),
+                "env_fallback_set": bool(env_value),
+                "effective_source": "workspace" if ws_value else ("env" if env_value else "none"),
+            })
+        return {"keys": out}
+
+
+class UpdateApiKeysIn(BaseModel):
+    """Update API keys. Klucze z wartoscia "" (pusty string) sa usuwane.
+    Klucze nieobecne w request - zostaja bez zmian (PATCH semantyka).
+    """
+    keys: dict[str, str]
+
+
+@app.put("/api/workspace/api-keys")
+def update_workspace_api_keys(
+    payload: UpdateApiKeysIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Update API keys per workspace. Tylko owner."""
+    with SessionLocal() as session:
+        ws = session.get(Workspace, cur.workspace_id)
+        if ws is None:
+            raise HTTPException(status_code=404, detail="Workspace nie istnieje.")
+        if ws.owner_user_id != cur.user_id and not cur.is_admin:
+            raise HTTPException(status_code=403, detail="Tylko owner moze edytowac klucze.")
+
+        api_keys = dict(ws.api_keys or {})
+        keys_obj = dict(api_keys.get("api_keys", {}))
+        changed: list[str] = []
+        for name, value in payload.keys.items():
+            if name not in WORKSPACE_API_KEY_NAMES:
+                continue  # cicho ignoruj nieznane klucze
+            v = (value or "").strip()
+            if v == "":
+                # Pusty string = usun klucz
+                if name in keys_obj:
+                    del keys_obj[name]
+                    changed.append(f"-{name}")
+            else:
+                keys_obj[name] = v
+                changed.append(f"+{name}")
+
+        api_keys["api_keys"] = keys_obj
+        ws.api_keys = api_keys
+        if changed:
+            session.commit()
+            _log_event(cur.workspace_id, cur.user_id, "INFO", "workspace", "api_keys_updated",
+                       f"API keys zaktualizowane: {', '.join(changed)}")
+    return {"ok": True, "changed": changed}
+
+
 # ─── Dashboard - filtrowane by workspace ────────────────────────────────
 
 def _start_of_day_utc() -> datetime:

@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
+import { AccountMenu } from '@/lib/AccountMenu';
 import { useConfirm } from '@/lib/confirm';
 
 interface Patrol {
@@ -263,6 +264,9 @@ export default function PatrolPage() {
         <div className="crumb">
           <strong>Handlowiec</strong>
           <i className="ti ti-chevron-right" /> Patrol AI
+        </div>
+        <div style={{ marginLeft: 'auto' }}>
+          <AccountMenu />
         </div>
       </div>
 
