@@ -22,9 +22,10 @@ class Settings(BaseSettings):
 
     apify_api_token: str = ""
     apify_gmaps_actor: str = "compass~google-maps-scraper"
-    # Domyslny actor Allegro: parseforge daje pelny zestaw (offerty + sellerzy
-    # + rating + review_count). Override przez ENV jak chcesz inny.
-    apify_allegro_actor: str = "parseforge~allegro-scraper"
+    # Domyslny actor Allegro: automation-lab eksplicytnie zwraca sellerUrl +
+    # sellerRating (parseforge zwraca tylko produkt-level dane, bez sellera -
+    # nieprzydatne dla naszego use case). Override przez ENV jak chcesz inny.
+    apify_allegro_actor: str = "automation-lab~allegro-scraper"
     # Email enrichment dla sprzedawcow Allegro (stage 2 - osobny actor zeby
     # nie scrapowac stron sprzedawcow zanim zrobimy dedup).
     apify_allegro_email_actor: str = "contactminerlabs~allegro-email-scraper---advanced-cheapest-reliable"
