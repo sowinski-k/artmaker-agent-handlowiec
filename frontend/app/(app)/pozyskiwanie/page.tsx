@@ -112,9 +112,9 @@ const SOURCES: SourceMeta[] = [
   {
     key: 'apify_allegro',
     label: 'Apify Allegro',
-    desc: 'Sprzedawcy z Allegro - kandydaci na private label / hurt. Inny target niż Google Maps.',
-    costHint: '$5/1000',
-    costPer1000: 5,
+    desc: 'Sklepy z Allegro w danej kategorii/keywordzie. Tylko discovery - email firmowy znajdziesz osobno przez Researchuj.',
+    costHint: '$3-5/1000',
+    costPer1000: 4,
     limit: 100,
   },
   {
@@ -891,8 +891,13 @@ export default function PozyskiwaniePage() {
                   />
                 )}
                 <span className="field-hint" style={{ marginTop: 8 }}>
-                  Po stage 1 (lista sprzedawców) agent włączy stage 2 - scraping
-                  emaili z profili sprzedawców (1.2s/seller). Wyniki w "Pozyskane" z emailem.
+                  <strong>Allegro to discovery sklepów</strong> - dostajesz nazwę
+                  sprzedawcy + URL profilu Allegro + asortyment.{' '}
+                  <strong>Bez emaila firmowego</strong> (Allegro maskuje wszystkie
+                  maile do @allegromail.pl - proxy aliasy bezużyteczne dla
+                  cold-mail). Email firmowy zdobędziesz osobno: zaznacz lead →
+                  Researchuj → agent wejdzie głębiej i znajdzie ich prawdziwą
+                  stronę WWW + email.
                 </span>
               </div>
             )}
