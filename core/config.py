@@ -22,21 +22,30 @@ class Settings(BaseSettings):
 
     apify_api_token: str = ""
     apify_gmaps_actor: str = "compass~google-maps-scraper"
-    # Default Allegro actor: contactminerlabs/allegro-email-scraper
-    # Powod: jeden actor robi co potrzebujemy w jednym call -
-    # search po keyword + scrape stron sprzedawcow + wyciaganie emaili
-    # ze sprawdzonych profili. Eliminuje 2-stage pipeline (oddzielny
-    # email enricher), szybsze, tansze, prostsze.
+    # Default Allegro actor: automation-lab~allegro-scraper
+    #
+    # Kluczowe: ten actor przyjmuje `startUrls` (array) ze
+    # zbudowanymi URL listingu Allegro - NIE `searchTerms` / `keywords`.
+    # Stad poprzednie testy zwracaly defaultowe laptopy - my wysylalismy
+    # ignorowane fields, actor brał fallback z example input.
+    #
+    # Format URL: https://allegro.pl/listing?string=<keyword>
+    #          albo https://allegro.pl/kategoria/<slug>
+    #
+    # Stage 1 (ten actor): zwraca product-level dane z sellerLogin +
+    # sellerRating. Email NIE w stage 1 (Allegro maskuje wszystkie maile
+    # do @allegromail.pl - bezuzyteczne dla cold email). Email zdobywamy
+    # przez osobny enrichment pipeline (Etap 2/3, jeszcze nie aktywny).
     #
     # Alternatywy do override przez ENV:
-    #   automation-lab~allegro-scraper - product+seller, no email
-    #   parseforge~allegro-scraper      - product only, no seller
-    #   klevio~allegro-seller-scraper   - wymaga seller URL na wejsciu
-    apify_allegro_actor: str = "contactminerlabs~allegro-email-scraper---advanced-cheapest-reliable"
-    # Stage 2 email enricher - PUSTE w default bo email juz mamy ze
-    # stage 1 (contactminerlabs zwraca email direct). Zostawione dla
-    # backward compat - mozna ustawic gdy default Allegro actor zmieniony
-    # na taki ktory nie zwraca maili (parseforge, automation-lab).
+    #   parseforge~allegro-scraper      - chce startUrl (singular!), tansze
+    #   klevio~allegro-seller-scraper   - wymaga URL sprzedawcy na wejsciu
+    #   contactminerlabs~...email-scraper - daje email ale glownie @allegromail.pl
+    apify_allegro_actor: str = "automation-lab~allegro-scraper"
+    # Email enrichment - WYLACZONE w default. Maile z Allegro to aliasy
+    # @allegromail.pl (proxy Allegro), bezuzyteczne dla cold mail i
+    # lamia ToS Allegro. Email zdobywamy osobno przez contact_finder
+    # po wzbogaceniu leada o real domene WWW.
     apify_allegro_email_actor: str = ""
     apify_linkedin_actor: str = ""
     google_places_api_key: str = ""

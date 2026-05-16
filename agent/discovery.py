@@ -247,35 +247,40 @@ class ApifyAllegroSource:
         if not keywords and not category_urls:
             return []  # preset bez keywords / kategorii - nic do scrapowania
 
-        # Budujemy payload w wielu konwencjach naraz - Apify ignoruje
-        # unknown fields, wiec to bezpieczne. Konkretne actory ktore
-        # supportujemy:
-        #   contactminerlabs/allegro-email-scraper: WIELKIE LITERY
-        #     {KEYWORD, MAX_ITEMS, DOMAIN_EMAIL, LOCATION}
-        #   automation-lab/allegro-scraper: keywords + startUrls
-        #   parseforge/allegro-scraper: searchTerms + maxItems
-        #   klevio/allegro-seller-scraper: sellerUrls
-        primary_keyword = keywords[0] if keywords else ""
+        # KLUCZOWE: actory Allegro przyjmuja URL listingu Allegro w polu
+        # `startUrls` (array) lub `startUrl` (singular dla parseforge).
+        # Defaultowe nazwy pol jak `searchTerms` / `keywords` / `queries`
+        # NIE sa rozumiane - actor wraca do defaultowego example
+        # (zwykle ?string=laptop). Stad poprzednie testy zwracaly laptopy.
+        #
+        # Budujemy listing URL z naszego keyword/category i wysylamy w
+        # OBYDWU formatach (startUrls + startUrl) zeby zadzialalo z
+        # automation-lab i parseforge bez zmiany kodu.
+        import urllib.parse as _urlparse
+        listing_urls: list[str] = []
+        for kw in keywords:
+            encoded = _urlparse.quote_plus(kw.strip())
+            listing_urls.append(f"https://allegro.pl/listing?string={encoded}")
+        listing_urls.extend(category_urls)
+
         max_items = min(max_results * 3, 300)
+        primary_url = listing_urls[0] if listing_urls else ""
 
         payload: dict = {
-            # contactminerlabs format (WIELKIE LITERY)
-            "KEYWORD": primary_keyword,
-            "MAX_ITEMS": max_items,
-            "DOMAIN_EMAIL": [],   # pusty = wszystkie domeny
-            "LOCATION": "",
-            # lowercase alternatywy dla innych actorow
+            # automation-lab format (preferowany)
+            "startUrls": [{"url": u} for u in listing_urls],
+            "maxProducts": max_items,
+            # parseforge format (singular!)
+            "startUrl": primary_url,
             "maxItems": max_items,
+            # contactminerlabs format (jak ktos zmieni actor przez ENV)
+            "KEYWORD": keywords[0] if keywords else "",
+            "MAX_ITEMS": max_items,
+            "DOMAIN_EMAIL": [],
+            "LOCATION": "",
+            # Crawl bezpieczniki
             "maxRequestsPerCrawl": max_items,
         }
-        if keywords:
-            payload["searchTerms"] = keywords
-            payload["keywords"] = keywords
-            payload["queries"] = keywords
-            payload["search"] = primary_keyword
-        if category_urls:
-            payload["startUrls"] = [{"url": u} for u in category_urls]
-            payload["categoryUrls"] = category_urls
 
         import logging
         log = logging.getLogger("agent.discovery")
@@ -347,116 +352,149 @@ class ApifyAllegroSource:
             return prefix, rest
         return "keyword", q.strip()
 
-    @staticmethod
-    def _normalize(item: dict) -> DiscoveredPlace:
+    # Email aliasy @allegromail.pl to proxy Allegro - przekierowuja na
+    # real email sprzedawcy ALE: (a) tylko per-transaction aliasy dzialaja,
+    # (b) public aliasy filtrowane przez Allegro anti-spam, (c) lamie ToS
+    # Allegro. Dla cold mail useless. Filtrujemy.
+    _ALLEGRO_PROXY_EMAIL_DOMAINS = ("allegromail.pl", "allegromail.com")
+
+    @classmethod
+    def _normalize(cls, item: dict) -> DiscoveredPlace:
         """Mapuje surowy item z Allegro scraper na DiscoveredPlace.
 
-        Wspiera kilka schemow odpowiedzi:
-          contactminerlabs: {email, title, sourceUrl, bio, ...}
-          automation-lab:   {sellerLogin, sellerUrl, sellerRating, ...}
-          parseforge:       {seller, title, url, price, ...}  (product-level)
-          klevio:           {sellerLogin, sellerId, ...}
+        Aktualne mapowanie zoptymalizowane dla automation-lab/parseforge
+        ktore zwracaja product-level dane:
+          - title           = nazwa produktu (NIE uzywamy jako seller name)
+          - seller          = login sprzedawcy (STRING, nie dict!)
+          - sellerRating    = rating sprzedawcy
+          - url             = URL OFERTY (nie sprzedawcy)
 
-        Jak zaden seller field nie matchuje, fallback "(sprzedawca Allegro)"
-        + user widzi to w UI = sygnal ze trzeba zmienic actora lub
-        dodac mapping. Surowe item keys logujemy do agent.discovery.
+        Z loginu sprzedawcy budujemy URL profilu: allegro.pl/uzytkownik/<login>
+        ktore staje sie nowym `website` (dedup key). NIP/firma/email NIE
+        sa w stage 1 - to wymaga drugiego stage'a (planowane).
+
+        Backward compat dla contactminerlabs (profile-level scraper):
+          - title           = nazwa profilu sprzedawcy (uzywamy jako name)
+          - email           = sometimes @allegromail.pl alias (filtrujemy)
+          - sourceUrl       = URL profilu sprzedawcy
         """
-        seller_obj = item.get("seller") or item.get("sellerInfo") or item.get("profile") or {}
+        # ---- Wykryj typ odpowiedzi: profile-scraper (contactminerlabs)
+        # czy listing-scraper (automation-lab/parseforge)? --------------
+        # Profile-scrapery maja `email` i `bio` na top-level. Listing-
+        # scrapery maja `seller` (login string) lub `seller.login`.
+        seller_field = item.get("seller")
+        is_profile_response = bool(item.get("email") or item.get("bio"))
+        is_seller_string = isinstance(seller_field, str)
 
-        # ---- Email (contactminerlabs ma to bezposrednio) -----------------
-        email = (
+        # ---- Seller login -----------------------------------------------
+        if is_seller_string:
+            seller_login = seller_field.strip()
+        elif isinstance(seller_field, dict):
+            seller_login = (
+                seller_field.get("login")
+                or seller_field.get("username")
+                or seller_field.get("name")
+                or ""
+            ).strip()
+        else:
+            seller_login = (
+                item.get("sellerLogin")
+                or item.get("sellerName")
+                or item.get("seller_login")
+                or item.get("sellerUsername")
+                or ""
+            ).strip()
+
+        # ---- Seller name (do UI/LLM relevance) -------------------------
+        # Dla profile-scraper: weź title profilu (= seller name).
+        # Dla listing-scraper: title = nazwa produktu - NIE uzywamy.
+        if is_profile_response:
+            name = (
+                item.get("title")
+                or item.get("profileName")
+                or item.get("profileTitle")
+                or seller_login
+                or "(sprzedawca Allegro)"
+            )
+        else:
+            # Listing-scraper: name = seller_login (NIE title!) zeby
+            # uniknac wpisywania "Laptop HP 14 Intel..." jako nazwa firmy.
+            name = seller_login or "(sprzedawca Allegro)"
+
+        # ---- Seller profile URL (dedup key) ----------------------------
+        seller_url = (
+            item.get("sourceUrl")        # contactminerlabs profile URL
+            or item.get("sellerUrl")     # automation-lab
+            or item.get("seller_url")
+            or item.get("sellerProfileUrl")
+        )
+        # Buduj URL z loginu jak nie mamy direct
+        if not seller_url and seller_login:
+            login_safe = seller_login.lstrip("@")
+            if " " not in login_safe and "/" not in login_safe \
+                    and 0 < len(login_safe) < 64:
+                seller_url = f"https://allegro.pl/uzytkownik/{login_safe}"
+
+        # ---- Email (filtruj @allegromail.pl aliasy) --------------------
+        raw_email = (
             item.get("email")
             or item.get("contactEmail")
             or item.get("emailAddress")
-            or (item.get("emails") or [None])[0] if isinstance(item.get("emails"), list) else None
         )
+        if isinstance(raw_email, str) and raw_email.strip():
+            email_lower = raw_email.strip().lower()
+            domain = email_lower.rsplit("@", 1)[-1] if "@" in email_lower else ""
+            if domain in cls._ALLEGRO_PROXY_EMAIL_DOMAINS:
+                email = None  # alias proxy Allegro, bezuzyteczny
+            else:
+                email = raw_email.strip()
+        else:
+            email = None
 
-        # ---- Seller name -------------------------------------------------
-        # contactminerlabs zwraca "title" (profile title)
-        # automation-lab/parseforge zwraca sellerLogin/sellerName
-        seller = (
-            item.get("title")              # contactminerlabs profile title
-            or item.get("profileName")
-            or item.get("profileTitle")
-            or item.get("sellerLogin")
-            or item.get("sellerName")
-            or item.get("seller_login")
-            or item.get("seller_name")
-            or item.get("sellerUsername")
-            or item.get("name")
-            or seller_obj.get("login")
-            or seller_obj.get("username")
-            or seller_obj.get("name")
-            or seller_obj.get("displayName")
-            or seller_obj.get("title")
-            or "(sprzedawca Allegro)"
-        )
-
-        # ---- Seller URL --------------------------------------------------
-        # contactminerlabs: sourceUrl, automation-lab: sellerUrl
-        seller_url = (
-            item.get("sourceUrl")          # contactminerlabs
-            or item.get("source_url")
-            or item.get("profileUrl")
-            or item.get("sellerUrl")       # automation-lab
-            or item.get("seller_url")
-            or item.get("sellerStoreUrl")
-            or item.get("sellerProfileUrl")
-            or item.get("url")
-            or seller_obj.get("url")
-            or seller_obj.get("storeUrl")
-            or seller_obj.get("profileUrl")
-            or seller_obj.get("link")
-        )
-        # Jak nadal nie ma sellerUrl ale mamy login - zbuduj URL recznie
-        if not seller_url and seller and seller != "(sprzedawca Allegro)":
-            login_safe = str(seller).strip().lstrip("@")
-            if login_safe and " " not in login_safe and "/" not in login_safe \
-                    and len(login_safe) < 64:
-                seller_url = f"https://allegro.pl/uzytkownik/{login_safe}"
-
-        # ---- Rating + review count (jak actor to udostepnia) -----------
+        # ---- Rating + review count (jak actor podaje) -----------------
+        seller_dict = seller_field if isinstance(seller_field, dict) else {}
         rating = (
             item.get("sellerRating")
             or item.get("seller_rating")
+            or seller_dict.get("rating")
             or item.get("rating")
-            or seller_obj.get("rating")
-            or seller_obj.get("score")
         )
         review_count = (
             item.get("sellerFeedbackCount")
-            or item.get("seller_feedback_count")
             or item.get("sellerReviewsCount")
+            or seller_dict.get("feedbackCount")
             or item.get("reviewCount")
             or item.get("reviewsCount")
-            or seller_obj.get("feedbackCount")
-            or seller_obj.get("reviewsCount")
         )
 
-        # ---- Notes (kontekst dla LLM relevance + UI) -------------------
+        # ---- Notes (kontekst dla LLM relevance) ------------------------
         notes_parts = []
-        bio = item.get("bio") or item.get("description") or seller_obj.get("bio")
+        bio = item.get("bio") or item.get("description") or seller_dict.get("bio")
         if bio:
             notes_parts.append(str(bio)[:200])
         category = item.get("category") or item.get("categoryName")
         if category:
             notes_parts.append(f"kat: {category}")
+        # Dla listing-scraper: dodaj nazwe produktu zeby LLM widzial asortyment
+        product_title = item.get("title") if not is_profile_response else None
+        if product_title:
+            notes_parts.append(f"produkt: {str(product_title)[:120]}")
         if not notes_parts:
             notes_parts.append("Allegro seller")
 
         return DiscoveredPlace(
             source="apify_allegro",
-            name=str(seller),
+            name=str(name),
             website=seller_url,
             email=email,
-            address=item.get("location") or seller_obj.get("location"),
+            address=item.get("location") or seller_dict.get("location"),
             rating=rating,
             review_count=review_count,
             raw_id=(
                 item.get("sellerId")
                 or item.get("seller_id")
                 or item.get("profileId")
-                or seller_obj.get("id")
+                or seller_dict.get("id")
                 or item.get("offerId")
                 or item.get("id")
             ),
