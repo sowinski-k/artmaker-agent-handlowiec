@@ -74,7 +74,12 @@ class Settings(BaseSettings):
     # prospects, Woodpecker je rozprowadza w czasie zgodnie z kampania.
     # Default 10000 = praktycznie bez limitu dla MVP.
     daily_email_limit: int = 10_000
-    daily_research_limit: int = 100  # max nowych researchy / dzień (token guard)
+    # Daily cap PER WORKSPACE (workspace_id filter aktywny). Wczesniej 100 -
+    # autonomous z target=500 zakanczal sie fallbackami po pierwszej 100. Teraz
+    # 10000 = praktycznie bez limitu (autonomous budget USD = realny guard, nie
+    # arbitralny count). Mozna obnizyc env-em DAILY_RESEARCH_LIMIT jak ktos
+    # chce taniej cost cap.
+    daily_research_limit: int = 10_000
     daily_api_budget_usd: float = 10.0
     log_level: str = "INFO"
     db_path: str = "data/leads.db"
