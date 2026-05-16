@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 import { api, isAuthenticated } from '@/lib/api';
 import { AccountMenu } from '@/lib/AccountMenu';
@@ -139,6 +139,7 @@ const EMPTY_ADD_LEAD_FORM: AddLeadForm = {
 
 export default function LeadyPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const confirm = useConfirm();
   // View toggle: 'all' (zwykla lista) vs 'trash' (kosz).
   // Kosz pokazuje deleted_at != null leady + akcje przywroc/usun-permanentnie.
@@ -262,6 +263,20 @@ export default function LeadyPage() {
 
   // Trash count - laduje sie raz na mount + przy zmianie view (do badge w tab)
   useEffect(() => { void refreshTrashCount(); }, []);
+
+  // Deep-link z innych stron: ?open=NN otwiera drawer dla tego leada.
+  // Uzywane przez /drafty (przycisk "Lead") + potencjalnie inne. Po otwarciu
+  // czyscimy query param zeby refresh strony nie reopenowal w kolko.
+  useEffect(() => {
+    const openParam = searchParams.get('open');
+    if (!openParam) return;
+    const leadId = Number.parseInt(openParam, 10);
+    if (!Number.isFinite(leadId) || leadId <= 0) return;
+    void openDetail(leadId);
+    // Usun ?open z URL po otwarciu zeby nie blokowalo nawigacji wstecz
+    router.replace('/leady', { scroll: false });
+    /* eslint-disable-next-line */
+  }, []);
 
   // Auto-refresh listy CO 3s gdy chocaby 1 lead ma active_job_type
   // (cichy refresh - bez setLoading, zeby tabela nie migotala). Daje
