@@ -314,11 +314,26 @@ def find_contacts_on_website(website: str, *, timeout_s: float = 10.0) -> Enrich
     phones: list[str] = []
     pages_ok = 0
 
-    # User-Agent zeby nie dostac 403 od bot-walls
+    # User-Agent: prawdziwa Chrome zeby przejsc WAFy. Wczesniej 'EcombinatBot/1.0'
+    # bylo blokowane na wielu sklepach (sklepkalamarz.pl, etc.) ze statusem 403
+    # 'host_not_allowed' / 'bot detected'. Cala enrichment dawal 0 results bo
+    # nie dochodzimy nawet do parsowania HTML.
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; EcombinatBot/1.0)",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "pl,en;q=0.8",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
     }
 
     with httpx.Client(timeout=timeout_s, follow_redirects=True, headers=headers) as client:
