@@ -480,15 +480,22 @@ def _is_cancelled(session: Session, job_id: int) -> bool:
 def claim_next_job(session: Session) -> Job | None:
     """Wybiera najstarsze pending job i flaguje running. Atomically.
 
-    Uwaga: pojedynczy worker na MVP - bez SELECT FOR UPDATE. Jeśli skalujesz
-    do wielu worker'ów, dorzuć `.with_for_update(skip_locked=True)` (Postgres).
+    Postgres: uzywamy SELECT ... FOR UPDATE SKIP LOCKED - dwa watki nie
+    zclaimuja tego samego joba (kazdy widzi tylko unlocked rows).
+    SQLite: brak SKIP LOCKED, polegamy na sekwencyjnym ldostepie sesji.
     """
-    job = session.execute(
-        select(Job)
+    from sqlalchemy import select as _sel
+    q = (
+        _sel(Job)
         .where(Job.status == JobStatus.PENDING.value)
         .order_by(Job.created_at)
         .limit(1)
-    ).scalar_one_or_none()
+    )
+    # Detect dialect - SQLite nie wspiera SKIP LOCKED
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        q = q.with_for_update(skip_locked=True)
+    job = session.execute(q).scalar_one_or_none()
     if job is None:
         return None
     job.status = JobStatus.RUNNING.value
@@ -737,38 +744,13 @@ def _heartbeat() -> None:
         log.warning(f"Heartbeat failed (non-fatal): {exc}")
 
 
-def loop_forever() -> None:
-    log.info(
-        f"Worker starting (poll {POLL_INTERVAL_S}s, max retries {MAX_RETRIES}, "
-        f"patrol tick {PATROL_TICK_S}s, trash purge {PURGE_TICK_S}s "
-        f"after {RECYCLE_BIN_DAYS} days)"
-    )
-    init_db()
-    _recover_zombie_jobs()
-    _heartbeat()  # initial heartbeat zaraz po starcie
-    _purge_trash_tick()  # initial purge zaraz po starcie (cleanup po long downtime)
-    last_patrol_tick = 0.0
-    last_heartbeat = time.time()
-    last_purge_tick = time.time()
+def _job_worker_loop(worker_idx: int) -> None:
+    """Pojedynczy watek pool'a - claimuje + wykonuje joby w petli.
+    Konczy gdy _shutdown jest True.
+    """
+    log_w = logging.getLogger(f"worker[{worker_idx}]")
     while not _shutdown:
         try:
-            # Patrol tick co PATROL_TICK_S - tworzy nowe DISCOVERY_PIPELINE
-            # jobs jak nadszedl czas. Sam tick jest tani (1 SELECT enabled patrols).
-            now_ts = time.time()
-            if now_ts - last_patrol_tick >= PATROL_TICK_S:
-                last_patrol_tick = now_ts
-                _patrol_tick()
-            if now_ts - last_heartbeat >= HEARTBEAT_S:
-                last_heartbeat = now_ts
-                _heartbeat()
-            # Auto-purge kosza co PURGE_TICK_S (default 1h) - hard delete starych
-            # leadow z trash (>RECYCLE_BIN_DAYS dni). Tani SELECT na partial index.
-            if now_ts - last_purge_tick >= PURGE_TICK_S:
-                last_purge_tick = now_ts
-                _purge_trash_tick()
-
-            # Wyciagamy tylko pola ktorych potrzebujemy POZA scope sesji,
-            # zeby nie miec DetachedInstanceError gdy session.close() rozlaczy obiekt.
             job_meta: tuple[int, str, int] | None = None
             with SessionLocal() as session:
                 job = claim_next_job(session)
@@ -778,11 +760,64 @@ def loop_forever() -> None:
                 time.sleep(POLL_INTERVAL_S)
                 continue
             job_id, job_type, job_ws = job_meta
-            log.info(f"Job #{job_id} CLAIMED type={job_type} ws={job_ws}")
+            log_w.info(f"Job #{job_id} CLAIMED type={job_type} ws={job_ws}")
             execute_job(job_id)
         except Exception as exc:
-            log.exception(f"Worker loop error: {exc}")
+            log_w.exception(f"Worker loop error: {exc}")
             time.sleep(POLL_INTERVAL_S)
+
+
+def loop_forever() -> None:
+    """Worker entry point - thread pool (paralleizm) + tick scheduler.
+
+    Pool N watkow przetwarza joby rownolegle (claim_next_job z SKIP LOCKED).
+    Glowny watek (ten) tylko schedule'uje ticki (patrol, heartbeat, purge).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    n_workers = int(os.getenv("WORKER_THREADS") or 3)
+    log.info(
+        f"Worker starting (pool={n_workers}, poll {POLL_INTERVAL_S}s, "
+        f"max retries {MAX_RETRIES}, patrol tick {PATROL_TICK_S}s, "
+        f"trash purge {PURGE_TICK_S}s after {RECYCLE_BIN_DAYS} days)"
+    )
+    init_db()
+    _recover_zombie_jobs()
+    _heartbeat()
+    _purge_trash_tick()
+    last_patrol_tick = 0.0
+    last_heartbeat = time.time()
+    last_purge_tick = time.time()
+
+    # Pool watkow do przetwarzania jobow rownolegle
+    executor = ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="job-worker")
+    futures = [executor.submit(_job_worker_loop, i) for i in range(n_workers)]
+
+    # Glowny watek - scheduler (tick patrol/heartbeat/purge)
+    try:
+        while not _shutdown:
+            try:
+                now_ts = time.time()
+                if now_ts - last_patrol_tick >= PATROL_TICK_S:
+                    last_patrol_tick = now_ts
+                    _patrol_tick()
+                if now_ts - last_heartbeat >= HEARTBEAT_S:
+                    last_heartbeat = now_ts
+                    _heartbeat()
+                if now_ts - last_purge_tick >= PURGE_TICK_S:
+                    last_purge_tick = now_ts
+                    _purge_trash_tick()
+                time.sleep(POLL_INTERVAL_S)
+            except Exception as exc:
+                log.exception(f"Scheduler loop error: {exc}")
+                time.sleep(POLL_INTERVAL_S)
+    finally:
+        log.info("Worker shutdown - waiting for thread pool")
+        executor.shutdown(wait=True, cancel_futures=False)
+        # Drain futures dla logow
+        for f in futures:
+            if f.exception():
+                log.error(f"Worker thread exited with error: {f.exception()}")
     log.info("Worker shutdown clean")
 
 
