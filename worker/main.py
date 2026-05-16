@@ -15,6 +15,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 # Allow imports z root projektu
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -421,6 +422,92 @@ def handle_poll_woodpecker(session: Session, job: Job) -> dict:
     return counts
 
 
+def _save_fallback_lead_from_place(
+    place: Any,
+    *,
+    segment: str,
+    city_hint: str | None,
+    workspace_id: int | None,
+    relevance_score: float,
+    research_error: str,
+) -> int | None:
+    """Zapisz Lead z danych Places API gdy LLM research padl.
+
+    Use case: autonomous filter wybral firme jako pasujaca (zaplacilismy za
+    LLM relevance call). Probowalismy research strony - strona offline /
+    CloudFlare / timeout. NIE wyrzucamy tej pracy - zapisujemy minimalny
+    Lead z place.{name, website, phone, address} + score z relevance + flaga
+    'fallback' w research_data. User moze pozniej kliknac 'Re-research lead'
+    z drawera zeby uzupelnic.
+
+    Returns lead_id (jak nowy) albo None (jak istnieje albo crash).
+    Idempotent: jak lead juz w bazie (po host match), zwraca None bez nadpisu.
+    """
+    from agent.research import find_existing_lead
+    from core.db import Lead, LeadStatus, SessionLocal
+    from core.urls import normalize_url
+
+    if not place.website:
+        return None
+
+    # Skip jak juz w bazie (race safety + powtorzonu run)
+    existing_id = find_existing_lead(place.website, workspace_id=workspace_id)
+    if existing_id is not None:
+        return None
+
+    # Wyciagnij miasto z address jak nie podano explicit
+    city = city_hint
+    if not city and place.address:
+        # adres typu "ul. Marszalkowska 1, 00-001 Warszawa"
+        parts = [s.strip() for s in place.address.split(",")]
+        if parts:
+            last = parts[-1]
+            # zdejmij kod pocztowy "XX-XXX"
+            tokens = [t for t in last.split() if not (len(t) == 6 and t[2] == "-")]
+            if tokens:
+                city = " ".join(tokens)
+
+    research_data = {
+        "fallback": True,
+        "fallback_reason": "research_failed_strona_niedostepna",
+        "error": research_error[:500],
+        "relevance_score": relevance_score,
+        "source_place": {
+            "name": place.name,
+            "website": place.website,
+            "address": place.address,
+            "phone": place.phone,
+            "source": place.source,
+            "rating": place.rating,
+            "review_count": place.review_count,
+        },
+        "instructions": (
+            "Lead utworzony fallbackiem: strona internetowa byla niedostepna "
+            "podczas pierwszego skanowania. Sprobuj 'Re-research lead' z drawera "
+            "zeby uzupelnic. Score = ocena LLM z relevance filter (nie research)."
+        ),
+    }
+
+    with SessionLocal() as sess:
+        lead = Lead(
+            workspace_id=workspace_id,
+            segment=segment,
+            company_name=place.name,
+            contact_name=None,
+            email=place.email,  # rzadko z Places, ale czasem (Allegro Email Scraper)
+            phone=place.phone,
+            website=normalize_url(place.website) or place.website,
+            city=city,
+            source=f"autonomous_fallback:{place.source}",
+            score=relevance_score,
+            status=LeadStatus.RESEARCHED.value,  # mamy podstawowe dane + score
+            research_data=research_data,
+        )
+        sess.add(lead)
+        sess.commit()
+        return lead.id
+
+
 def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     """Faza 4: autonomous discovery agent.
 
@@ -525,6 +612,12 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     # Bez tego widzial "0 nowych leadow" i mial wrazenie ze nic sie nie stalo.
     research_errors_count = 0
     last_research_error: str | None = None
+    # Bail-out counter: liczba CONSECUTIVE fail'ow research bez ani jednego
+    # sukcesu. Po RESEARCH_BAILOUT_THRESHOLD straconych prob STOP autonomous -
+    # cos systemowo nie dziala (LLM API key invalid, sieciowy outage),
+    # nie ma sensu palic budgetu na nic.
+    consecutive_failures = 0
+    RESEARCH_BAILOUT_THRESHOLD = 8  # 8 z rzedu bez sukcesu = co najmniej $0.16+ zmarnowane
     # Bounded deque - zapobiega memory leak (1000+ items inside autonomous run)
     # plus tani slice. Plus oszczedza miejsce w JSON job.result.
     recent: deque = deque(maxlen=15)
@@ -613,6 +706,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         existing_count = len(places) - len(new_places_for_llm)
 
         targets = []
+        # Pairs (place, llm_score) - score zachowany do fallback'a gdy research padnie
+        city_targets_with_scores: list[tuple[Any, float]] = []
         if new_places_for_llm:
             try:
                 items, _ = score_relevance_batch(
@@ -623,7 +718,9 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 estimated_cost += 0.005  # LLM call
                 for it in items:
                     if it.score >= threshold and 0 <= it.idx < len(new_places_for_llm):
-                        targets.append(new_places_for_llm[it.idx])
+                        pl = new_places_for_llm[it.idx]
+                        targets.append(pl)
+                        city_targets_with_scores.append((pl, float(it.score)))
             except Exception as exc:
                 log.warning(f"Job #{job.id} relevance batch failed for {city_name}: {exc}")
                 recent.append({
@@ -684,6 +781,14 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             cities_skipped_no_results += 1
             continue
 
+        # Build mapping place.website -> relevance score (do fallback'a gdy
+        # research padnie - chcemy zapisac score z LLM zamiast tracic go).
+        targets_score_map: dict[str, float] = {
+            pl.website: float(s)
+            for pl, s in city_targets_with_scores
+            if pl.website
+        }
+
         # Research kazdego target lead - tylko ile potrzeba do celu
         remaining = target - new_leads_count
         targets = targets[: min(remaining, len(targets))]
@@ -702,6 +807,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 if was_researched:
                     estimated_cost += 0.02  # LLM research call
                     new_leads_count += 1
+                    consecutive_failures = 0  # sukces resetuje bail-out counter
 
                     drafted_now = False
                     # Auto-draft jak wystarczajaco wysoki score
@@ -730,15 +836,70 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                     })
                     _save_progress(current_city=city_name)
             except Exception as exc:
+                # FALLBACK: research padl (timeout strony, CloudFlare, brak API
+                # key) ale LLM relevance JUZ wybralo te firme jako pasujaca -
+                # nie marnujemy tej pracy. Zapisujemy minimalny Lead z place
+                # data + relevance score + research_data oznaczony jako fallback.
+                # User moze potem zrobic re-research z drawera.
                 research_errors_count += 1
                 last_research_error = f"{type(exc).__name__}: {str(exc)[:150]}"
                 log.warning(f"research for {place.website} failed: {exc}")
-                recent.append({
-                    "name": place.name, "url": place.website,
-                    "status": "research_failed", "error": str(exc)[:120],
-                    "city": city_name,
-                })
+
+                rel_score = targets_score_map.get(place.website or "", 5.0)
+                try:
+                    fallback_lead_id = _save_fallback_lead_from_place(
+                        place,
+                        segment=current_segment_label,
+                        city_hint=city_name,
+                        workspace_id=job.workspace_id,
+                        relevance_score=rel_score,
+                        research_error=str(exc)[:300],
+                    )
+                except Exception as save_exc:
+                    fallback_lead_id = None
+                    log.exception(
+                        f"Fallback save for {place.website} ALSO failed: {save_exc}"
+                    )
+
+                if fallback_lead_id is not None:
+                    new_leads_count += 1
+                    consecutive_failures = 0  # mamy w bazie - nie bail-out
+                    recent.append({
+                        "name": place.name, "url": place.website,
+                        "status": "researched_fallback",
+                        "score": rel_score,
+                        "lead_id": fallback_lead_id,
+                        "city": city_name,
+                        "error": f"strona niedostepna - zapisano z Places API ({str(exc)[:80]})",
+                    })
+                else:
+                    consecutive_failures += 1
+                    recent.append({
+                        "name": place.name, "url": place.website,
+                        "status": "research_failed", "error": str(exc)[:120],
+                        "city": city_name,
+                    })
                 _save_progress(current_city=city_name)
+
+            # Bail-out: jak zaden lead sie nie zapisal (consecutive_failures
+            # urosly) ani nie ma w ogole sukcesow, znaczy ze cos jest fundamentalnie
+            # zlamane (np. fetch_page blokowany globalnie, brak GEMINI key na
+            # research). Nie pal budget na nic - STOP, daj user diagnostic info.
+            if consecutive_failures >= RESEARCH_BAILOUT_THRESHOLD and new_leads_count == 0:
+                log.error(
+                    f"Job #{job.id} BAILOUT: {consecutive_failures} consecutive "
+                    f"research/fallback failures, 0 leads saved. Stopping autonomous."
+                )
+                last_research_error = (
+                    f"BAILOUT po {consecutive_failures} bledach pod rzad. "
+                    + (last_research_error or "Sprawdz: GEMINI_API_KEY / ANTHROPIC_API_KEY, "
+                       "sieciowa lacznosc workera, czy strony nie blokuja outbound z Railway.")
+                )
+                break  # wyjdz z petli per-place targets
+
+        # Drugi bail-out check po petli targets - wyjdz tez z work_queue
+        if consecutive_failures >= RESEARCH_BAILOUT_THRESHOLD and new_leads_count == 0:
+            break
 
     # Final save z reason
     stopped_reason = (
