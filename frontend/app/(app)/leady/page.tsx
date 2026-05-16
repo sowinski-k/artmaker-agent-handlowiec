@@ -96,7 +96,21 @@ interface LeadsResponse {
   items: LeadRow[];
 }
 
-const STATUSES = ['', 'new', 'researched', 'drafted', 'approved', 'sent', 'replied', 'bounced', 'blacklisted'];
+// 'not_sent' to virtualny filter (backend rozpoznaje) = wszystkie poza
+// sent/replied/bounced. Domyslny by user widzial leady "do roboty".
+const STATUSES = ['not_sent', '', 'new', 'researched', 'drafted', 'approved', 'sent', 'replied', 'bounced', 'blacklisted'];
+const STATUS_LABELS: Record<string, string> = {
+  '': 'Wszystkie statusy',
+  'not_sent': 'Tylko nie wysłane (domyślne)',
+  'new': 'Status: new',
+  'researched': 'Status: researched',
+  'drafted': 'Status: drafted',
+  'approved': 'Status: approved',
+  'sent': 'Status: sent',
+  'replied': 'Status: replied',
+  'bounced': 'Status: bounced',
+  'blacklisted': 'Status: blacklisted',
+};
 const SEGMENTS = ['', 'sklep_plastyczny', 'sklep_papierniczy', 'paint_and_sip', 'warsztaty_dzieci',
   'animatorzy_eventy', 'szkola_artystyczna', 'marka_wlasna', 'inne'];
 
@@ -155,7 +169,8 @@ export default function LeadyPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [segment, setSegment] = useState('');
-  const [status, setStatus] = useState('');
+  // Default 'not_sent': pokaz tylko leady do roboty (bez wyslanych/odpowiedzialych)
+  const [status, setStatus] = useState('not_sent');
   const [minScore, setMinScore] = useState(0);
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
@@ -521,6 +536,59 @@ export default function LeadyPage() {
       setFlash({ kind: 'error', text: msg });
     } finally {
       setAddLeadSubmitting(false);
+    }
+  }
+
+  async function blockLead() {
+    if (!detail) return;
+    const ok = await confirm({
+      title: 'Zablokować ten lead?',
+      message: (
+        <>
+          Lead <strong>{detail.company_name}</strong> (#{detail.id}) zniknie z domyślnej
+          listy. Pozostanie w bazie - możesz go odblokować ustawiając filtr
+          &ldquo;Status: blacklisted&rdquo;. Użyj dla &ldquo;pewniaczków&rdquo;
+          z których wiesz że nic nie będzie.
+        </>
+      ),
+      confirmLabel: 'Zablokuj',
+      cancelLabel: 'Anuluj',
+      destructive: false,
+      icon: 'ban',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/leads/${detail.id}/block`, { method: 'POST' });
+      setFlash({
+        kind: 'success',
+        text: `Lead "${detail.company_name}" zablokowany - nie pokaże się więcej w domyślnej liście.`,
+      });
+      setSelectedId(null);
+      setDetail(null);
+      await load();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie zablokowac',
+      });
+    }
+  }
+
+  async function unblockLead() {
+    if (!detail) return;
+    try {
+      await api(`/api/leads/${detail.id}/unblock`, { method: 'POST' });
+      setFlash({
+        kind: 'success',
+        text: `Lead "${detail.company_name}" odblokowany.`,
+      });
+      await refreshDetail(detail.id);
+      await load();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie odblokowac',
+      });
     }
   }
 
@@ -904,7 +972,9 @@ export default function LeadyPage() {
               {SEGMENTS.map((s) => <option key={s} value={s}>{s ? `Segment: ${s}` : 'Wszystkie segmenty'}</option>)}
             </select>
             <select className="tb-select" value={status} onChange={(e) => setStatus(e.target.value)}>
-              {STATUSES.map((s) => <option key={s} value={s}>{s ? `Status: ${s}` : 'Wszystkie statusy'}</option>)}
+              {STATUSES.map((s) => (
+                <option key={s || 'all'} value={s}>{STATUS_LABELS[s] || s}</option>
+              ))}
             </select>
             <select className="tb-select" value={sort} onChange={(e) => setSort(e.target.value)}>
               {SORTS.map((s) => <option key={s.value} value={s.value}>Sortuj: {s.label}</option>)}
@@ -1564,6 +1634,27 @@ export default function LeadyPage() {
                     <span style={{ fontSize: 13, color: '#8F1018' }}>
                       Brak emaila i brak strony - nie da się tu nic zrobić automatycznie.
                     </span>
+                  )}
+
+                  {/* Block / Unblock - manualny hard-skip dla "pewniakow z
+                      ktorych nic nie bedzie". Lead pozostaje w bazie ale znika
+                      z domyslnego widoku (filtr 'not_sent'). */}
+                  {detail.status === 'blacklisted' ? (
+                    <button
+                      className="btn btn-secondary"
+                      onClick={unblockLead}
+                      title="Przywroc lead do widoku 'do roboty'"
+                    >
+                      <i className="ti ti-rotate-clockwise" /> Odblokuj lead
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-block-lead"
+                      onClick={blockLead}
+                      title="Ukryj lead z listy - pozostaje w bazie, ale znika z domyslnego filtra"
+                    >
+                      <i className="ti ti-ban" /> Zablokuj lead
+                    </button>
                   )}
 
                   {/* Destrukcyjna akcja - na samym dole, dyskretna.
@@ -2330,5 +2421,22 @@ table.tbl .row-check input[type="checkbox"] {
 .btn-delete-lead i { font-size: 13px; }
 .btn-delete-lead:hover {
   background: #FEE2E2; border-color: #FCA5A5; color: #991B1B;
+}
+
+/* Block lead - mniej destrukcyjne niz delete, ale wyrazne */
+.btn-block-lead {
+  margin-top: 4px;
+  padding: 7px 11px;
+  background: none; border: 1px solid #FDE68A;
+  border-radius: 6px;
+  color: #92400E; font-size: 12px;
+  cursor: pointer; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 6px;
+  align-self: flex-start;
+  transition: all 0.15s;
+}
+.btn-block-lead i { font-size: 14px; }
+.btn-block-lead:hover {
+  background: #FEF3C7; border-color: #FBBF24; color: #78350F;
 }
 `;
