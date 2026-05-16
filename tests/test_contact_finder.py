@@ -185,6 +185,28 @@ class TestJunkEmailFalsePositives:
     def test_window_prefix_rejected(self):
         assert _is_junk_email("window.location@example.org") is True
 
+    def test_js_extension_tld_rejected(self):
+        # 1gax@wnoqp.js - fragment URL z plikiem .js (random ID + filename)
+        assert _is_junk_email("1gax@wnoqp.js") is True
+
+    def test_cdninstagram_rejected(self):
+        # st@ic.cdninstagram.com - "static.cdninstagram.com" CDN Instagrama
+        assert _is_junk_email("st@ic.cdninstagram.com") is True
+
+    def test_cookiebot_widget_rejected(self):
+        # cookiebot.com to widget cookie consent na 90% PL stron
+        assert _is_junk_email("uuid@cookiebot.com") is True
+
+    def test_hotjar_widget_rejected(self):
+        # hotjar - heatmap/recording, na 60% PL stron
+        assert _is_junk_email("abc@hotjar.com") is True
+
+    def test_css_extension_tld_rejected(self):
+        assert _is_junk_email("foo@bar.css") is True
+
+    def test_html_extension_tld_rejected(self):
+        assert _is_junk_email("foo@bar.html") is True
+
     def test_real_polish_emails_pass(self):
         # Sanity: realne emaile NIE moga zostac zablokowane
         for email in [

@@ -472,12 +472,31 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     estimated_cost = 0.0
     new_leads_count = 0
     cities_processed = 0
-    cities_skipped_cache = 0
+    cities_skipped_no_results = 0
     drafts_made = 0
+    recent: list[dict] = []  # Live ticker - frontend wyswietla na biezaco
 
-    job.total = target
-    job.progress = 0
-    session.commit()
+    def _save_progress(current_city: str | None = None, status: str = "running"):
+        """Update job.result + job.progress dla live UI updates.
+        Wywolywane po kazdym mieście + zmianie statu w trakcie."""
+        job.progress = new_leads_count
+        job.total = target
+        job.result = {
+            "status": status,            # "running" | "stopped"
+            "current_city": current_city,
+            "cities_processed": cities_processed,
+            "cities_total": len(cities_list),
+            "new_leads_count": new_leads_count,
+            "target_new_leads": target,
+            "drafts_made": drafts_made,
+            "estimated_cost_usd": round(estimated_cost, 3),
+            "max_cost_usd": max_cost,
+            "cities_skipped_no_results": cities_skipped_no_results,
+            "recent": recent[-15:],  # ostatnie 15 zdarzen
+        }
+        session.commit()
+
+    _save_progress(status="starting")
     log.info(
         f"Job #{job.id} autonomous: target={target} budget=${max_cost} "
         f"cities={len(cities_list)} segment={p.get('segment')!r}"
@@ -498,6 +517,9 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         cities_processed += 1
         query = f"{p['segment'].replace('_', ' ')} {city_name}"
 
+        # Live update - user widzi "Sprawdzam: Warszawa"
+        _save_progress(current_city=city_name)
+
         # Run search dla tego miasta
         try:
             places, _diag = run_search(
@@ -507,33 +529,55 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 workspace_id=job.workspace_id,
                 city_filter=city_name,
             )
-            # Szacujemy koszt na podstawie liczby zrodel * 0.03 za call
             estimated_cost += len(sources) * 0.03
         except Exception as exc:
             log.warning(f"Job #{job.id} city {city_name!r} search failed: {exc}")
+            recent.append({
+                "name": city_name, "status": "city_search_failed",
+                "error": str(exc)[:120],
+            })
+            _save_progress(current_city=city_name)
             continue
 
-        # Relevance filter
+        # Relevance filter - tylko nowe places (jak fix #2 z poprzedniego PR)
+        new_places_for_llm = [
+            p for p in places if p.website and p.existing_lead_id is None
+        ]
+        existing_count = len(places) - len(new_places_for_llm)
+
         targets = []
-        if places:
+        if new_places_for_llm:
             try:
                 items, _ = score_relevance_batch(
-                    places, segment=p.get("segment", "inne"),
+                    new_places_for_llm, segment=p.get("segment", "inne"),
                     city=city_name,
                     custom_description=custom_desc,
                 )
                 estimated_cost += 0.005  # LLM call
                 for it in items:
-                    if it.score >= threshold and 0 <= it.idx < len(places):
-                        pl = places[it.idx]
-                        if pl.website and pl.existing_lead_id is None:
-                            targets.append(pl)
+                    if it.score >= threshold and 0 <= it.idx < len(new_places_for_llm):
+                        targets.append(new_places_for_llm[it.idx])
             except Exception as exc:
                 log.warning(f"Job #{job.id} relevance batch failed for {city_name}: {exc}")
+                recent.append({
+                    "name": city_name, "status": "city_relevance_failed",
+                    "error": str(exc)[:120],
+                })
+                _save_progress(current_city=city_name)
                 continue
 
+        # Log per-city stats - user widzi co miasto dalo
+        recent.append({
+            "name": city_name,
+            "status": "city_scanned",
+            "places_found": len(places),
+            "duplicates_in_db": existing_count,
+            "matching_relevance": len(targets),
+        })
+        _save_progress(current_city=city_name)
+
         if not targets:
-            cities_skipped_cache += 1
+            cities_skipped_no_results += 1
             continue
 
         # Research kazdego target lead - tylko ile potrzeba do celu
@@ -554,9 +598,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 if was_researched:
                     estimated_cost += 0.02  # LLM research call
                     new_leads_count += 1
-                    job.progress = new_leads_count
-                    session.commit()
 
+                    drafted_now = False
                     # Auto-draft jak wystarczajaco wysoki score
                     if auto_draft_th is not None and _result is not None:
                         if _result.score.total >= auto_draft_th:
@@ -566,25 +609,48 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                                     lead_id, workspace_id=job.workspace_id,
                                 )
                                 drafts_made += 1
+                                drafted_now = True
                                 estimated_cost += 0.04  # LLM draft generation
                             except Exception as exc:
                                 log.warning(f"draft for #{lead_id} failed: {exc}")
+
+                    # Per-lead live ticker entry
+                    recent.append({
+                        "name": (_result.company_name if _result else place.name),
+                        "url": place.website,
+                        "status": "researched",
+                        "score": round(_result.score.total, 1) if _result else None,
+                        "lead_id": lead_id,
+                        "drafted": drafted_now,
+                        "city": city_name,
+                    })
+                    _save_progress(current_city=city_name)
             except Exception as exc:
                 log.warning(f"research for {place.website} failed: {exc}")
+                recent.append({
+                    "name": place.name, "url": place.website,
+                    "status": "research_failed", "error": str(exc)[:120],
+                    "city": city_name,
+                })
+                _save_progress(current_city=city_name)
 
+    # Final save z reason
+    stopped_reason = (
+        "target_reached" if new_leads_count >= target
+        else "budget_reached" if estimated_cost >= max_cost
+        else "cancelled" if _is_cancelled(session, job.id) or _shutdown
+        else "all_cities_processed"
+    )
     return {
         "target_new_leads": target,
         "new_leads_count": new_leads_count,
         "drafts_made": drafts_made,
         "cities_processed": cities_processed,
-        "cities_skipped_no_results": cities_skipped_cache,
+        "cities_skipped_no_results": cities_skipped_no_results,
         "estimated_cost_usd": round(estimated_cost, 3),
         "max_cost_usd": max_cost,
-        "stopped_reason": (
-            "target_reached" if new_leads_count >= target
-            else "budget_reached" if estimated_cost >= max_cost
-            else "all_cities_processed"
-        ),
+        "stopped_reason": stopped_reason,
+        "recent": recent[-15:],
     }
 
 
