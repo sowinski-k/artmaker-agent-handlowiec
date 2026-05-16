@@ -79,6 +79,7 @@ class JobType(str, Enum):
     BULK_GENERATE_DRAFTS = "bulk_generate_drafts"
     SEND_DRAFT = "send_draft"                  # push do Woodpecker
     POLL_WOODPECKER = "poll_woodpecker"        # update statusów replied/bounced
+    AUTONOMOUS_DISCOVERY = "autonomous_discovery"  # Faza 4: cel + budzet, sam iteruje
 
 
 class WorkspaceRole(str, Enum):

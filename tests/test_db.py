@@ -51,13 +51,14 @@ def test_lead_segments_8():
     assert actual == expected
 
 
-def test_job_types_9():
-    """9 typow jobow - kazdy ma handler w worker/main.py."""
+def test_job_types_10():
+    """10 typow jobow - kazdy ma handler w worker/main.py."""
     expected = {
         "discovery_pipeline", "research_lead", "bulk_research_leads",
         "enrich_lead", "bulk_enrich_leads",
         "generate_draft", "bulk_generate_drafts",
         "send_draft", "poll_woodpecker",
+        "autonomous_discovery",  # Faza 4 - autonomous discovery agent
     }
     actual = {j.value for j in JobType}
     assert actual == expected

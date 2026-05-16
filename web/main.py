@@ -3291,6 +3291,72 @@ def bulk_discover(
     }
 
 
+class AutonomousDiscoveryIn(BaseModel):
+    """Faza 4: autonomous discovery agent.
+
+    User mowi "znajdz mi N nowych leadow", agent iteruje sam po liscie
+    miast PL (top X), w kazdym wykonuje discovery z cache + relevance
+    filter + auto-research, stopuje gdy osiagnie cel ALBO budzet.
+
+    Wszystko w JEDNYM jobie typu AUTONOMOUS_DISCOVERY ktory worker
+    przerabia sekwencyjnie. Progress widzialny przez standardowy
+    job polling.
+    """
+    segment: str
+    sources: list[str]
+    target_new_leads: int = 50           # cel: tyle nowych leadow w bazie
+    max_cost_usd: float = 5.0            # twardy budzet
+    relevance_threshold: int = 6
+    auto_draft_threshold: int | None = 7  # >=N -> auto-draft po researchu
+    custom_description: str | None = None
+    voivodeship_filter: str | None = None  # opcjonalnie tylko z tego wojew
+    max_cities_to_try: int = 50          # ile miast max przerobic
+
+
+@app.post("/api/discovery/autonomous")
+def start_autonomous_discovery(
+    payload: AutonomousDiscoveryIn,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Tworzy AUTONOMOUS_DISCOVERY job. Worker przerabia w tle - moze
+    trwac nawet 30+ minut dla duzych celow. User loguje sie potem.
+    """
+    if not payload.sources:
+        raise HTTPException(status_code=400, detail="Wybierz przynajmniej jedno źródło.")
+    if payload.target_new_leads < 1 or payload.target_new_leads > 500:
+        raise HTTPException(status_code=400, detail="target_new_leads: 1-500.")
+    if payload.max_cost_usd < 0.10 or payload.max_cost_usd > 100:
+        raise HTTPException(status_code=400, detail="max_cost_usd: $0.10-$100.")
+
+    with SessionLocal() as session:
+        # Tylko jeden autonomous job naraz per workspace - inaczej kazdy by
+        # rownolegle przerabial te same miasta
+        active = session.execute(
+            select(Job).where(
+                Job.workspace_id == cur.workspace_id,
+                Job.type == JobType.AUTONOMOUS_DISCOVERY.value,
+                Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "msg": "Autonomous discovery juz biega. Anuluj go przed nowym.",
+                    "active_job_id": active.id,
+                },
+            )
+
+        job = create_job(
+            session,
+            job_type=JobType.AUTONOMOUS_DISCOVERY,
+            workspace_id=cur.workspace_id, user_id=cur.user_id,
+            payload=payload.model_dump(),
+            total=payload.target_new_leads,  # progress = how many leads znalezionych
+        )
+    return {"ok": True, "job_id": job.id}
+
+
 class ResearchIn(BaseModel):
     url: str
     segment_hint: str | None = None

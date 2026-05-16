@@ -414,6 +414,180 @@ def handle_poll_woodpecker(session: Session, job: Job) -> dict:
     return counts
 
 
+def handle_autonomous_discovery(session: Session, job: Job) -> dict:
+    """Faza 4: autonomous discovery agent.
+
+    Iteruje po top miastach PL (z core.cities_pl), w kazdym wykonuje
+    discovery z cache + relevance + auto-research. Stopuje gdy osiagnie
+    target_new_leads ALBO max_cost_usd ALBO max_cities_to_try.
+
+    Progress: job.progress = liczba juz zapisanych nowych leadow,
+    job.total = target_new_leads. Frontend pollami /api/jobs/{id}
+    widzi live progress.
+
+    Cost tracking: szacujemy $0.04 per city Google Places (60 results)
+    + $0.005 per LLM relevance call. Real cost moze byc rozne.
+    """
+    from agent.discovery import (
+        ApifyAllegroSource, ApifyLinkedInSource, ApifySource,
+        GooglePlacesSource, run_search, score_relevance_batch,
+    )
+    from agent.research import research_and_save
+    from core.cities_pl import get_top_cities, cities_in_voivodeship
+    from core.urls import normalize_url
+
+    p = job.payload
+    target = int(p.get("target_new_leads", 50))
+    max_cost = float(p.get("max_cost_usd", 5.0))
+    threshold = int(p.get("relevance_threshold", 6))
+    auto_draft_th = p.get("auto_draft_threshold")
+    max_cities = int(p.get("max_cities_to_try", 50))
+    voiv_filter = p.get("voivodeship_filter")
+    custom_desc = p.get("custom_description")
+    sources_list = p.get("sources", [])
+
+    # Wybierz miasta
+    if voiv_filter:
+        cities_list = cities_in_voivodeship(voiv_filter)
+    else:
+        cities_list = get_top_cities(max_cities)
+    cities_list = cities_list[:max_cities]
+
+    # Setup sources
+    src_classes = {
+        "apify": ApifySource, "google_places": GooglePlacesSource,
+        "apify_allegro": ApifyAllegroSource, "apify_linkedin": ApifyLinkedInSource,
+    }
+    sources = []
+    for s in sources_list:
+        cls = src_classes.get(s)
+        if cls is None:
+            continue
+        inst = cls()
+        if inst.available():
+            sources.append(inst)
+    if not sources:
+        raise RuntimeError("Brak skonfigurowanych zrodel discovery.")
+
+    estimated_cost = 0.0
+    new_leads_count = 0
+    cities_processed = 0
+    cities_skipped_cache = 0
+    drafts_made = 0
+
+    job.total = target
+    job.progress = 0
+    session.commit()
+    log.info(
+        f"Job #{job.id} autonomous: target={target} budget=${max_cost} "
+        f"cities={len(cities_list)} segment={p.get('segment')!r}"
+    )
+
+    for city in cities_list:
+        if _shutdown or _is_cancelled(session, job.id):
+            log.info(f"Job #{job.id} stopped externally at city #{cities_processed}")
+            break
+        if new_leads_count >= target:
+            log.info(f"Job #{job.id} TARGET REACHED ({new_leads_count}/{target})")
+            break
+        if estimated_cost >= max_cost:
+            log.info(f"Job #{job.id} BUDGET REACHED (${estimated_cost:.2f}/${max_cost})")
+            break
+
+        city_name = city["name"]
+        cities_processed += 1
+        query = f"{p['segment'].replace('_', ' ')} {city_name}"
+
+        # Run search dla tego miasta
+        try:
+            places, _diag = run_search(
+                sources,
+                query=query,
+                max_results_per_source=60,
+                workspace_id=job.workspace_id,
+                city_filter=city_name,
+            )
+            # Szacujemy koszt na podstawie liczby zrodel * 0.03 za call
+            estimated_cost += len(sources) * 0.03
+        except Exception as exc:
+            log.warning(f"Job #{job.id} city {city_name!r} search failed: {exc}")
+            continue
+
+        # Relevance filter
+        targets = []
+        if places:
+            try:
+                items, _ = score_relevance_batch(
+                    places, segment=p.get("segment", "inne"),
+                    city=city_name,
+                    custom_description=custom_desc,
+                )
+                estimated_cost += 0.005  # LLM call
+                for it in items:
+                    if it.score >= threshold and 0 <= it.idx < len(places):
+                        pl = places[it.idx]
+                        if pl.website and pl.existing_lead_id is None:
+                            targets.append(pl)
+            except Exception as exc:
+                log.warning(f"Job #{job.id} relevance batch failed for {city_name}: {exc}")
+                continue
+
+        if not targets:
+            cities_skipped_cache += 1
+            continue
+
+        # Research kazdego target lead - tylko ile potrzeba do celu
+        remaining = target - new_leads_count
+        targets = targets[: min(remaining, len(targets))]
+        for place in targets:
+            if _shutdown or _is_cancelled(session, job.id):
+                break
+            if estimated_cost >= max_cost:
+                break
+            try:
+                lead_id, _result, was_researched = research_and_save(
+                    place.website,
+                    segment_hint=p.get("segment"),
+                    city_hint=city_name,
+                    workspace_id=job.workspace_id,
+                )
+                if was_researched:
+                    estimated_cost += 0.02  # LLM research call
+                    new_leads_count += 1
+                    job.progress = new_leads_count
+                    session.commit()
+
+                    # Auto-draft jak wystarczajaco wysoki score
+                    if auto_draft_th is not None and _result is not None:
+                        if _result.score.total >= auto_draft_th:
+                            try:
+                                from agent.generate import generate_draft_for_lead
+                                generate_draft_for_lead(
+                                    lead_id, workspace_id=job.workspace_id,
+                                )
+                                drafts_made += 1
+                                estimated_cost += 0.04  # LLM draft generation
+                            except Exception as exc:
+                                log.warning(f"draft for #{lead_id} failed: {exc}")
+            except Exception as exc:
+                log.warning(f"research for {place.website} failed: {exc}")
+
+    return {
+        "target_new_leads": target,
+        "new_leads_count": new_leads_count,
+        "drafts_made": drafts_made,
+        "cities_processed": cities_processed,
+        "cities_skipped_no_results": cities_skipped_cache,
+        "estimated_cost_usd": round(estimated_cost, 3),
+        "max_cost_usd": max_cost,
+        "stopped_reason": (
+            "target_reached" if new_leads_count >= target
+            else "budget_reached" if estimated_cost >= max_cost
+            else "all_cities_processed"
+        ),
+    }
+
+
 JOB_HANDLERS = {
     JobType.DISCOVERY_PIPELINE.value: handle_discovery_pipeline,
     JobType.RESEARCH_LEAD.value: handle_research_lead,
@@ -424,6 +598,7 @@ JOB_HANDLERS = {
     JobType.BULK_GENERATE_DRAFTS.value: handle_bulk_generate_drafts,
     JobType.SEND_DRAFT.value: handle_send_draft,
     JobType.POLL_WOODPECKER.value: handle_poll_woodpecker,
+    JobType.AUTONOMOUS_DISCOVERY.value: handle_autonomous_discovery,
 }
 
 
