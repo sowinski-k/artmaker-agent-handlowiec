@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.1-pro-preview"
 
     apify_api_token: str = ""
+    # OSOBNE od API token! Pobierane z Apify Console -> Proxy page -> "HTTP password".
+    # Uzywane do residential proxy ktore omija DataDome / inne anti-bot
+    # (np. Allegro Stage 2 scraping seller info ze strony oferty).
+    # Bez tego Stage 2 leci z Railway IP - DataDome moze blokowac.
+    apify_proxy_password: str = ""
     apify_gmaps_actor: str = "compass~google-maps-scraper"
     # Default Allegro actor: automation-lab~allegro-scraper
     #
