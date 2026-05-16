@@ -365,8 +365,10 @@ export default function PozyskiwaniePage() {
       return;
     }
     // Hydrate activeJob na load - jak user wraca/refreshuje strone, a backend
-    // ma juz aktywny job discovery/bulk research, odzyskujemy go zeby nie
-    // pozwolic na drugi rownolegly job.
+    // ma juz aktywny job discovery/bulk research/autonomous, odzyskujemy go
+    // zeby live panel sie pokazal + zeby nie pozwolic na konflikt (manual+agent).
+    // autonomous_discovery moze chodzic rownolegle z innymi - tez go hydratujemy
+    // zeby uzytkownik widzial progress (top miasta + segmenty x miasta).
     (async () => {
       try {
         const running = await api<JobInfo[]>(
@@ -375,9 +377,12 @@ export default function PozyskiwaniePage() {
         const pending = await api<JobInfo[]>(
           '/api/jobs?status=pending&limit=5'
         ).catch(() => [] as JobInfo[]);
-        const found = [...running, ...pending].find(
-          (j) => j.type === 'discovery_pipeline' || j.type === 'bulk_research_leads'
-        );
+        // Priorytet hydracji: autonomous_discovery (zwykle dluzszy, wazniejszy
+        // dla widocznosci) > discovery_pipeline > bulk_research_leads.
+        const all = [...running, ...pending];
+        const found =
+          all.find((j) => j.type === 'autonomous_discovery') ||
+          all.find((j) => j.type === 'discovery_pipeline' || j.type === 'bulk_research_leads');
         if (found) {
           setActiveJob(found);
           startJobPolling(found.id);
@@ -1059,6 +1064,8 @@ export default function PozyskiwaniePage() {
               const r = activeJob.result as {
                 status?: string;
                 current_city?: string;
+                current_segment?: string;
+                segments?: string[];
                 cities_processed?: number;
                 cities_total?: number;
                 new_leads_count?: number;
@@ -1069,19 +1076,50 @@ export default function PozyskiwaniePage() {
                 cities_skipped_no_results?: number;
                 stopped_reason?: string;
               };
+              const segs = r.segments || (r.current_segment ? [r.current_segment] : []);
+              const segLabel = (s: string) => SEGMENT_INFO[s]?.label || s;
               return (
                 <div className="autonomous-status">
-                  <div className="autonomous-status-grid">
-                    <div className="as-stat">
-                      <div className="as-label">Aktualnie skanuje</div>
-                      <div className="as-value">
-                        {jobActive && r.current_city ? (
-                          <><span className="dot-pulse" /> {r.current_city}</>
+                  {/* Hero row - co teraz robi agent, max widocznosc */}
+                  <div className="as-hero">
+                    <div className="as-hero-left">
+                      <div className="as-hero-label">
+                        <i className="ti ti-radar" /> Agent pracuje
+                      </div>
+                      <div className="as-hero-now">
+                        {jobActive ? (
+                          <>
+                            <span className="dot-pulse" />
+                            <strong>
+                              {r.current_segment ? segLabel(r.current_segment) : '—'}
+                            </strong>
+                            <span className="as-hero-arrow">→</span>
+                            <strong className="as-hero-city">
+                              {r.current_city || '…'}
+                            </strong>
+                          </>
                         ) : (
                           <span style={{ color: '#9CA3AF' }}>—</span>
                         )}
                       </div>
+                      {segs.length > 1 && (
+                        <div className="as-hero-segs">
+                          <span className="as-hero-segs-label">
+                            Multi-segment ({segs.length}):
+                          </span>
+                          {segs.map((s) => (
+                            <span
+                              key={s}
+                              className={`as-seg-pill ${s === r.current_segment ? 'active' : ''}`}
+                            >
+                              {segLabel(s)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
+                  </div>
+                  <div className="autonomous-status-grid">
                     <div className="as-stat">
                       <div className="as-label">Miasta sprawdzone</div>
                       <div className="as-value as-mono">
@@ -1156,17 +1194,20 @@ export default function PozyskiwaniePage() {
                 <span className="mono">job #{activeJob.id}</span>
               </div>
             )}
-            {/* LIVE TICKER - lista ostatnio przetworzonych leadow */}
+            {/* LIVE TICKER - lista ostatnio przetworzonych leadow.
+                Worker dorzuca per-entry `segment` + `city` (multi-segment context). */}
             {(() => {
               const recent = (activeJob.result as { recent?: Array<{
                 name?: string; url?: string; status?: string; score?: number;
                 lead_id?: number; drafted?: boolean; error?: string;
+                segment?: string; city?: string;
               }> } | null)?.recent;
               if (!recent || recent.length === 0) return null;
+              const segLabel = (s: string) => SEGMENT_INFO[s]?.label || s;
               return (
                 <div className="live-ticker">
                   <div className="live-ticker-head">
-                    <i className="ti ti-activity" /> Ostatnio przetworzone
+                    <i className="ti ti-activity" /> Ostatnio przetworzone ({recent.length})
                   </div>
                   <div className="live-ticker-list">
                     {[...recent].reverse().map((r, i) => (
@@ -1177,6 +1218,14 @@ export default function PozyskiwaniePage() {
                           {r.status === 'failed' && <i className="ti ti-alert-triangle" />}
                         </span>
                         <span className="lt-name" title={r.url}>{r.name || r.url}</span>
+                        {r.segment && (
+                          <span className="lt-meta" title={`Segment: ${r.segment}`}>
+                            {segLabel(r.segment)}
+                          </span>
+                        )}
+                        {r.city && (
+                          <span className="lt-meta lt-city">{r.city}</span>
+                        )}
                         {r.score != null && (
                           <span className="lt-score mono">{r.score}/10</span>
                         )}
@@ -2126,6 +2175,45 @@ const CSS = `
   border-radius: 9px;
   color: #fff;
 }
+/* Hero row pokazujacy CO TERAZ robi agent - duzo widoczniej niz reszta gridu */
+.as-hero {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin-bottom: 14px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.18), rgba(255,255,255,0.04));
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  border-radius: 8px;
+}
+.as-hero-left { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.as-hero-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; color: #FCA5A5;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.as-hero-now {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; line-height: 1.2; flex-wrap: wrap;
+}
+.as-hero-now strong { font-weight: 700; }
+.as-hero-arrow { color: rgba(255,255,255,0.4); }
+.as-hero-city { color: #FECACA; }
+.as-hero-segs {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 11px;
+}
+.as-hero-segs-label { color: rgba(255,255,255,0.5); }
+.as-seg-pill {
+  padding: 2px 8px; border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.6);
+  font-size: 10.5px;
+}
+.as-seg-pill.active {
+  background: #DC2626; border-color: #DC2626; color: #fff;
+  font-weight: 600;
+}
+
 .autonomous-status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -2440,6 +2528,14 @@ const CSS = `
 }
 .lt-tag.muted { background: #F3F4F6; color: #6B7280; border-color: #E5E7EB; }
 .lt-tag.err { background: rgba(212,33,44,0.15); color: #8F1018; }
+/* Per-row segment + city w live ticker (multi-segment job widzialny per linia) */
+.lt-meta {
+  font-size: 10.5px; color: #6B7280;
+  padding: 1px 7px; border-radius: 999px;
+  background: #F9FAFB; border: 1px solid #E5E7EB;
+  white-space: nowrap;
+}
+.lt-meta.lt-city { background: #FEF3C7; border-color: #FDE68A; color: #92400E; }
 
 .job-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid #E5E7EB; }
 .result-grid {

@@ -539,6 +539,36 @@ export default function LeadyPage() {
     }
   }
 
+  async function reResearchLead() {
+    if (!detail || !detail.website) {
+      setFlash({
+        kind: 'error',
+        text: 'Brak adresu strony - re-research wymaga website.',
+      });
+      return;
+    }
+    try {
+      const res = await api<{ ok: boolean; job_id: number }>('/api/research', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: detail.website,
+          segment_hint: detail.segment || null,
+          city_hint: detail.city || null,
+          force_refresh: true,
+        }),
+      });
+      setFlash({
+        kind: 'success',
+        text: `Re-research uruchomiony (job #${res.job_id}). Strona ponownie sprawdzana - status pojawi się tutaj za chwilę.`,
+      });
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie odpalic re-research',
+      });
+    }
+  }
+
   async function blockLead() {
     if (!detail) return;
     const ok = await confirm({
@@ -1634,6 +1664,22 @@ export default function LeadyPage() {
                     <span style={{ fontSize: 13, color: '#8F1018' }}>
                       Brak emaila i brak strony - nie da się tu nic zrobić automatycznie.
                     </span>
+                  )}
+
+                  {/* Re-research: full LLM research jeszcze raz. Use case:
+                      - research failed bo strona byla down chwilowo
+                      - score 0 / pusty research_data
+                      - user widzi ze cos sie zmienilo na stronie (rebranding, oferta)
+                      Wymaga website - bez tego nie ma co odpalac. */}
+                  {detail.website && draftJobId === null && enrichJobId === null && (
+                    <button
+                      className="btn btn-secondary"
+                      onClick={reResearchLead}
+                      title="Pelny re-research: odpal LLM jeszcze raz na tej stronie (nowe pola research + score)"
+                      style={{ alignSelf: 'flex-start' }}
+                    >
+                      <i className="ti ti-refresh-dot" /> Re-research lead
+                    </button>
                   )}
 
                   {/* Block / Unblock - manualny hard-skip dla "pewniakow z
