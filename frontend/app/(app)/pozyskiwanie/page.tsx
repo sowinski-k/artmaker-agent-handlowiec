@@ -1029,6 +1029,9 @@ export default function PozyskiwaniePage() {
                 max_cost_usd?: number;
                 cities_skipped_no_results?: number;
                 stopped_reason?: string;
+                research_errors_count?: number;
+                last_research_error?: string;
+                setup_error?: string;
               };
               const segs = r.segments || (r.current_segment ? [r.current_segment] : []);
               const segLabel = (s: string) => SEGMENT_INFO[s]?.label || s;
@@ -1104,7 +1107,24 @@ export default function PozyskiwaniePage() {
                         {r.cities_skipped_no_results || 0}
                       </div>
                     </div>
+                    {(r.research_errors_count || 0) > 0 && (
+                      <div className="as-stat as-stat-err">
+                        <div className="as-label">Błędy researchu</div>
+                        <div
+                          className="as-value as-mono"
+                          title={r.last_research_error || 'Brak szczegolow'}
+                        >
+                          {r.research_errors_count}
+                        </div>
+                      </div>
+                    )}
                   </div>
+                  {r.setup_error && (
+                    <div className="as-setup-error">
+                      <i className="ti ti-alert-octagon" />
+                      <strong>Setup error:</strong> {r.setup_error}
+                    </div>
+                  )}
                   {!jobActive && r.stopped_reason && (
                     <div className="autonomous-stopped">
                       <strong>Zakończono:</strong> {
@@ -1158,20 +1178,32 @@ export default function PozyskiwaniePage() {
               }> } | null)?.recent;
               if (!recent || recent.length === 0) return null;
               const segLabel = (s: string) => SEGMENT_INFO[s]?.label || s;
+              // Status worker'a: 'researched' | 'city_scanned' | 'research_failed' |
+              // 'city_search_failed' | 'city_relevance_failed' | 'failed' | 'duplicate'
+              const isFailed = (s?: string) =>
+                s === 'failed' || s === 'research_failed' ||
+                s === 'city_search_failed' || s === 'city_relevance_failed';
+              const errorsCount = recent.filter((r) => isFailed(r.status)).length;
               return (
                 <div className="live-ticker">
                   <div className="live-ticker-head">
                     <i className="ti ti-activity" /> Ostatnio przetworzone ({recent.length})
+                    {errorsCount > 0 && (
+                      <span className="lt-errors-badge" title="Liczba bledow w ostatnich entries">
+                        <i className="ti ti-alert-triangle" /> {errorsCount} błędów
+                      </span>
+                    )}
                   </div>
                   <div className="live-ticker-list">
                     {[...recent].reverse().map((r, i) => (
-                      <div className={`lt-row lt-${r.status || 'pending'}`} key={i}>
+                      <div className={`lt-row lt-${isFailed(r.status) ? 'failed' : (r.status || 'pending')}`} key={i}>
                         <span className="lt-icon">
                           {r.status === 'researched' && <i className="ti ti-check" />}
+                          {r.status === 'city_scanned' && <i className="ti ti-map-pin" />}
                           {r.status === 'duplicate' && <i className="ti ti-copy" />}
-                          {r.status === 'failed' && <i className="ti ti-alert-triangle" />}
+                          {isFailed(r.status) && <i className="ti ti-alert-triangle" />}
                         </span>
-                        <span className="lt-name" title={r.url}>{r.name || r.url}</span>
+                        <span className="lt-name" title={r.url || r.error}>{r.name || r.url}</span>
                         {r.segment && (
                           <span className="lt-meta" title={`Segment: ${r.segment}`}>
                             {segLabel(r.segment)}
@@ -1185,12 +1217,26 @@ export default function PozyskiwaniePage() {
                         )}
                         {r.drafted && <span className="lt-tag">draft</span>}
                         {r.status === 'duplicate' && <span className="lt-tag muted">dup</span>}
-                        {r.status === 'failed' && (
-                          <span className="lt-tag err" title={r.error}>błąd</span>
+                        {isFailed(r.status) && (
+                          <span className="lt-tag err" title={r.error || 'Brak szczegolow'}>
+                            {r.status === 'research_failed' ? 'research padl' :
+                             r.status === 'city_search_failed' ? 'search padl' :
+                             r.status === 'city_relevance_failed' ? 'LLM filter padl' :
+                             'błąd'}
+                          </span>
                         )}
                       </div>
                     ))}
                   </div>
+                  {errorsCount >= 3 && (
+                    <div className="lt-errors-hint">
+                      <i className="ti ti-info-circle" />
+                      <strong>{errorsCount} blędów</strong> w ostatnich entries -
+                      hover na czerwone tagi zeby zobaczyc szczegoly. Najczestsze powody:
+                      strona offline (timeout), CloudFlare blokada, DataDome captcha,
+                      brak GEMINI/ANTHROPIC API key.
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -2404,6 +2450,7 @@ const CSS = `
   text-transform: uppercase;
   letter-spacing: 0.6px;
   margin-bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2477,6 +2524,66 @@ const CSS = `
   white-space: nowrap;
 }
 .lt-meta.lt-city { background: #FEF3C7; border-color: #FDE68A; color: #92400E; }
+
+/* Failed entries - czerwone tlo zeby user OD RAZU widzial ze cos padło */
+.lt-row.lt-failed {
+  background: rgba(212,33,44,0.05);
+  border-left: 2px solid #DC2626;
+  padding-left: 8px;
+}
+.lt-row.lt-failed .lt-icon { color: #DC2626; }
+.lt-row.lt-failed .lt-name { color: #8F1018; }
+
+/* Badge z liczba bledow w naglowku */
+.lt-errors-badge {
+  margin-left: auto;
+  padding: 2px 9px;
+  background: #FEE2E2;
+  border: 1px solid #FCA5A5;
+  border-radius: 999px;
+  color: #8F1018;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+
+/* Hint pod ticker'em jak >3 bledy - mowi userowi co moze byc */
+.lt-errors-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #FEF3C7;
+  border: 1px solid #FDE68A;
+  border-radius: 7px;
+  font-size: 11.5px;
+  color: #78350F;
+  display: flex; align-items: flex-start; gap: 6px;
+  line-height: 1.4;
+}
+.lt-errors-hint i { color: #B45309; flex-shrink: 0; margin-top: 1px; }
+
+/* Stat err styling - kafelek z liczba bledow w autonomous-status-grid */
+.as-stat.as-stat-err {
+  background: rgba(220, 38, 38, 0.15);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+}
+.as-stat.as-stat-err .as-value { color: #FECACA; }
+
+/* Setup error - duzy banner gdy job padl na konfiguracji */
+.as-setup-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(220, 38, 38, 0.18);
+  border: 1px solid rgba(220, 38, 38, 0.45);
+  border-radius: 7px;
+  color: #FECACA;
+  font-size: 12.5px;
+  line-height: 1.4;
+  display: flex; align-items: flex-start; gap: 8px;
+}
+.as-setup-error i { color: #FCA5A5; flex-shrink: 0; margin-top: 1px; font-size: 16px; }
+.as-setup-error strong { color: #FEE2E2; }
 
 .job-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid #E5E7EB; }
 .result-grid {
