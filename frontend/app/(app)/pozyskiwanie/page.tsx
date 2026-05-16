@@ -193,6 +193,9 @@ export default function PozyskiwaniePage() {
   const [selectedSources, setSelectedSources] = useState<string[]>(['google_places']);
   const [autoDraft, setAutoDraft] = useState(false);
   const [relevanceThreshold, setRelevanceThreshold] = useState(6);
+  // Bulk discovery state - jeden klik = N jobow per city.
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkCount, setBulkCount] = useState<30 | 50 | 100>(30);
   // Allegro query mode - widoczne tylko gdy 'apify_allegro' w selectedSources.
   // 'preset' = preset branzowy z core/industry_presets.py (najbardziej skalowalne)
   // 'keyword' = user wpisuje wlasne slowo kluczowe
@@ -565,6 +568,57 @@ export default function PozyskiwaniePage() {
       return;
     }
     setFlash({ kind: 'error', text: e.message || fallbackMsg });
+  }
+
+  // Bulk discovery: jeden klik = jobs dla top N miast PL paralelnie.
+  // Cache + exclusions z Faza 1/2 dzialaja automatycznie.
+  async function handleBulkDiscover() {
+    if (selectedSources.length === 0) {
+      setFlash({ kind: 'error', text: 'Wybierz przynajmniej jedno źródło.' });
+      return;
+    }
+    setBulkSubmitting(true);
+    try {
+      // Pobierz top N miast z backendu (najlepsze swieze dane)
+      type CitiesResp = { cities: { name: string }[]; voivodeships: string[]; total: number };
+      const citiesData = await api<CitiesResp>(`/api/discovery/cities?top_n=${bulkCount}`);
+      const cityNames = citiesData.cities.map((c) => c.name);
+
+      type BulkResp = {
+        queued: number; skipped: number;
+        queued_jobs: { city: string; job_id: number }[];
+        skipped_details: { city: string; reason: string; cached_count?: number }[];
+        daily_used: number; daily_cap: number;
+      };
+      const res = await api<BulkResp>('/api/discovery/bulk-discover', {
+        method: 'POST',
+        body: JSON.stringify({
+          segment,
+          sources: selectedSources,
+          cities: cityNames,
+          force_refresh: forceRefresh,
+          relevance_threshold: relevanceThreshold,
+          auto_draft_threshold: autoDraft ? 7 : null,
+          custom_description: customTarget.trim() || null,
+        }),
+      });
+      const cachedSkipped = res.skipped_details.filter((s) => s.reason === 'cache_active').length;
+      const otherSkipped = res.skipped - cachedSkipped;
+      setFlash({
+        kind: 'success',
+        text: (
+          `Zakolejkowano ${res.queued} jobów dla top ${bulkCount} miast PL` +
+          (cachedSkipped > 0 ? ` · ${cachedSkipped} pominiętych (cache aktywny, 0 kredytu)` : '') +
+          (otherSkipped > 0 ? ` · ${otherSkipped} pominiętych z innych powodów` : '') +
+          `. Postępy w /pulpit.`
+        ),
+      });
+      void loadHistory();
+    } catch (err) {
+      setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd bulk discovery' });
+    } finally {
+      setBulkSubmitting(false);
+    }
   }
 
   async function handleSendAgent(e: React.FormEvent) {
@@ -1296,12 +1350,41 @@ export default function PozyskiwaniePage() {
                     </label>
                   </div>
                 )}
-                <button type="submit" className="btn btn-primary btn-cta"
-                  disabled={submitButtonDisabled}>
-                  {mode === 'manual'
-                    ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
-                    : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
-                </button>
+                <div className="cta-row">
+                  <button type="submit" className="btn btn-primary btn-cta"
+                    disabled={submitButtonDisabled}>
+                    {mode === 'manual'
+                      ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
+                      : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
+                  </button>
+                  {mode === 'manual' && (
+                    <div className="bulk-cta-group">
+                      <select
+                        className="bulk-count-select"
+                        value={bulkCount}
+                        onChange={(e) => setBulkCount(Number(e.target.value) as 30 | 50 | 100)}
+                        title="Ile miast PL przerobić"
+                      >
+                        <option value={30}>Top 30 miast PL</option>
+                        <option value={50}>Top 50 miast PL</option>
+                        <option value={100}>Top 100 miast PL</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-cta-bulk"
+                        onClick={handleBulkDiscover}
+                        disabled={bulkSubmitting || selectedSources.length === 0}
+                        title="Bulk: utwórz job per miasto. Worker pool przerabia paralelnie. Cache miast już sprawdzonych skip'uje automatycznie."
+                      >
+                        {bulkSubmitting ? (
+                          <><i className="ti ti-loader" /> Kolejkuję…</>
+                        ) : (
+                          <><i className="ti ti-map" /> Bulk discovery</>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </form>
@@ -1677,6 +1760,25 @@ const CSS = `
 }
 .peek-toggle-expand:hover { background: #DCFCE7; }
 .peek-toggle-expand i { color: #10B981; }
+
+/* Bulk CTA - przycisk obok glownego "Sprawdź" w manual mode */
+.cta-row {
+  display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap;
+}
+.bulk-cta-group {
+  display: flex; gap: 0; align-items: stretch;
+}
+.bulk-count-select {
+  padding: 0 12px; border: 1px solid #E5E7EB;
+  border-right: none; border-radius: 8px 0 0 8px;
+  background: #fff; font-size: 13px; font-family: inherit;
+  cursor: pointer;
+}
+.btn-cta-bulk {
+  border-radius: 0 8px 8px 0;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn-cta-bulk .ti-loader { animation: spin 1.2s linear infinite; }
 
 .mode-tabs {
   display: grid;
