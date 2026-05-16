@@ -798,16 +798,17 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             if estimated_cost >= max_cost:
                 break
             try:
-                # provider='gemini' explicit: relevance juz uzyl Gemini (taniej +
-                # mamy klucz). Anthropic default w research padl wczesniej masowo
-                # gdy GEMINI_API_KEY byl set ale ANTHROPIC_API_KEY brak. Lepiej
-                # 1 provider dla calego pipeline'u.
+                # provider+model explicit: relevance juz uzyl Gemini 2.5 flash-lite
+                # (tani i znamy ze klucz dziala na Railway). Anthropic default
+                # padal masowo gdy ANTHROPIC_API_KEY niedostepny. Spojnosc:
+                # autonomous uzywa tego SAMEGO modelu co relevance.
                 lead_id, _result, was_researched = research_and_save(
                     place.website,
                     segment_hint=current_segment_label,
                     city_hint=city_name,
                     workspace_id=job.workspace_id,
                     provider="gemini",
+                    model="gemini-2.5-flash-lite",
                 )
                 if was_researched:
                     estimated_cost += 0.02  # LLM research call
