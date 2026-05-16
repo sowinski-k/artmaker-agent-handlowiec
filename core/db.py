@@ -449,6 +449,7 @@ def init_db() -> None:
     _migrate_workspace_columns()
     _ensure_default_workspace()
     _backfill_lead_status()
+    _cleanup_junk_emails()  # One-shot: wyczysc stare leady ze smieciowymi mailami
 
 
 def _backfill_lead_status() -> None:
@@ -491,6 +492,51 @@ def _backfill_lead_status() -> None:
                 )
     except Exception as exc:
         log.warning(f"Backfill lead.status failed (non-critical): {exc}")
+
+
+def _cleanup_junk_emails() -> None:
+    """One-shot migracja: wyczysc Lead.email gdzie wartosc to junk
+    (fragmenty JS/HTML sparsowane jak email - jquery-migr@e.min.js,
+    edge-ch@.facebook.com, st@ic.cdninstagram.com, etc).
+
+    Powod: regex EMAIL_RE byl za luzny przed fixami w PR #38/#39.
+    Stare leady (sprzed deploya) maja te smieci jako email co psuje
+    UI i moze powodowac bouncey przy proba wysylki.
+
+    Idempotent: po pierwszym przebiegu junk-emaile zastapione None.
+    Drugi run no-op.
+    """
+    import logging
+    log = logging.getLogger("ecombinat.cleanup")
+    try:
+        from agent.contact_finder import _is_junk_email
+    except Exception:
+        return  # contact_finder moze nie byc dostepny w niektorych contextach
+
+    try:
+        with _engine.begin() as conn:
+            # Bierzemy wszystkie leady z niepusty email
+            rows = conn.execute(text(
+                "SELECT id, email FROM leads WHERE email IS NOT NULL AND email != ''"
+            )).all()
+            junk_ids: list[int] = []
+            for lead_id, email in rows:
+                if _is_junk_email(email):
+                    junk_ids.append(lead_id)
+            if junk_ids:
+                # Update w batchach po 500 (Postgres ma limit parametrow w IN)
+                for i in range(0, len(junk_ids), 500):
+                    batch = junk_ids[i:i + 500]
+                    placeholders = ",".join(str(x) for x in batch)
+                    conn.execute(text(
+                        f"UPDATE leads SET email = NULL WHERE id IN ({placeholders})"
+                    ))
+                log.info(
+                    f"Junk email cleanup: cleared email on {len(junk_ids)} leads "
+                    f"(jquery-migr@..., document.loc@..., etc - fragmenty JS sparsowane przez stary regex)"
+                )
+    except Exception as exc:
+        log.warning(f"Junk email cleanup failed (non-critical): {exc}")
 
 
 def _migrate_workspace_columns() -> None:

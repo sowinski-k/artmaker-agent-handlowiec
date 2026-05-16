@@ -3100,32 +3100,59 @@ def discovery_history(
     """Lista ostatnich discovery runow workspace - dla "Historia" panelu.
 
     Pokazuje co user juz sprawdzal, kiedy, ile firm wrocilo i czy
-    skonczylo sie błędem. Klik wiersza pozwala wrocic do wynikow
-    (jeszcze nie zaimplementowane - tylko log audit na teraz).
+    skonczylo sie błędem.
+
+    Bezpieczne na missing table - jak production Postgres jeszcze nie
+    ma `discovery_runs` (deploy podczas migracji), zwracamy pusta liste
+    + warning log zamiast 500.
     """
     limit = max(1, min(limit, 200))
-    with SessionLocal() as session:
-        runs = session.execute(
-            select(DiscoveryRun).where(
-                DiscoveryRun.workspace_id == cur.workspace_id,
-            ).order_by(DiscoveryRun.run_at.desc()).limit(limit)
-        ).scalars().all()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)
-        return [{
-            "id": r.id,
-            "segment": r.segment,
-            "location": r.location,
-            "sources": r.sources or [],
-            "query": r.query,
-            "result_count": r.result_count,
-            "leads_added": r.leads_added,
-            "cost_usd": r.cost_usd,
-            "error": r.error,
-            "run_at": iso_utc(r.run_at),
-            # True jezeli ten run jest jeszcze w okresie cache - znaczy ze
-            # kolejne zapytanie z tym samym query_hash nie zapłaci za API.
-            "cache_active": r.run_at >= cutoff and r.cached_places is not None,
-        } for r in runs]
+    try:
+        with SessionLocal() as session:
+            runs = session.execute(
+                select(DiscoveryRun).where(
+                    DiscoveryRun.workspace_id == cur.workspace_id,
+                ).order_by(DiscoveryRun.run_at.desc()).limit(limit)
+            ).scalars().all()
+            cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)
+            return [{
+                "id": r.id,
+                "segment": r.segment,
+                "location": r.location,
+                "sources": r.sources or [],
+                "query": r.query,
+                "result_count": r.result_count,
+                "leads_added": r.leads_added,
+                "cost_usd": r.cost_usd,
+                "error": r.error,
+                "run_at": iso_utc(r.run_at),
+                # True jezeli ten run jest jeszcze w okresie cache - znaczy ze
+                # kolejne zapytanie z tym samym query_hash nie zapłaci za API.
+                "cache_active": r.run_at >= cutoff and r.cached_places is not None,
+            } for r in runs]
+    except Exception as exc:
+        # Najczestszy powod: tabela discovery_runs jeszcze nie istnieje
+        # na production (deploy w trakcie, init_db nie odpalil sie albo
+        # padl). Sproboj utworzyc i zwroc pusta liste.
+        log.warning(f"discovery_history failed: {exc}")
+        msg = str(exc).lower()
+        if "discovery_runs" in msg or "does not exist" in msg or "no such table" in msg:
+            # Spróbuj utworzyc tabele inline jako fallback - idempotent
+            try:
+                from core.db import Base, _engine
+                Base.metadata.create_all(_engine, tables=[DiscoveryRun.__table__])
+                log.info("discovery_history: created missing table discovery_runs")
+                return []
+            except Exception as create_exc:
+                log.exception(f"Failed to create discovery_runs table: {create_exc}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Tabela discovery_runs nie istnieje. "
+                        "Restart backend service w Railway (init_db utworzy)."
+                    ),
+                )
+        raise HTTPException(status_code=500, detail=f"Database error: {exc}")
 
 
 @app.post("/api/discovery/search")
