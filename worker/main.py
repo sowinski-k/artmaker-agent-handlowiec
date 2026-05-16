@@ -520,6 +520,11 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     cities_processed = 0
     cities_skipped_no_results = 0
     drafts_made = 0
+    # Tracking bledow researchu - user musi widziec ile leadow przeleciało
+    # przez filter ALE research nie poszedl (timeout, CloudFlare, brak API key).
+    # Bez tego widzial "0 nowych leadow" i mial wrazenie ze nic sie nie stalo.
+    research_errors_count = 0
+    last_research_error: str | None = None
     # Bounded deque - zapobiega memory leak (1000+ items inside autonomous run)
     # plus tani slice. Plus oszczedza miejsce w JSON job.result.
     recent: deque = deque(maxlen=15)
@@ -548,6 +553,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "estimated_cost_usd": round(estimated_cost, 3),
             "max_cost_usd": max_cost,
             "cities_skipped_no_results": cities_skipped_no_results,
+            "research_errors_count": research_errors_count,
+            "last_research_error": last_research_error,
             "recent": list(recent),  # deque maxlen=15, juz bounded
             "last_progress_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -723,6 +730,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                     })
                     _save_progress(current_city=city_name)
             except Exception as exc:
+                research_errors_count += 1
+                last_research_error = f"{type(exc).__name__}: {str(exc)[:150]}"
                 log.warning(f"research for {place.website} failed: {exc}")
                 recent.append({
                     "name": place.name, "url": place.website,
@@ -744,6 +753,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         "drafts_made": drafts_made,
         "cities_processed": cities_processed,
         "cities_skipped_no_results": cities_skipped_no_results,
+        "research_errors_count": research_errors_count,
+        "last_research_error": last_research_error,
         "estimated_cost_usd": round(estimated_cost, 3),
         "max_cost_usd": max_cost,
         "stopped_reason": stopped_reason,
