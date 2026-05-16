@@ -3148,6 +3148,149 @@ def discovery_search(payload: DiscoverIn, cur: CurrentUser = Depends(get_current
             "daily_used": today_done, "daily_cap": DISCOVERY_DAILY_CAP_FREE}
 
 
+class BulkDiscoveryIn(BaseModel):
+    """Faza 3: bulk multi-city discovery - jeden klik tworzy N jobow.
+
+    Worker pool (WORKER_THREADS=3 default) przerabia paralelnie. Skip
+    miast ktore maja aktywny cache (z Fazy 1) - zero kredytu na duplikaty.
+
+    UWAGA: expand_queries NIE jest wspierane w bulk (worker handler nie
+    ma jeszcze tej logiki - Faza 3.5). Kazde miasto = standard single
+    query. Mimo to 100 miast x 60 wynikow = ~6000 firm przed dedupem -
+    znacznie wiecej niz pojedyncze rozszerzone zapytanie.
+    """
+    segment: str
+    sources: list[str]
+    cities: list[str]
+    force_refresh: bool = False
+    relevance_threshold: int = 6
+    auto_draft_threshold: int | None = None
+    custom_description: str | None = None
+
+
+@app.post("/api/discovery/bulk-discover")
+def bulk_discover(
+    payload: BulkDiscoveryIn,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk multi-city discovery: tworzy DISCOVERY_PIPELINE job per city.
+
+    Pre-filter:
+      1. Cache check per (segment, city) - jak aktywny cache w 30 dni,
+         pomijamy (skipped: 'cache_active')
+      2. Active job check - jak juz mamy DISCOVERY_PIPELINE z tym
+         segmentem+city, pomijamy (skipped: 'already_queued')
+
+    Worker pool przerabia 3 naraz paralelnie (WORKER_THREADS env).
+
+    Daily cap: liczy laczna liczbe miast queued vs DISCOVERY_DAILY_CAP_FREE.
+    Cap NIE limit naraz pozwolonej queue - to ochrona kredytu Apify/Places.
+    """
+    if not payload.cities:
+        raise HTTPException(status_code=400, detail="Lista miast pusta.")
+    if not payload.sources:
+        raise HTTPException(status_code=400, detail="Wybierz przynajmniej jedno źródło.")
+    # Cap bulk - nie pozwol uzytkownikowi spalic 500 miast naraz
+    if len(payload.cities) > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Max 100 miast naraz, dostalo {len(payload.cities)}.",
+        )
+
+    today_done = _discovery_today_count(cur.workspace_id)
+    remaining_cap = max(0, DISCOVERY_DAILY_CAP_FREE - today_done)
+    if remaining_cap == 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Dzienny limit ({DISCOVERY_DAILY_CAP_FREE}) wyczerpany.",
+        )
+
+    queued_jobs: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    with SessionLocal() as session:
+        # Lista aktywnych DISCOVERY_PIPELINE jobow w workspace - dedup zeby
+        # nie tworzyc duplikatu joba dla city ktore juz w queue
+        active_jobs = session.execute(
+            select(Job).where(
+                Job.workspace_id == cur.workspace_id,
+                Job.type == JobType.DISCOVERY_PIPELINE.value,
+                Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
+            )
+        ).scalars().all()
+        active_city_segments = set()
+        for j in active_jobs:
+            p = j.payload or {}
+            key = (p.get("segment") or "").lower() + "|" + (p.get("location") or "").lower()
+            active_city_segments.add(key)
+
+        for city in payload.cities:
+            city_clean = city.strip()
+            if not city_clean:
+                continue
+
+            # Cap protection - przerwij jak zbliza sie do daily limit
+            if len(queued_jobs) >= remaining_cap:
+                skipped.append({"city": city_clean, "reason": "daily_cap_reached"})
+                continue
+
+            # Active job dedup
+            key = payload.segment.lower() + "|" + city_clean.lower()
+            if key in active_city_segments:
+                skipped.append({"city": city_clean, "reason": "already_queued"})
+                continue
+
+            # Cache check (pomijamy jak ostatni run < 30 dni temu zwrocil places)
+            query_hash = _discovery_query_hash(
+                payload.segment, city_clean, payload.sources,
+                payload.custom_description,
+            )
+            if not payload.force_refresh:
+                cached = _find_cached_discovery(session, cur.workspace_id, query_hash)
+                if cached is not None and cached.result_count > 0:
+                    skipped.append({
+                        "city": city_clean,
+                        "reason": "cache_active",
+                        "cached_at": iso_utc(cached.run_at),
+                        "cached_count": cached.result_count,
+                    })
+                    continue
+
+            # Build segment hint query (jak frontend buildQuery)
+            query_str = f"{payload.segment.replace('_', ' ')} {city_clean}".strip()
+            job = create_job(
+                session,
+                job_type=JobType.DISCOVERY_PIPELINE,
+                workspace_id=cur.workspace_id, user_id=cur.user_id,
+                payload={
+                    "query": query_str,
+                    "sources": payload.sources,
+                    "segment": payload.segment,
+                    "location": city_clean,
+                    "max_per_source": 60,
+                    "custom_description": payload.custom_description,
+                    "use_relevance_filter": True,
+                    "relevance_threshold": payload.relevance_threshold,
+                    "auto_research": True,
+                    "auto_draft_threshold": payload.auto_draft_threshold,
+                    "force_refresh": payload.force_refresh,
+                    "apply_city_filter": True,
+                },
+            )
+            queued_jobs.append({"city": city_clean, "job_id": job.id})
+            active_city_segments.add(key)
+
+    return {
+        "ok": True,
+        "queued": len(queued_jobs),
+        "skipped": len(skipped),
+        "queued_jobs": queued_jobs,
+        "skipped_details": skipped,
+        "daily_used": today_done,
+        "daily_cap": DISCOVERY_DAILY_CAP_FREE,
+    }
+
+
 class ResearchIn(BaseModel):
     url: str
     segment_hint: str | None = None
