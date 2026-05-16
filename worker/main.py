@@ -446,12 +446,23 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     custom_desc = p.get("custom_description")
     sources_list = p.get("sources", [])
 
-    # Wybierz miasta
+    # Multi-segment: lista segmentow. Backward compat - jak brak segments
+    # bierzemy `segment` jako single-item list.
+    segments_list = p.get("segments") or ([p.get("segment", "inne")] if p.get("segment") else ["inne"])
+
+    # Wybierz miasta (raz, ten sam zbior dla wszystkich segmentow)
     if voiv_filter:
         cities_list = cities_in_voivodeship(voiv_filter)
     else:
         cities_list = get_top_cities(max_cities)
     cities_list = cities_list[:max_cities]
+
+    # Build full work-queue: dla kazdego segmentu kazde miasto.
+    # Iterujemy [(seg, city), ...] - zawsze sekwencyjnie wewnatrz tego joba
+    # (wiec worker pool nie pomieszal segmentow per miasto).
+    work_queue: list[tuple[str, dict]] = [
+        (seg, city) for seg in segments_list for city in cities_list
+    ]
 
     # Setup sources
     src_classes = {
@@ -469,12 +480,18 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     if not sources:
         raise RuntimeError("Brak skonfigurowanych zrodel discovery.")
 
+    from collections import deque
+
     estimated_cost = 0.0
     new_leads_count = 0
     cities_processed = 0
     cities_skipped_no_results = 0
     drafts_made = 0
-    recent: list[dict] = []  # Live ticker - frontend wyswietla na biezaco
+    # Bounded deque - zapobiega memory leak (1000+ items inside autonomous run)
+    # plus tani slice. Plus oszczedza miejsce w JSON job.result.
+    recent: deque = deque(maxlen=15)
+
+    current_segment_label: str = segments_list[0]
 
     def _save_progress(current_city: str | None = None, status: str = "running"):
         """Update job.result + job.progress dla live UI updates.
@@ -482,27 +499,29 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         job.progress = new_leads_count
         job.total = target
         job.result = {
-            "status": status,            # "running" | "stopped"
+            "status": status,
             "current_city": current_city,
+            "current_segment": current_segment_label,
+            "segments": segments_list,
             "cities_processed": cities_processed,
-            "cities_total": len(cities_list),
+            "cities_total": len(work_queue),  # multi-segment: total = segments x cities
             "new_leads_count": new_leads_count,
             "target_new_leads": target,
             "drafts_made": drafts_made,
             "estimated_cost_usd": round(estimated_cost, 3),
             "max_cost_usd": max_cost,
             "cities_skipped_no_results": cities_skipped_no_results,
-            "recent": recent[-15:],  # ostatnie 15 zdarzen
+            "recent": list(recent),  # deque maxlen=15, juz bounded
         }
         session.commit()
 
     _save_progress(status="starting")
     log.info(
         f"Job #{job.id} autonomous: target={target} budget=${max_cost} "
-        f"cities={len(cities_list)} segment={p.get('segment')!r}"
+        f"segments={segments_list!r} cities={len(cities_list)} work_queue={len(work_queue)}"
     )
 
-    for city in cities_list:
+    for current_segment_label, city in work_queue:
         if _shutdown or _is_cancelled(session, job.id):
             log.info(f"Job #{job.id} stopped externally at city #{cities_processed}")
             break
@@ -515,9 +534,10 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
 
         city_name = city["name"]
         cities_processed += 1
-        query = f"{p['segment'].replace('_', ' ')} {city_name}"
+        # Query budowane per (segment, miasto)
+        query = f"{current_segment_label.replace('_', ' ')} {city_name}"
 
-        # Live update - user widzi "Sprawdzam: Warszawa"
+        # Live update - user widzi "Sprawdzam: Warszawa (sklep_papierniczy)"
         _save_progress(current_city=city_name)
 
         # Run search dla tego miasta
@@ -531,17 +551,18 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             )
             estimated_cost += len(sources) * 0.03
         except Exception as exc:
-            log.warning(f"Job #{job.id} city {city_name!r} search failed: {exc}")
+            log.warning(f"Job #{job.id} {current_segment_label}+{city_name!r} search failed: {exc}")
             recent.append({
-                "name": city_name, "status": "city_search_failed",
+                "name": city_name, "segment": current_segment_label,
+                "status": "city_search_failed",
                 "error": str(exc)[:120],
             })
             _save_progress(current_city=city_name)
             continue
 
-        # Relevance filter - tylko nowe places (jak fix #2 z poprzedniego PR)
+        # Relevance filter - tylko nowe places (rename pl zeby nie shadow'owac p=payload)
         new_places_for_llm = [
-            p for p in places if p.website and p.existing_lead_id is None
+            pl for pl in places if pl.website and pl.existing_lead_id is None
         ]
         existing_count = len(places) - len(new_places_for_llm)
 
@@ -549,7 +570,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         if new_places_for_llm:
             try:
                 items, _ = score_relevance_batch(
-                    new_places_for_llm, segment=p.get("segment", "inne"),
+                    new_places_for_llm, segment=current_segment_label,
                     city=city_name,
                     custom_description=custom_desc,
                 )
@@ -560,7 +581,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             except Exception as exc:
                 log.warning(f"Job #{job.id} relevance batch failed for {city_name}: {exc}")
                 recent.append({
-                    "name": city_name, "status": "city_relevance_failed",
+                    "name": city_name, "segment": current_segment_label,
+                    "status": "city_relevance_failed",
                     "error": str(exc)[:120],
                 })
                 _save_progress(current_city=city_name)
@@ -569,6 +591,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         # Log per-city stats - user widzi co miasto dalo
         recent.append({
             "name": city_name,
+            "segment": current_segment_label,
             "status": "city_scanned",
             "places_found": len(places),
             "duplicates_in_db": existing_count,
@@ -591,7 +614,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             try:
                 lead_id, _result, was_researched = research_and_save(
                     place.website,
-                    segment_hint=p.get("segment"),
+                    segment_hint=current_segment_label,
                     city_hint=city_name,
                     workspace_id=job.workspace_id,
                 )
@@ -650,7 +673,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         "estimated_cost_usd": round(estimated_cost, 3),
         "max_cost_usd": max_cost,
         "stopped_reason": stopped_reason,
-        "recent": recent[-15:],
+        "recent": list(recent),
     }
 
 
