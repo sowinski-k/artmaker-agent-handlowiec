@@ -237,13 +237,21 @@ class ApifyAllegroSource:
             min_reviews = preset["min_reviews"]
             min_rating = preset["min_rating"]
 
-        # parseforge actor accepts searchTerms (keywords) OR startUrls (URLs).
-        # Send both - actor handles each, results get merged in dataset.
-        payload: dict = {"maxItems": min(max_results * 3, 300)}
+        # Rozne actory uzywaja roznych nazw input fields - wysylamy alternatywy
+        # zeby zadzialalo z automation-lab, parseforge, klevio, etc. Apify
+        # ignore unknown fields, wiec to bezpieczne.
+        payload: dict = {
+            "maxItems": min(max_results * 3, 300),
+            "maxRequestsPerCrawl": min(max_results * 3, 300),
+        }
         if keywords:
             payload["searchTerms"] = keywords
+            payload["keywords"] = keywords
+            payload["queries"] = keywords
+            payload["search"] = keywords[0]  # niektore actory chca pojedynczy string
         if category_urls:
             payload["startUrls"] = [{"url": u} for u in category_urls]
+            payload["categoryUrls"] = category_urls
         if not keywords and not category_urls:
             return []  # preset bez kategorii / keywords - nic do scrapowania
 
@@ -253,6 +261,20 @@ class ApifyAllegroSource:
             # Nie psuj reszty discovery - zwroc pusto, run_search to zbierze
             # jako per-source error w diagnostics.
             raise
+
+        # Debug: zaloguj kluczy pierwszego item zeby user mogl zdiagnozowac
+        # jak Allegro actor nie matchuje naszego normalize() (np. inny actor
+        # niz domyslny - inne nazwy pol). Tylko pierwszy item, max ~200 znakow.
+        if data:
+            try:
+                import logging
+                first = data[0]
+                top_keys = sorted(first.keys()) if isinstance(first, dict) else []
+                logging.getLogger("agent.discovery").info(
+                    f"ApifyAllegro raw first item keys ({len(data)} total): {top_keys}"
+                )
+            except Exception:
+                pass
 
         # Stage 1 normalize + filtr skali
         places: list[DiscoveredPlace] = []
@@ -287,33 +309,77 @@ class ApifyAllegroSource:
 
     @staticmethod
     def _normalize(item: dict) -> DiscoveredPlace:
-        seller_obj = item.get("seller") or {}
+        """Mapuje surowy item z Allegro scraper na DiscoveredPlace.
+
+        Rozne actory uzywaja roznych nazw pol - sprawdzamy szeroka pelete
+        snake_case / camelCase / nested seller.X. Jak zaden nie matchuje
+        zostaje fallback "(sprzedawca Allegro)" i user widzi to w UI -
+        sygnal ze trzeba sprawdzic raw item keys w logach.
+        """
+        seller_obj = item.get("seller") or item.get("sellerInfo") or {}
+        # Seller name (login / username / handle - co Allegro chce dac)
         seller = (
-            item.get("sellerName")
+            item.get("sellerLogin")
+            or item.get("sellerName")
+            or item.get("seller_login")
+            or item.get("seller_name")
+            or item.get("sellerUsername")
             or seller_obj.get("login")
+            or seller_obj.get("username")
             or seller_obj.get("name")
-            or item.get("sellerLogin")
+            or seller_obj.get("displayName")
             or "(sprzedawca Allegro)"
         )
-        # sellerUrl ma byc kluczem dedupu - URL strony sklepu Allegro.
+        # Seller URL - klucz dedupu
         seller_url = (
             item.get("sellerUrl")
+            or item.get("seller_url")
+            or item.get("sellerStoreUrl")
+            or item.get("sellerProfileUrl")
             or seller_obj.get("url")
             or seller_obj.get("storeUrl")
+            or seller_obj.get("profileUrl")
+            or seller_obj.get("link")
         )
+        # Jak nadal nie ma sellerUrl ale mamy sellerLogin, zbuduj URL recznie -
+        # Allegro convention to allegro.pl/uzytkownik/<login>
+        if not seller_url and seller and seller != "(sprzedawca Allegro)":
+            login_safe = str(seller).strip().lstrip("@")
+            if login_safe and " " not in login_safe and "/" not in login_safe:
+                seller_url = f"https://allegro.pl/uzytkownik/{login_safe}"
+
+        rating = (
+            item.get("sellerRating")
+            or item.get("seller_rating")
+            or seller_obj.get("rating")
+            or seller_obj.get("score")
+            or item.get("rating")
+        )
+        review_count = (
+            item.get("sellerFeedbackCount")
+            or item.get("seller_feedback_count")
+            or item.get("sellerReviewsCount")
+            or seller_obj.get("feedbackCount")
+            or seller_obj.get("reviewsCount")
+            or item.get("reviewCount")
+            or item.get("reviewsCount")
+        )
+
         return DiscoveredPlace(
             source="apify_allegro",
             name=str(seller),
             website=seller_url,
             address=item.get("location") or seller_obj.get("location"),
-            rating=item.get("sellerRating") or seller_obj.get("rating") or item.get("rating"),
-            review_count=(
-                item.get("sellerFeedbackCount")
-                or seller_obj.get("feedbackCount")
-                or item.get("reviewCount")
+            rating=rating,
+            review_count=review_count,
+            raw_id=(
+                seller_obj.get("id")
+                or item.get("sellerId")
+                or item.get("seller_id")
+                or item.get("offerId")
+                or item.get("id")
             ),
-            raw_id=seller_obj.get("id") or item.get("offerId") or item.get("id"),
-            notes=item.get("category") or "Allegro seller",
+            notes=item.get("category") or item.get("categoryName") or "Allegro seller",
         )
 
     @staticmethod
