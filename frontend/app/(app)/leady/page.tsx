@@ -1203,8 +1203,14 @@ export default function LeadyPage() {
               <tbody>
                 {leads.map((l) => {
                   const isHot = l.score != null && l.score >= 8;
-                  const isEligible = l.status === 'researched' && l.email
+                  // isEligibleForDraft: tylko ci moga isc do bulkGenerateDrafts
+                  // (uzywane do disabled na quick-link "Zaznacz wszystkie researched")
+                  const isEligibleForDraft = l.status === 'researched' && l.email
                     && (l.drafts_count === 0 || l.latest_draft_status === 'rejected');
+                  // canSelect: szerokie - lead moze byc zaznaczony, backend filtruje
+                  // per-action (re-research wymaga website, drafty wymagaja emaila).
+                  // Wykluczamy tylko stany terminalne zeby user przypadkiem nie spamil.
+                  const canSelect = l.status !== 'sent' && l.status !== 'replied';
                   const isSelected = selectedIds.has(l.id);
                   return (
                     <tr
@@ -1219,14 +1225,21 @@ export default function LeadyPage() {
                       style={{ cursor: 'pointer' }}
                     >
                       <td className="row-check">
-                        {isEligible ? (
+                        {canSelect ? (
                           <input
                             type="checkbox"
                             checked={isSelected}
                             onChange={() => toggleSelect(l.id)}
+                            title={
+                              isEligibleForDraft
+                                ? 'Zaznacz - moze isc do drafty + re-research'
+                                : (!l.email && l.website)
+                                ? 'Zaznacz - kandydat do re-research (brak emaila ale jest strona)'
+                                : 'Zaznacz - moze isc do re-research'
+                            }
                           />
                         ) : (
-                          <span title="Tylko researched z emailem (bez aktywnego draftu)" style={{ opacity: 0.3 }}>
+                          <span title={`Status '${l.status}' - juz wyslane, nie zaznaczamy`} style={{ opacity: 0.3 }}>
                             <i className="ti ti-square" />
                           </span>
                         )}
