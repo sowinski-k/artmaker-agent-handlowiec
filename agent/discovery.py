@@ -389,26 +389,42 @@ class ApifyAllegroSource:
         """In-place enrichment: dla kazdego item.url scrape Allegro offer
         page i wpisz sellerLogin jako item['sellerLogin'].
 
-        Paralelnie przez ThreadPoolExecutor (max 5 watki) - bez tego 10
-        ofert = 10s+ sekwencyjnie, z poolem ~2s.
+        Allegro chroni DataDome anti-bot - z Railway IP (datacenter)
+        wszystkie requesty 403. Rozwiazanie: Apify Proxy z residential
+        Polish IPs, ktorych DataDome nie blokuje (Allegro to klient Apify).
 
-        Allegro chroni DataDome - czesc requestow moze padac (403).
-        Bezpieczne: lead bez sellera dropuje sie potem w _dedup_by_seller
-        (pusta nazwa).
+        Wymaga APIFY_PROXY_PASSWORD env var (osobne od APIFY_API_TOKEN -
+        pobierane z Apify Console > Proxy page). Bez proxy probujemy
+        direct - prawie zawsze padnie 403 dla Allegro.
+
+        Paralelnie przez ThreadPoolExecutor (5 watki) - 10 ofert ~2s
+        zamiast 10s sekwencyjnie. Timeout 15s/oferta (proxy + DataDome
+        rendering moze byc wolne).
         """
         from concurrent.futures import ThreadPoolExecutor
 
         import logging
         log = logging.getLogger("agent.discovery")
 
+        # Chrome-like headers - wazne dla DataDome ktore sprawdza
+        # TLS fingerprint + browser hints. Bez tego od razu blok.
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,*/*;q=0.8"
+            ),
             "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
         }
 
         urls_to_fetch: list[tuple[int, str]] = [
@@ -419,7 +435,35 @@ class ApifyAllegroSource:
         if not urls_to_fetch:
             return
 
-        with httpx.Client(headers=headers, follow_redirects=True) as client:
+        # Apify Polish residential proxy - omija DataDome.
+        # Format: http://groups-RESIDENTIAL,country-PL:<password>@proxy.apify.com:8000
+        proxy = None
+        if settings.apify_proxy_password:
+            proxy = (
+                f"http://groups-RESIDENTIAL,country-PL:"
+                f"{settings.apify_proxy_password}@proxy.apify.com:8000"
+            )
+            log.info(
+                "ApifyAllegro stage2: using Apify Polish residential proxy "
+                "(unblocks DataDome)"
+            )
+        else:
+            log.warning(
+                "ApifyAllegro stage2: NO PROXY - direct from Railway IP. "
+                "DataDome bedzie blokowal (~100%% 403). "
+                "Ustaw APIFY_PROXY_PASSWORD w env (worker + backend), "
+                "wartosc znajdziesz w Apify Console -> Proxy -> HTTP password."
+            )
+
+        client_kwargs = {
+            "headers": headers,
+            "follow_redirects": True,
+            "timeout": 15.0,
+        }
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        with httpx.Client(**client_kwargs) as client:
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_idx = {
                     executor.submit(cls._scrape_seller_login, url, client): idx
@@ -429,7 +473,7 @@ class ApifyAllegroSource:
                 for future in future_to_idx:
                     idx = future_to_idx[future]
                     try:
-                        login = future.result(timeout=15.0)
+                        login = future.result(timeout=20.0)
                     except Exception:
                         login = None
                     if login:
@@ -439,7 +483,8 @@ class ApifyAllegroSource:
 
         log.info(
             f"ApifyAllegro stage2: scraped {successful}/{len(urls_to_fetch)} "
-            f"seller logins from offer pages"
+            f"seller logins from offer pages "
+            f"(proxy={'apify-residential-pl' if proxy else 'direct'})"
         )
 
     @staticmethod
