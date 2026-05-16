@@ -22,13 +22,22 @@ class Settings(BaseSettings):
 
     apify_api_token: str = ""
     apify_gmaps_actor: str = "compass~google-maps-scraper"
-    # Domyslny actor Allegro: automation-lab eksplicytnie zwraca sellerUrl +
-    # sellerRating (parseforge zwraca tylko produkt-level dane, bez sellera -
-    # nieprzydatne dla naszego use case). Override przez ENV jak chcesz inny.
-    apify_allegro_actor: str = "automation-lab~allegro-scraper"
-    # Email enrichment dla sprzedawcow Allegro (stage 2 - osobny actor zeby
-    # nie scrapowac stron sprzedawcow zanim zrobimy dedup).
-    apify_allegro_email_actor: str = "contactminerlabs~allegro-email-scraper---advanced-cheapest-reliable"
+    # Default Allegro actor: contactminerlabs/allegro-email-scraper
+    # Powod: jeden actor robi co potrzebujemy w jednym call -
+    # search po keyword + scrape stron sprzedawcow + wyciaganie emaili
+    # ze sprawdzonych profili. Eliminuje 2-stage pipeline (oddzielny
+    # email enricher), szybsze, tansze, prostsze.
+    #
+    # Alternatywy do override przez ENV:
+    #   automation-lab~allegro-scraper - product+seller, no email
+    #   parseforge~allegro-scraper      - product only, no seller
+    #   klevio~allegro-seller-scraper   - wymaga seller URL na wejsciu
+    apify_allegro_actor: str = "contactminerlabs~allegro-email-scraper---advanced-cheapest-reliable"
+    # Stage 2 email enricher - PUSTE w default bo email juz mamy ze
+    # stage 1 (contactminerlabs zwraca email direct). Zostawione dla
+    # backward compat - mozna ustawic gdy default Allegro actor zmieniony
+    # na taki ktory nie zwraca maili (parseforge, automation-lab).
+    apify_allegro_email_actor: str = ""
     apify_linkedin_actor: str = ""
     google_places_api_key: str = ""
 

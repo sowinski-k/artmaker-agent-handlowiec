@@ -187,30 +187,37 @@ class ApifySource:
 
 
 class ApifyAllegroSource:
-    """Apify Allegro Scraper - 2-stage pipeline.
+    """Apify Allegro discovery source.
 
-    Stage 1 (search): query Allegro przez parseforge/allegro-scraper.
-      Obsluguje 3 tryby query, koduje sie w prefix query string:
-        - "keyword:<text>"          - search po slowie kluczowym (default)
-        - "category:<url>"          - search po URL kategorii Allegro
-        - "preset:<segment>"        - lookup w core/industry_presets.py
-                                      (zwraca keywords + filtry skali)
-      Brak prefixu -> traktuje jako keyword (backward-compat).
+    Domyslnie uzywa contactminerlabs/allegro-email-scraper ktory w jednym
+    requescie:
+      1. Wyszukuje sprzedawcow Allegro po keyword
+      2. Wchodzi na ich profile
+      3. Wyciaga email + nazwe + URL profilu
 
-    Po stage 1 robimy dedup po seller (jeden sklep = wiele ofert).
+    Eliminuje 2-stage pipeline (osobny email enricher) - email mamy od razu.
 
-    Stage 2 (email enrichment): jesli skonfigurowany
-    APIFY_ALLEGRO_EMAIL_ACTOR, bierze unique seller URLs i scrapuje maile
-    z profili sprzedawcow. Wynik wraca jako `place.phone/email` na
-    DiscoveredPlace (place.phone bo nie mamy email field na model;
-    placeholder dla email-domain dedup).
+    3 tryby query, prefix w query string:
+      - "keyword:<text>"      - search po slowie kluczowym (default)
+      - "category:<url>"      - search po URL kategorii Allegro
+      - "preset:<segment>"    - lookup w core/industry_presets.py
 
-    Filtry skali (min_reviews, min_rating) sa aplikowane na koncu stage 1
-    przed dedupem - sprzedawcy bez sygnalow skali sa odrzucani.
+    Brak prefixu -> traktuje jako keyword (backward-compat).
 
-    Config:
-        APIFY_ALLEGRO_ACTOR        (default: parseforge~allegro-scraper)
-        APIFY_ALLEGRO_EMAIL_ACTOR  (default: contactminerlabs~allegro-email-scraper)
+    Payload contactminerlabs/allegro-email-scraper:
+      {KEYWORD: str, MAX_ITEMS: int, DOMAIN_EMAIL: list[str], LOCATION: str}
+
+    Inne actory (parseforge, automation-lab) tez sa probowane przez
+    alternatywne nazwy pol - jak user ustawi inny przez ENV, payload
+    nadal zadziala (Apify ignoruje unknown fields).
+
+    Stage 2 (APIFY_ALLEGRO_EMAIL_ACTOR) jest OPT-IN dla wstecznej
+    kompatybilnosci - jak ktos zmieni default na actor bez emaili,
+    moze tu doczepic email enricher.
+
+    Filtry skali (min_reviews, min_rating) aplikowane jak preset je
+    definiuje - jak actor nie zwraca review_count, filtr przepuszcza
+    (lepiej miec leady bez sygnalow skali niz zero).
     """
 
     name = "apify_allegro"
@@ -237,59 +244,92 @@ class ApifyAllegroSource:
             min_reviews = preset["min_reviews"]
             min_rating = preset["min_rating"]
 
-        # Rozne actory uzywaja roznych nazw input fields - wysylamy alternatywy
-        # zeby zadzialalo z automation-lab, parseforge, klevio, etc. Apify
-        # ignore unknown fields, wiec to bezpieczne.
+        if not keywords and not category_urls:
+            return []  # preset bez keywords / kategorii - nic do scrapowania
+
+        # Budujemy payload w wielu konwencjach naraz - Apify ignoruje
+        # unknown fields, wiec to bezpieczne. Konkretne actory ktore
+        # supportujemy:
+        #   contactminerlabs/allegro-email-scraper: WIELKIE LITERY
+        #     {KEYWORD, MAX_ITEMS, DOMAIN_EMAIL, LOCATION}
+        #   automation-lab/allegro-scraper: keywords + startUrls
+        #   parseforge/allegro-scraper: searchTerms + maxItems
+        #   klevio/allegro-seller-scraper: sellerUrls
+        primary_keyword = keywords[0] if keywords else ""
+        max_items = min(max_results * 3, 300)
+
         payload: dict = {
-            "maxItems": min(max_results * 3, 300),
-            "maxRequestsPerCrawl": min(max_results * 3, 300),
+            # contactminerlabs format (WIELKIE LITERY)
+            "KEYWORD": primary_keyword,
+            "MAX_ITEMS": max_items,
+            "DOMAIN_EMAIL": [],   # pusty = wszystkie domeny
+            "LOCATION": "",
+            # lowercase alternatywy dla innych actorow
+            "maxItems": max_items,
+            "maxRequestsPerCrawl": max_items,
         }
         if keywords:
             payload["searchTerms"] = keywords
             payload["keywords"] = keywords
             payload["queries"] = keywords
-            payload["search"] = keywords[0]  # niektore actory chca pojedynczy string
+            payload["search"] = primary_keyword
         if category_urls:
             payload["startUrls"] = [{"url": u} for u in category_urls]
             payload["categoryUrls"] = category_urls
-        if not keywords and not category_urls:
-            return []  # preset bez kategorii / keywords - nic do scrapowania
+
+        import logging
+        log = logging.getLogger("agent.discovery")
+        log.info(
+            f"ApifyAllegro: actor={settings.apify_allegro_actor!r} "
+            f"mode={mode!r} keywords={keywords!r} category_urls={category_urls!r} "
+            f"max_items={max_items}"
+        )
 
         try:
             data = _apify_run_actor(settings.apify_allegro_actor, payload)
-        except Exception:
-            # Nie psuj reszty discovery - zwroc pusto, run_search to zbierze
-            # jako per-source error w diagnostics.
+        except Exception as exc:
+            log.exception(f"ApifyAllegro actor call failed: {exc}")
             raise
 
-        # Debug: zaloguj kluczy pierwszego item zeby user mogl zdiagnozowac
-        # jak Allegro actor nie matchuje naszego normalize() (np. inny actor
-        # niz domyslny - inne nazwy pol). Tylko pierwszy item, max ~200 znakow.
+        # Debug: zaloguj keys + sample pierwszego item zeby user mogl
+        # zdiagnozowac jak inny actor nie matchuje normalize().
         if data:
             try:
-                import logging
                 first = data[0]
                 top_keys = sorted(first.keys()) if isinstance(first, dict) else []
-                logging.getLogger("agent.discovery").info(
-                    f"ApifyAllegro raw first item keys ({len(data)} total): {top_keys}"
+                # Skrocony sample dla pierwszych 3 polynom
+                sample = {k: first.get(k) for k in list(top_keys)[:8]}
+                log.info(
+                    f"ApifyAllegro raw response: {len(data)} items, "
+                    f"first item keys: {top_keys}, sample: {sample!r}"
                 )
             except Exception:
                 pass
+        else:
+            log.warning(
+                f"ApifyAllegro returned 0 items. Mozliwe przyczyny: "
+                f"actor wymaga subskrypcji (sprawdz Apify Console), "
+                f"input field name nie pasuje (oczekiwany przez actor != "
+                f"co wysylamy), brak wynikow dla query."
+            )
 
         # Stage 1 normalize + filtr skali
         places: list[DiscoveredPlace] = []
         for item in data:
             place = self._normalize(item)
-            if min_reviews and (place.review_count or 0) < min_reviews:
+            if min_reviews and place.review_count is not None \
+                    and place.review_count < min_reviews:
                 continue
-            if min_rating and (place.rating or 0) < min_rating:
+            if min_rating and place.rating is not None \
+                    and place.rating < min_rating:
                 continue
             places.append(place)
 
-        # Dedup po sellerze (jeden sklep = wiele ofert na Allegro)
+        # Dedup po sellerze (jeden sklep moze miec wiele wpisow)
         deduped = self._dedup_by_seller(places)[:max_results]
 
-        # Stage 2 - email enrichment (opt-in, tylko jesli actor skonfigurowany)
+        # Stage 2 - email enrichment (OPT-IN, default OFF bo
+        # contactminerlabs zwraca maila juz w stage 1).
         if settings.apify_allegro_email_actor and deduped:
             self._enrich_emails(deduped)
 
@@ -311,75 +351,116 @@ class ApifyAllegroSource:
     def _normalize(item: dict) -> DiscoveredPlace:
         """Mapuje surowy item z Allegro scraper na DiscoveredPlace.
 
-        Rozne actory uzywaja roznych nazw pol - sprawdzamy szeroka pelete
-        snake_case / camelCase / nested seller.X. Jak zaden nie matchuje
-        zostaje fallback "(sprzedawca Allegro)" i user widzi to w UI -
-        sygnal ze trzeba sprawdzic raw item keys w logach.
+        Wspiera kilka schemow odpowiedzi:
+          contactminerlabs: {email, title, sourceUrl, bio, ...}
+          automation-lab:   {sellerLogin, sellerUrl, sellerRating, ...}
+          parseforge:       {seller, title, url, price, ...}  (product-level)
+          klevio:           {sellerLogin, sellerId, ...}
+
+        Jak zaden seller field nie matchuje, fallback "(sprzedawca Allegro)"
+        + user widzi to w UI = sygnal ze trzeba zmienic actora lub
+        dodac mapping. Surowe item keys logujemy do agent.discovery.
         """
-        seller_obj = item.get("seller") or item.get("sellerInfo") or {}
-        # Seller name (login / username / handle - co Allegro chce dac)
+        seller_obj = item.get("seller") or item.get("sellerInfo") or item.get("profile") or {}
+
+        # ---- Email (contactminerlabs ma to bezposrednio) -----------------
+        email = (
+            item.get("email")
+            or item.get("contactEmail")
+            or item.get("emailAddress")
+            or (item.get("emails") or [None])[0] if isinstance(item.get("emails"), list) else None
+        )
+
+        # ---- Seller name -------------------------------------------------
+        # contactminerlabs zwraca "title" (profile title)
+        # automation-lab/parseforge zwraca sellerLogin/sellerName
         seller = (
-            item.get("sellerLogin")
+            item.get("title")              # contactminerlabs profile title
+            or item.get("profileName")
+            or item.get("profileTitle")
+            or item.get("sellerLogin")
             or item.get("sellerName")
             or item.get("seller_login")
             or item.get("seller_name")
             or item.get("sellerUsername")
+            or item.get("name")
             or seller_obj.get("login")
             or seller_obj.get("username")
             or seller_obj.get("name")
             or seller_obj.get("displayName")
+            or seller_obj.get("title")
             or "(sprzedawca Allegro)"
         )
-        # Seller URL - klucz dedupu
+
+        # ---- Seller URL --------------------------------------------------
+        # contactminerlabs: sourceUrl, automation-lab: sellerUrl
         seller_url = (
-            item.get("sellerUrl")
+            item.get("sourceUrl")          # contactminerlabs
+            or item.get("source_url")
+            or item.get("profileUrl")
+            or item.get("sellerUrl")       # automation-lab
             or item.get("seller_url")
             or item.get("sellerStoreUrl")
             or item.get("sellerProfileUrl")
+            or item.get("url")
             or seller_obj.get("url")
             or seller_obj.get("storeUrl")
             or seller_obj.get("profileUrl")
             or seller_obj.get("link")
         )
-        # Jak nadal nie ma sellerUrl ale mamy sellerLogin, zbuduj URL recznie -
-        # Allegro convention to allegro.pl/uzytkownik/<login>
+        # Jak nadal nie ma sellerUrl ale mamy login - zbuduj URL recznie
         if not seller_url and seller and seller != "(sprzedawca Allegro)":
             login_safe = str(seller).strip().lstrip("@")
-            if login_safe and " " not in login_safe and "/" not in login_safe:
+            if login_safe and " " not in login_safe and "/" not in login_safe \
+                    and len(login_safe) < 64:
                 seller_url = f"https://allegro.pl/uzytkownik/{login_safe}"
 
+        # ---- Rating + review count (jak actor to udostepnia) -----------
         rating = (
             item.get("sellerRating")
             or item.get("seller_rating")
+            or item.get("rating")
             or seller_obj.get("rating")
             or seller_obj.get("score")
-            or item.get("rating")
         )
         review_count = (
             item.get("sellerFeedbackCount")
             or item.get("seller_feedback_count")
             or item.get("sellerReviewsCount")
-            or seller_obj.get("feedbackCount")
-            or seller_obj.get("reviewsCount")
             or item.get("reviewCount")
             or item.get("reviewsCount")
+            or seller_obj.get("feedbackCount")
+            or seller_obj.get("reviewsCount")
         )
+
+        # ---- Notes (kontekst dla LLM relevance + UI) -------------------
+        notes_parts = []
+        bio = item.get("bio") or item.get("description") or seller_obj.get("bio")
+        if bio:
+            notes_parts.append(str(bio)[:200])
+        category = item.get("category") or item.get("categoryName")
+        if category:
+            notes_parts.append(f"kat: {category}")
+        if not notes_parts:
+            notes_parts.append("Allegro seller")
 
         return DiscoveredPlace(
             source="apify_allegro",
             name=str(seller),
             website=seller_url,
+            email=email,
             address=item.get("location") or seller_obj.get("location"),
             rating=rating,
             review_count=review_count,
             raw_id=(
-                seller_obj.get("id")
-                or item.get("sellerId")
+                item.get("sellerId")
                 or item.get("seller_id")
+                or item.get("profileId")
+                or seller_obj.get("id")
                 or item.get("offerId")
                 or item.get("id")
             ),
-            notes=item.get("category") or item.get("categoryName") or "Allegro seller",
+            notes=" | ".join(notes_parts),
         )
 
     @staticmethod
