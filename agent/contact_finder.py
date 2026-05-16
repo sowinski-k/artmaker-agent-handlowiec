@@ -47,9 +47,22 @@ CONTACT_PATHS = [
 # Cap na rozmiar pobieranego HTML (anti-bomb)
 MAX_HTML_SIZE = 500_000  # 500KB
 
-# Email regex - dosc strict, lapie typowe formaty bez junk
+# Email regex - strict, wymaga ze:
+#  - lokal nie zaczyna sie kropka
+#  - po @ pierwszy znak to alfanumeric (NIE kropka)
+#  - TLD min 2 znaki
+# Wczesniejsza wersja lapala "edge-ch@.facebook.com" (FB SDK markup w HTML),
+# "document.loc@ion.protocol" (JS code), "fonts.gst@ic.com" (Google CDN),
+# "d@alayer.push" (dataLayer.push). To regression guard po user'owym
+# zgloszeniu false-positive mailów wpadajacych do leadow.
 EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+    r"(?<![a-zA-Z0-9.])"                # nic alfanumeric+kropka przed (nie matchuj 'foo.bar@')
+    r"[a-zA-Z0-9_%+-]"                  # pierwszy znak local NIE moze byc kropka
+    r"[a-zA-Z0-9._%+-]*"                # reszta local (kropki OK w srodku)
+    r"@"
+    r"[a-zA-Z0-9]"                      # pierwszy znak hosta MUSI byc alfanumeric (NIE kropka!)
+    r"[a-zA-Z0-9.-]*"                   # reszta hosta (kropki OK w srodku)
+    r"\.[a-zA-Z]{2,}"                   # TLD min 2 alfa
 )
 # Polski telefon: +48 XXX XXX XXX, 9 cyfr, ze spacjami / mysl-nikami / bez
 PHONE_RE = re.compile(
@@ -60,11 +73,38 @@ PHONE_RE = re.compile(
 
 # Email patterns ktore sa SMIECIEM (analytics, libs, copyright placeholders)
 EMAIL_BLACKLIST_HOSTS = {
+    # Generic placeholders
     "example.com", "example.org", "example.net", "domain.com",
+    # Hosting platforms
     "sentry.io", "wixpress.com", "shopify.com", "squarespace.com",
-    "wordpress.com", "wp.com", "googleusercontent.com", "schema.org",
+    "wordpress.com", "wp.com", "schema.org",
     "w3.org", "namesilo.com", "godaddy.com", "wpengine.com",
     "sentry-next.wixpress.com",
+    # CDNs i platformy social - tu w 100% false-positive z JS/HTML markup
+    "facebook.com", "fbcdn.net", "instagram.com", "twitter.com", "t.co",
+    "linkedin.com", "twimg.com", "ytimg.com", "youtube.com",
+    # Google libs (CDN, fonty, analytics, recaptcha)
+    "gstatic.com", "googleapis.com", "googleusercontent.com",
+    "googletagmanager.com", "google-analytics.com", "googlesyndication.com",
+    "doubleclick.net", "recaptcha.net",
+    # CSS/JS CDNs - typowe imports w HTML
+    "jsdelivr.net", "unpkg.com", "bootstrapcdn.com", "cdnjs.com",
+    "fontawesome.com", "jquery.com",
+    # Cloudflare / analytics
+    "cloudflareinsights.com", "cloudflare.com", "static-cf.com",
+    "gravatar.com",
+}
+# Sfalszowane TLD ktore matchuja regex ale to nie real domain.
+# 'protocol' = JS document.location.protocol, 'push' = dataLayer.push,
+# 'local' / 'test' / 'invalid' / 'example' = reserved test TLDs (RFC 2606).
+EMAIL_BLACKLIST_TLDS = {
+    "protocol", "push", "local", "test", "invalid", "example",
+    "localhost", "internal", "lan",
+}
+# Local part prefixes ktore w 100% to fragmenty kodu JS.
+EMAIL_BLACKLIST_LOCAL_PREFIXES = {
+    "document.", "window.", "console.", "navigator.",
+    "this.", "globalThis.", "location.",
 }
 EMAIL_BLACKLIST_LOCALS = {
     "noreply", "no-reply", "donotreply", "do-not-reply",
@@ -83,16 +123,43 @@ class EnrichResult:
 
 
 def _is_junk_email(email: str) -> bool:
-    """Czy email to placeholder / library / analytics, czy realny kontakt."""
+    """Czy email to placeholder / library / analytics, czy realny kontakt.
+
+    Filtruje:
+      - Hosty z EMAIL_BLACKLIST_HOSTS (FB SDK, Google CDN, Cloudflare, etc.)
+      - Fake TLDs z EMAIL_BLACKLIST_TLDS (.protocol, .push, .local, .test)
+      - Local part prefixes z EMAIL_BLACKLIST_LOCAL_PREFIXES (document., window.)
+      - Local part exact matches (noreply, test, demo)
+      - Lockal > 40 chars (analytics IDs)
+      - Host ze ext obrazka (analytics trackers w URL)
+    """
     e = email.lower().strip()
     if "@" not in e: return True
     local, _, host = e.partition("@")
     if host in EMAIL_BLACKLIST_HOSTS: return True
+    # Sprawdz subdomeny: x.facebook.com -> facebook.com
+    host_parts = host.split(".")
+    for i in range(len(host_parts) - 1):
+        if ".".join(host_parts[i:]) in EMAIL_BLACKLIST_HOSTS:
+            return True
+    # TLD blacklist (fake/reserved TLDs)
+    if host_parts and host_parts[-1] in EMAIL_BLACKLIST_TLDS: return True
+    # Local part: prefix patterns (document., window., ...)
+    if any(local.startswith(p) for p in EMAIL_BLACKLIST_LOCAL_PREFIXES): return True
+    # Local part: exact matches (noreply, demo, test)
     if any(local.startswith(b) for b in EMAIL_BLACKLIST_LOCALS): return True
     # Long random-looking locals (analytics IDs)
     if len(local) > 40: return True
     # Image extension (analytics tracker pixels in URLs)
-    if any(host.endswith(s) for s in [".png", ".jpg", ".gif", ".svg"]): return True
+    if any(host.endswith(s) for s in [".png", ".jpg", ".gif", ".svg", ".webp"]): return True
+    # Truncated library/CDN fragments: "fonts.gst@ic.com" - last local segment
+    # po kropce jest super krotki (<=3 chars) co znaczy ze ktos sparsowal
+    # "fonts.gstatic.com" jako 'local@host' przy @ w innym miejscu HTMLa.
+    # Real emaile rzadko maja "jan.x@..." gdzie x to 1-3 chars.
+    if "." in local:
+        last_local_segment = local.rsplit(".", 1)[-1]
+        if 1 <= len(last_local_segment) <= 3 and last_local_segment.isalpha():
+            return True
     return False
 
 

@@ -12,6 +12,7 @@ ze stopka 'info@malowaniezwinem.pl' ktora enrichment przegapil):
 from __future__ import annotations
 
 from agent.contact_finder import (
+    EMAIL_RE,
     _decode_cloudflare_emails,
     _extract_emails,
     _extract_phones,
@@ -145,3 +146,55 @@ class TestPhone:
         html = '<p>tel: 22 123 45 67</p>'
         phones = _extract_phones(html)
         assert len(phones) > 0
+
+
+class TestJunkEmailFalsePositives:
+    """Regression - user zglosil false-positive maile wpadajace do leadow
+    z Google Maps scrapingu stron Allegro/Facebook. Te to fragmenty JS/HTML
+    sparsowane jako email (np. "edge-ch@.facebook.com" z Facebook SDK)."""
+
+    def test_facebook_sdk_fragment_rejected(self):
+        # edge-ch@.facebook.com - kropka po @ w regex starszej wersji
+        assert EMAIL_RE.fullmatch("edge-ch@.facebook.com") is None
+
+    def test_javascript_document_location_rejected(self):
+        # document.loc@ion.protocol - JS code parsed jak email
+        assert _is_junk_email("document.loc@ion.protocol") is True
+
+    def test_gstatic_cdn_fragment_rejected(self):
+        # fonts.gst@ic.com - fragment "fonts.gstatic.com" Google Fonts CDN
+        assert _is_junk_email("fonts.gst@ic.com") is True
+
+    def test_dataLayer_push_rejected(self):
+        # d@alayer.push - dataLayer.push() z Google Tag Manager
+        assert _is_junk_email("d@alayer.push") is True
+
+    def test_facebook_subdomain_rejected(self):
+        # 100% false-positive z FB SDK markup
+        assert _is_junk_email("foo@cdn.facebook.com") is True
+
+    def test_fake_tld_protocol_rejected(self):
+        assert _is_junk_email("x@host.protocol") is True
+
+    def test_fake_tld_push_rejected(self):
+        assert _is_junk_email("x@host.push") is True
+
+    def test_fake_tld_local_rejected(self):
+        assert _is_junk_email("x@server.local") is True
+
+    def test_window_prefix_rejected(self):
+        assert _is_junk_email("window.location@example.org") is True
+
+    def test_real_polish_emails_pass(self):
+        # Sanity: realne emaile NIE moga zostac zablokowane
+        for email in [
+            "kontakt@artbox.pl",
+            "biuro@papiernia.com.pl",
+            "jan.kowalski@gmail.com",
+            "sklep@wp.pl",
+            "ania@drukarnia.com.pl",
+            "j.kowalski@firma.pl",  # 8-char nazwisko OK
+        ]:
+            assert EMAIL_RE.fullmatch(email) is not None, f"{email} regex blocked"
+            assert _is_junk_email(email) is False, f"{email} marked junk"
+
