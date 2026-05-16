@@ -321,6 +321,16 @@ export default function LeadyPage() {
   const allEligibleSelected = eligibleForBulk.length > 0
     && eligibleForBulk.every((l) => selectedIds.has(l.id));
 
+  // Leady ktore warto re-research'owac: brak emaila ALE jest website
+  // (fallback z autonomous albo niedoskonaly research). Te bedzie chcial
+  // user zaznaczyc hurtem zeby spróbowac uzupelnic dane.
+  const eligibleForReresearch = leads.filter(
+    (l) => !l.email && l.website && l.status !== 'sent' && l.status !== 'replied'
+  );
+  function selectAllForReresearch() {
+    setSelectedIds(new Set(eligibleForReresearch.map((l) => l.id)));
+  }
+
   function toggleSelect(id: number) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -337,6 +347,50 @@ export default function LeadyPage() {
   }
   function clearSelection() {
     setSelectedIds(new Set());
+  }
+
+  async function bulkReResearchLeads() {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    const ok = await confirm({
+      title: `Re-research ${ids.length} leadów?`,
+      message: (
+        <>
+          Każdy zaznaczony lead z website dostanie nowy <strong>RESEARCH_LEAD</strong> job
+          (force_refresh=true). Worker przerobi w tle - może zająć chwilę.
+          Tokeny LLM (Gemini) będą wydane. Stare research_data zostanie nadpisane jeśli
+          nowy sukces.
+        </>
+      ),
+      confirmLabel: `Re-research (${ids.length})`,
+      cancelLabel: 'Anuluj',
+      destructive: false,
+      icon: 'refresh-dot',
+    });
+    if (!ok) return;
+    setBulkSubmitting(true);
+    try {
+      const res = await api<{
+        ok: boolean; requested: number; jobs_created: number;
+        skipped_no_website: number; job_ids: number[];
+      }>('/api/leads/bulk-reresearch', {
+        method: 'POST',
+        body: JSON.stringify({ lead_ids: ids }),
+      });
+      setFlash({
+        kind: 'success',
+        text: `Re-research zlecony: ${res.jobs_created} jobów. Pominięte (brak website): ${res.skipped_no_website}. Worker przerabia w tle - status zobaczysz w drawerze za chwilę.`,
+      });
+      clearSelection();
+      setTimeout(() => void load(), 2000);
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie zlecic re-research',
+      });
+    } finally {
+      setBulkSubmitting(false);
+    }
   }
 
   async function bulkGenerateDrafts() {
@@ -1036,6 +1090,15 @@ export default function LeadyPage() {
               {bulkSubmitting ? 'Zlecam...' : `Generuj drafty (${selectedIds.size})`}
             </button>
             <button
+              className="btn btn-secondary btn-sm"
+              onClick={bulkReResearchLeads}
+              disabled={bulkSubmitting}
+              title="Pelny re-research dla zaznaczonych - uzyteczne dla fallback leadow bez emaila"
+            >
+              <i className="ti ti-refresh-dot" />
+              {bulkSubmitting ? 'Zlecam...' : `Re-research (${selectedIds.size})`}
+            </button>
+            <button
               className="btn btn-bulk-delete btn-sm"
               onClick={bulkDeleteLeads}
               disabled={bulkSubmitting}
@@ -1059,6 +1122,15 @@ export default function LeadyPage() {
                 title="Zaznacz wszystkie researched z emailem bez aktywnego draftu"
               >
                 {allEligibleSelected ? 'Odznacz wszystkie' : `Zaznacz wszystkie researched (${eligibleForBulk.length})`}
+              </button>
+            )}
+            {eligibleForReresearch.length > 0 && (
+              <button
+                className="btn-link-sm"
+                onClick={selectAllForReresearch}
+                title="Zaznacz leady bez emaila ale z website - kandydaci do re-researchu (fallback)"
+              >
+                Zaznacz bez emaila ({eligibleForReresearch.length})
               </button>
             )}
           </div>

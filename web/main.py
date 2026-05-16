@@ -1867,6 +1867,77 @@ class BulkDeleteIn(BaseModel):
     lead_ids: list[int]
 
 
+class BulkReResearchIn(BaseModel):
+    lead_ids: list[int]
+
+
+@app.post("/api/leads/bulk-reresearch")
+def bulk_reresearch_leads(
+    payload: BulkReResearchIn, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk re-research zaznaczonych leadow - tworzy N RESEARCH_LEAD jobow
+    z force_refresh=True. Worker pool je rozdziela na watki.
+
+    Use case: leady wpadly fallbackiem (research padl, zostal zapis z Places API).
+    User chce sprobowac ponownie pobrac dane ze stron - jednym klikiem.
+
+    Filter:
+    - tylko leady tego workspace
+    - tylko z website (bez URL nie ma czego researchowac)
+    - tylko nie-soft-deleted
+    """
+    if not payload.lead_ids:
+        raise HTTPException(status_code=400, detail="Brak lead_ids.")
+    if len(payload.lead_ids) > 100:
+        raise HTTPException(status_code=400, detail="Max 100 leadow naraz.")
+
+    with SessionLocal() as session:
+        eligible = session.execute(
+            select(Lead.id, Lead.website, Lead.segment, Lead.city).where(
+                Lead.id.in_(payload.lead_ids),
+                Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),
+                Lead.website.isnot(None),
+            )
+        ).all()
+        eligible_ids = [r[0] for r in eligible]
+        skipped_no_website = len(payload.lead_ids) - len(eligible_ids)
+
+        created_jobs: list[int] = []
+        for lid, website, segment, city in eligible:
+            job = create_job(
+                session, job_type=JobType.RESEARCH_LEAD,
+                workspace_id=cur.workspace_id, user_id=cur.user_id,
+                payload={
+                    "url": website,
+                    "segment_hint": segment,
+                    "city_hint": city,
+                    "force_refresh": True,
+                },
+            )
+            created_jobs.append(job.id)
+
+        if created_jobs:
+            session.add(Event(
+                workspace_id=cur.workspace_id,
+                user_id=cur.user_id,
+                type="lead.bulk_reresearch",
+                level="INFO",
+                source="user",
+                message=f"Bulk re-research: {len(created_jobs)} jobow utworzonych",
+                payload={"lead_ids": eligible_ids, "job_ids": created_jobs},
+            ))
+            session.commit()
+
+    return {
+        "ok": True,
+        "requested": len(payload.lead_ids),
+        "jobs_created": len(created_jobs),
+        "skipped_no_website": skipped_no_website,
+        "job_ids": created_jobs[:50],  # cap żeby response nie był ogromny
+    }
+
+
 @app.post("/api/leads/bulk-delete")
 def bulk_delete_leads(
     payload: BulkDeleteIn, cur: CurrentUser = Depends(get_current_user),
