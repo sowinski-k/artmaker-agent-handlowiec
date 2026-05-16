@@ -58,7 +58,13 @@ class TestExpandQuery:
         assert len(result) >= 5
         for q, loc in result:
             assert loc is None  # brak miasta = brak loc
-            assert "sklep" in q.lower() or "artyk" in q.lower() or "malar" in q.lower() or "farby" in q.lower() or "material" in q.lower()
+            q_lower = q.lower()
+            # Synonimy dla sklep_plastyczny zawieraja polskie znaki -
+            # sprawdzamy zarowno polskie jak i bez-ogonkowe formy
+            assert any(s in q_lower for s in [
+                "sklep", "artyk", "malar", "farby", "material",
+                "materiał",  # polska forma 'materialy' -> 'materiały'
+            ])
 
     def test_unknown_segment_falls_back_to_inne(self):
         # Nieznany segment -> uzywa synonimow "inne"

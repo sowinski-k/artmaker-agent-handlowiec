@@ -2797,32 +2797,46 @@ def _run_expanded_discovery(
     rel_map: dict[int, dict[str, Any]] = {}
     relevance_source = "none"
     if payload.use_relevance_filter and deduped:
-        try:
-            items, _ = score_relevance_batch(
-                deduped, segment=payload.segment,
-                city=payload.location,
-                custom_description=payload.custom_description,
-            )
-            for it in items:
-                if 0 <= it.idx < len(deduped):
-                    rel_map[it.idx] = {"score": it.score, "reason": it.reason}
-            relevance_source = "llm"
-        except Exception as exc:
-            log.warning(f"expand: relevance batch failed, falling back: {exc}")
-            for i, p in enumerate(deduped):
-                if p.existing_lead_id is not None:
-                    score_int = (
-                        int(round(p.existing_lead_score))
-                        if p.existing_lead_score is not None else 5
-                    )
-                    rel_map[i] = {
-                        "score": max(0, min(10, score_int)),
-                        "reason": f"Duplikat - juz w bazie jako lead #{p.existing_lead_id}",
-                    }
-                else:
+        # Split: duplikaty dostaja zachowany score z bazy (zero kosztu LLM).
+        # LLM scoruje tylko NEW places. W typowym Polska-wide expanded
+        # discovery 60-80% to duplikaty - duza oszczednosc Gemini tokenow.
+        new_indices: list[int] = []
+        new_places_for_llm = []
+        for i, p in enumerate(deduped):
+            if p.existing_lead_id is not None:
+                score_int = (
+                    int(round(p.existing_lead_score))
+                    if p.existing_lead_score is not None else 5
+                )
+                rel_map[i] = {
+                    "score": max(0, min(10, score_int)),
+                    "reason": f"Duplikat - juz w bazie jako lead #{p.existing_lead_id}",
+                }
+            else:
+                new_indices.append(i)
+                new_places_for_llm.append(p)
+
+        if new_places_for_llm:
+            try:
+                items, _ = score_relevance_batch(
+                    new_places_for_llm, segment=payload.segment,
+                    city=payload.location,
+                    custom_description=payload.custom_description,
+                )
+                for it in items:
+                    if 0 <= it.idx < len(new_places_for_llm):
+                        original_idx = new_indices[it.idx]
+                        rel_map[original_idx] = {"score": it.score, "reason": it.reason}
+                relevance_source = "llm"
+            except Exception as exc:
+                log.warning(f"expand: relevance batch failed, falling back: {exc}")
+                for new_i, p in enumerate(new_places_for_llm):
+                    original_idx = new_indices[new_i]
                     score, reason = _heuristic_score(p)
-                    rel_map[i] = {"score": score, "reason": reason}
-            relevance_source = "heuristic"
+                    rel_map[original_idx] = {"score": score, "reason": reason}
+                relevance_source = "heuristic"
+        else:
+            relevance_source = "cache"
 
     return {
         "places": [{
@@ -2999,36 +3013,50 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
     rel_map: dict[int, dict[str, Any]] = {}
     relevance_source = "none"  # "llm" | "heuristic" | "none"
     if payload.use_relevance_filter and places:
-        try:
-            items, _ = score_relevance_batch(
-                places, segment=payload.segment,
-                city=payload.location,
-                custom_description=payload.custom_description,
-            )
-            for it in items:
-                if 0 <= it.idx < len(places):
-                    rel_map[it.idx] = {"score": it.score, "reason": it.reason}
-            relevance_source = "llm"
-        except Exception as exc:
-            log.warning(f"score_relevance_batch failed (fallback to heuristic): {exc}")
-            # Fallback: heurystyka per place (keyword'y w nazwie). NIE LLM,
-            # ale lepsze niz puste null ktore powoduje 0-zaznaczonych w UI.
-            from agent.discovery import _heuristic_score
-            for i, p in enumerate(places):
-                if p.existing_lead_id is not None:
-                    # Duplikat - poznaczamy zachowanym score'em
-                    score_int = (
-                        int(round(p.existing_lead_score))
-                        if p.existing_lead_score is not None else 5
-                    )
-                    rel_map[i] = {
-                        "score": max(0, min(10, score_int)),
-                        "reason": f"Duplikat - już w bazie jako lead #{p.existing_lead_id}",
-                    }
-                else:
+        # OPTYMALIZACJA: dla duplikatow (existing_lead_id != None) uzywamy
+        # ZACHOWANEGO score'a z poprzedniego LLM call - NIE wolaj Gemini
+        # drugi raz. Real saving: typowy peek ma 60% duplikatow w okolicy
+        # gdzie user juz zbieral - 60% tokenow Gemini oszczedzone.
+        from agent.discovery import _heuristic_score
+        new_indices: list[int] = []
+        new_places_for_llm = []
+        for i, p in enumerate(places):
+            if p.existing_lead_id is not None:
+                score_int = (
+                    int(round(p.existing_lead_score))
+                    if p.existing_lead_score is not None else 5
+                )
+                rel_map[i] = {
+                    "score": max(0, min(10, score_int)),
+                    "reason": f"Duplikat - już w bazie jako lead #{p.existing_lead_id}",
+                }
+            else:
+                new_indices.append(i)
+                new_places_for_llm.append(p)
+
+        if new_places_for_llm:
+            try:
+                items, _ = score_relevance_batch(
+                    new_places_for_llm, segment=payload.segment,
+                    city=payload.location,
+                    custom_description=payload.custom_description,
+                )
+                for it in items:
+                    if 0 <= it.idx < len(new_places_for_llm):
+                        original_idx = new_indices[it.idx]
+                        rel_map[original_idx] = {"score": it.score, "reason": it.reason}
+                relevance_source = "llm"
+            except Exception as exc:
+                log.warning(f"score_relevance_batch failed (fallback to heuristic): {exc}")
+                # Fallback: heurystyka per place (keyword'y w nazwie)
+                for new_i, p in enumerate(new_places_for_llm):
+                    original_idx = new_indices[new_i]
                     score, reason = _heuristic_score(p)
-                    rel_map[i] = {"score": score, "reason": reason}
-            relevance_source = "heuristic"
+                    rel_map[original_idx] = {"score": score, "reason": reason}
+                relevance_source = "heuristic"
+        else:
+            # Wszystko duplikaty - nie ma czego scorowac LLM
+            relevance_source = "cache"
 
     # Zapisz audit log + cache snapshot wynikow zeby ten sam query w
     # ciagu DISCOVERY_CACHE_TTL_DAYS nie palil kredytu ponownie.
