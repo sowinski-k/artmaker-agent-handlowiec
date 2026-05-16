@@ -1014,6 +1014,78 @@ export default function PozyskiwaniePage() {
                 )}
               </div>
             </div>
+            {/* AUTONOMOUS DETAILED LIVE STATUS - dla autonomous_discovery job */}
+            {activeJob.type === 'autonomous_discovery' && activeJob.result && (() => {
+              const r = activeJob.result as {
+                status?: string;
+                current_city?: string;
+                cities_processed?: number;
+                cities_total?: number;
+                new_leads_count?: number;
+                target_new_leads?: number;
+                drafts_made?: number;
+                estimated_cost_usd?: number;
+                max_cost_usd?: number;
+                cities_skipped_no_results?: number;
+                stopped_reason?: string;
+              };
+              return (
+                <div className="autonomous-status">
+                  <div className="autonomous-status-grid">
+                    <div className="as-stat">
+                      <div className="as-label">Aktualnie skanuje</div>
+                      <div className="as-value">
+                        {jobActive && r.current_city ? (
+                          <><span className="dot-pulse" /> {r.current_city}</>
+                        ) : (
+                          <span style={{ color: '#9CA3AF' }}>—</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="as-stat">
+                      <div className="as-label">Miasta sprawdzone</div>
+                      <div className="as-value as-mono">
+                        {r.cities_processed || 0} / {r.cities_total || '?'}
+                      </div>
+                    </div>
+                    <div className="as-stat">
+                      <div className="as-label">Nowe leady</div>
+                      <div className="as-value as-mono as-success">
+                        {r.new_leads_count || 0} / {r.target_new_leads || 0}
+                      </div>
+                    </div>
+                    <div className="as-stat">
+                      <div className="as-label">Drafty</div>
+                      <div className="as-value as-mono">
+                        {r.drafts_made || 0}
+                      </div>
+                    </div>
+                    <div className="as-stat">
+                      <div className="as-label">Szacowany koszt</div>
+                      <div className="as-value as-mono">
+                        ${(r.estimated_cost_usd || 0).toFixed(2)} / ${(r.max_cost_usd || 0).toFixed(2)}
+                      </div>
+                    </div>
+                    <div className="as-stat">
+                      <div className="as-label">Pomijane miasta</div>
+                      <div className="as-value as-mono" title="Miasta gdzie 0 firm matchujących nasz segment">
+                        {r.cities_skipped_no_results || 0}
+                      </div>
+                    </div>
+                  </div>
+                  {!jobActive && r.stopped_reason && (
+                    <div className="autonomous-stopped">
+                      <strong>Zakończono:</strong> {
+                        r.stopped_reason === 'target_reached' ? '🎯 cel osiągnięty' :
+                        r.stopped_reason === 'budget_reached' ? '💰 wyczerpany budżet' :
+                        r.stopped_reason === 'cancelled' ? '⏹️ anulowane przez Ciebie' :
+                        '📋 wszystkie miasta przerobione'
+                      }
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {activeJob.total > 0 && (
               <>
                 <div className="progress-bar">
@@ -1023,7 +1095,9 @@ export default function PozyskiwaniePage() {
                   {jobActive ? (
                     <span className="working-now">
                       <span className="dot-pulse" />
-                      Pracuje nad {activeJob.progress + 1}-tym z {activeJob.total}
+                      {activeJob.type === 'autonomous_discovery'
+                        ? <>Agent szuka leadów ({activeJob.progress} / {activeJob.total})</>
+                        : <>Pracuje nad {activeJob.progress + 1}-tym z {activeJob.total}</>}
                       <span className="working-dots" />
                     </span>
                   ) : (
@@ -1918,6 +1992,54 @@ const CSS = `
   box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.2);
 }
 .autonomous-input .field-hint { font-size: 11px; color: #92400E; }
+
+/* Autonomous status panel - live updates w trakcie joba */
+.autonomous-status {
+  margin: 14px 0 8px;
+  padding: 14px;
+  background: linear-gradient(135deg, #1C1C1C 0%, #2A2A2A 100%);
+  border-radius: 9px;
+  color: #fff;
+}
+.autonomous-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.as-stat {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 7px;
+}
+.as-label {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+.as-value {
+  font-size: 14px;
+  color: #fff;
+  font-weight: 600;
+  display: flex; align-items: center; gap: 6px;
+}
+.as-mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+}
+.as-success { color: #6EE7B7; }
+.as-value .dot-pulse {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: #D4212C; animation: dot-pulse 1.2s ease-in-out infinite;
+}
+.autonomous-stopped {
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+}
 
 .mode-tabs {
   display: grid;

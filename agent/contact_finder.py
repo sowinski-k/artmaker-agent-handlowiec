@@ -83,6 +83,7 @@ EMAIL_BLACKLIST_HOSTS = {
     # CDNs i platformy social - tu w 100% false-positive z JS/HTML markup
     "facebook.com", "fbcdn.net", "instagram.com", "twitter.com", "t.co",
     "linkedin.com", "twimg.com", "ytimg.com", "youtube.com",
+    "cdninstagram.com", "licdn.com", "pinimg.com", "tiktokcdn.com",
     # Google libs (CDN, fonty, analytics, recaptcha)
     "gstatic.com", "googleapis.com", "googleusercontent.com",
     "googletagmanager.com", "google-analytics.com", "googlesyndication.com",
@@ -90,6 +91,9 @@ EMAIL_BLACKLIST_HOSTS = {
     # CSS/JS CDNs - typowe imports w HTML
     "jsdelivr.net", "unpkg.com", "bootstrapcdn.com", "cdnjs.com",
     "fontawesome.com", "jquery.com",
+    # Cookie/analytics/monitoring widgets - widoczne w 90% Polish stron
+    "cookiebot.com", "hotjar.com", "matomo.cloud", "intercom.io",
+    "tawk.to", "livechat.com", "drift.com", "zendesk.com",
     # Cloudflare / analytics
     "cloudflareinsights.com", "cloudflare.com", "static-cf.com",
     "gravatar.com",
@@ -100,6 +104,9 @@ EMAIL_BLACKLIST_HOSTS = {
 EMAIL_BLACKLIST_TLDS = {
     "protocol", "push", "local", "test", "invalid", "example",
     "localhost", "internal", "lan",
+    # File extensions sparsowane jak TLD (URL fragmenty z plików)
+    "js", "css", "html", "htm", "php", "json", "xml", "min",
+    "map", "svg", "png", "jpg", "jpeg", "gif", "webp", "ico",
 }
 # Local part prefixes ktore w 100% to fragmenty kodu JS.
 EMAIL_BLACKLIST_LOCAL_PREFIXES = {
