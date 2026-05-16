@@ -326,6 +326,52 @@ class PatrolSchedule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class DiscoveryRun(Base):
+    """Cache + audit log dla discovery query.
+
+    Klucz cacheu: query_hash = sha256(segment + location + sources_sorted).
+    Przed kazdym Apify/Places call sprawdzamy czy w ostatnich N dni byl
+    identyczny query - jak tak, zwracamy cached_places z bazy zamiast
+    palić kredytu.
+
+    Zapisujemy też metadane (cost_usd, leads_added) do raportowania
+    "ile zaoszczędziłeś przez cache" + ROI per workspace.
+    """
+    __tablename__ = "discovery_runs"
+    __table_args__ = (
+        # Cache lookup: WHERE workspace_id = ? AND query_hash = ? ORDER BY run_at DESC
+        Index("ix_discovery_runs_ws_hash_at", "workspace_id", "query_hash", "run_at"),
+        # History panel: WHERE workspace_id = ? ORDER BY run_at DESC
+        Index("ix_discovery_runs_ws_at", "workspace_id", "run_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    # Cache key - sha256(segment|location|sources_csv). Stale 64-char hex.
+    query_hash: Mapped[str] = mapped_column(String(64), index=True)
+
+    # Discovery params (for history display + replay)
+    segment: Mapped[str] = mapped_column(String(50))
+    location: Mapped[str | None] = mapped_column(String(255))
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    query: Mapped[str | None] = mapped_column(Text)  # full query string sent to sources
+    custom_description: Mapped[str | None] = mapped_column(Text)
+
+    # Results snapshot - lista DiscoveredPlace.model_dump() dla cache replay.
+    # Nullable bo czasem run się wywala (error) - mamy wpis audit ale brak danych.
+    cached_places: Mapped[list | None] = mapped_column(JSON)
+
+    # Stats
+    result_count: Mapped[int] = mapped_column(Integer, default=0)
+    leads_added: Mapped[int] = mapped_column(Integer, default=0)  # ile nowych po researchu
+    cost_usd: Mapped[float | None] = mapped_column(Float)         # szacunkowy koszt
+    error: Mapped[str | None] = mapped_column(Text)               # jak run padl
+
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 # ─── Engine + session ────────────────────────────────────────────────────
 
 # Engine config: dla Postgres - skalowalne defaulty.
@@ -477,6 +523,9 @@ def _migrate_workspace_columns() -> None:
         ("ix_email_drafts_created_at", "email_drafts", "(created_at)"),
         # Event timeline per-lead
         ("ix_events_lead_id", "events", "(lead_id)"),
+        # Discovery cache + history
+        ("ix_discovery_runs_ws_hash_at", "discovery_runs", "(workspace_id, query_hash, run_at)"),
+        ("ix_discovery_runs_ws_at", "discovery_runs", "(workspace_id, run_at)"),
     ]
     idx_added = 0
     for idx_name, table, cols in indexes_to_create:

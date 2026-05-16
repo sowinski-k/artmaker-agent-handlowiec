@@ -41,7 +41,24 @@ interface PeekResponse {
   diagnostics: Array<{ source: string; places: unknown[]; error?: string; duration_s?: number }>;
   daily_used: number;
   daily_cap: number;
-  relevance_source?: 'llm' | 'heuristic' | 'none';
+  relevance_source?: 'llm' | 'heuristic' | 'none' | 'cache';
+  from_cache?: boolean;
+  cached_at?: string | null;
+  cached_run_id?: number;
+}
+
+interface DiscoveryHistoryItem {
+  id: number;
+  segment: string;
+  location: string | null;
+  sources: string[];
+  query: string | null;
+  result_count: number;
+  leads_added: number;
+  cost_usd: number | null;
+  error: string | null;
+  run_at: string;
+  cache_active: boolean;
 }
 
 interface JobInfo {
@@ -176,7 +193,14 @@ export default function PozyskiwaniePage() {
   const [peekDiag, setPeekDiag] = useState<PeekResponse['diagnostics']>([]);
   const [peekRelevanceSource, setPeekRelevanceSource] = useState<string | null>(null);
   const [peekCap, setPeekCap] = useState<{ used: number; cap: number } | null>(null);
+  const [peekFromCache, setPeekFromCache] = useState<{ at: string | null; run_id?: number } | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  // Force refresh: jezeli zaznaczone, omijamy 30-dniowy cache i wywolujemy
+  // API od nowa. Domyslnie OFF zeby chronic kredyty.
+  const [forceRefresh, setForceRefresh] = useState(false);
+  // Historia discovery runow - lista lewa nad wynikami
+  const [history, setHistory] = useState<DiscoveryHistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
 
   // Job tracking (manual bulk research + agent mode)
   const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
@@ -216,6 +240,20 @@ export default function PozyskiwaniePage() {
       .then((data) => { if (!cancelled) setIndustryPresets(data); })
       .catch(() => { /* fallback - allegro mode 'preset' bedzie pusty */ });
     return () => { cancelled = true; };
+  }, []);
+
+  // Pobierz historie discovery runow (do panelu "Historia").
+  async function loadHistory() {
+    try {
+      const data = await api<DiscoveryHistoryItem[]>('/api/discovery/history?limit=50');
+      setHistory(data);
+    } catch {
+      /* niekrytyczne - history to nice-to-have */
+    }
+  }
+
+  useEffect(() => {
+    void loadHistory();
   }, []);
 
   // Allegro source_queries - zbuduj na podstawie wybranego trybu.
@@ -322,6 +360,7 @@ export default function PozyskiwaniePage() {
     }
     setPeeking(true);
     setPeekResults(null);
+    setPeekFromCache(null);
     setSelected(new Set());
     try {
       const res = await api<PeekResponse>('/api/discovery/peek', {
@@ -336,12 +375,18 @@ export default function PozyskiwaniePage() {
           custom_description: customTarget.trim() || null,
           use_relevance_filter: true,
           relevance_threshold: relevanceThreshold,
+          force_refresh: forceRefresh,
         }),
       });
       setPeekResults(res.places);
       setPeekDiag(res.diagnostics);
       setPeekCap({ used: res.daily_used, cap: res.daily_cap });
       setPeekRelevanceSource(res.relevance_source || null);
+      if (res.from_cache) {
+        setPeekFromCache({ at: res.cached_at || null, run_id: res.cached_run_id });
+      }
+      // Po peek odsiez historie zeby user widzial nowy run
+      void loadHistory();
 
       const auto = new Set<number>();
       res.places.forEach((p, i) => {
@@ -554,7 +599,72 @@ export default function PozyskiwaniePage() {
             <h1>Pozyskiwanie leadów</h1>
             <p>Wybierz tryb i zacznij szukać. Praca leci w tle - możesz wylogować się.</p>
           </div>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowHistory((s) => !s)}
+            title="Historia ostatnich zapytań discovery - chroni Cię przed powtarzaniem"
+          >
+            <i className="ti ti-history" /> Historia ({history.length})
+          </button>
         </div>
+
+        {/* HISTORY PANEL - kolepsowalny */}
+        {showHistory && (
+          <div className="history-panel">
+            <div className="history-head">
+              <strong>Historia discovery</strong>
+              <span className="history-sub">
+                {history.filter((h) => h.cache_active).length} runów w cache (30 dni) ·
+                pozostałe to historyczne
+              </span>
+              <button className="btn-icon" onClick={() => setShowHistory(false)} aria-label="Zamknij">
+                <i className="ti ti-x" />
+              </button>
+            </div>
+            {history.length === 0 ? (
+              <div className="history-empty">Brak runów — pierwsze zapytanie pojawi się tutaj.</div>
+            ) : (
+              <table className="history-table">
+                <thead>
+                  <tr>
+                    <th>Data</th>
+                    <th>Segment</th>
+                    <th>Lokalizacja</th>
+                    <th>Źródła</th>
+                    <th style={{ textAlign: 'right' }}>Wyniki</th>
+                    <th>Cache</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((h) => (
+                    <tr key={h.id}>
+                      <td>{new Date(h.run_at).toLocaleString('pl-PL')}</td>
+                      <td>{h.segment}</td>
+                      <td>{h.location || <em style={{ color: '#9CA3AF' }}>—</em>}</td>
+                      <td style={{ fontSize: 11, color: '#6B7280' }}>{h.sources.join(', ')}</td>
+                      <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                        {h.error ? (
+                          <span style={{ color: '#DC2626' }}>error</span>
+                        ) : (
+                          h.result_count
+                        )}
+                      </td>
+                      <td>
+                        {h.cache_active ? (
+                          <span style={{ color: '#10B981', fontSize: 11 }}>
+                            <i className="ti ti-database-check" /> aktywny
+                          </span>
+                        ) : (
+                          <span style={{ color: '#9CA3AF', fontSize: 11 }}>—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
         {/* MODE TOGGLE */}
         <div className="mode-tabs">
@@ -997,12 +1107,24 @@ export default function PozyskiwaniePage() {
                 </div>
               </div>
             ) : (
-              <button type="submit" className="btn btn-primary btn-cta"
-                disabled={submitButtonDisabled}>
-                {mode === 'manual'
-                  ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
-                  : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
-              </button>
+              <>
+                {mode === 'manual' && (
+                  <label className="force-refresh-toggle" title="Domyslnie pomijamy zapytanie ktorego identyczna wersja byla w ostatnich 30 dniach (cache). Zaznacz aby wymusic odswiezenie i zapłacic za nowe API call.">
+                    <input
+                      type="checkbox"
+                      checked={forceRefresh}
+                      onChange={(e) => setForceRefresh(e.target.checked)}
+                    />
+                    <span>Pomiń cache (zapłać za odświeżenie zapytania)</span>
+                  </label>
+                )}
+                <button type="submit" className="btn btn-primary btn-cta"
+                  disabled={submitButtonDisabled}>
+                  {mode === 'manual'
+                    ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
+                    : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
+                </button>
+              </>
             )}
           </form>
         </div>
@@ -1015,6 +1137,21 @@ export default function PozyskiwaniePage() {
                 <strong>{d.source}</strong>: {d.error || `${(d.places as unknown[]).length} firm · ${d.duration_s}s`}
               </div>
             ))}
+          </div>
+        )}
+
+        {/* PEEK RESULTS - banner gdy wynik z cache (zero kredytu) */}
+        {mode === 'manual' && peekFromCache && (
+          <div className="banner-info" style={{ marginTop: 16 }}>
+            <i className="ti ti-database" />
+            <div>
+              <strong>✓ Cache hit — 0 kredytu Apify/Places.</strong>{' '}
+              Wynik z wcześniejszego sprawdzenia
+              {peekFromCache.at && (
+                <> ({new Date(peekFromCache.at).toLocaleString('pl-PL')})</>
+              )}. Jeśli chcesz odświeżyć i zapłacić za nowe zapytanie,
+              zaznacz <strong>"Pomiń cache"</strong> nad przyciskiem i kliknij ponownie.
+            </div>
           </div>
         )}
 
@@ -1282,9 +1419,59 @@ const CSS = `
 .cap-pill i { color: #D4212C; font-size: 13px; }
 
 .content { padding: 24px; max-width: 1320px; }
-.page-head { margin-bottom: 20px; }
+.page-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+  margin-bottom: 20px;
+}
 .page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; margin: 0 0 4px; }
 .page-head p { color: #6B7280; font-size: 13.5px; margin: 0; }
+
+/* Historia discovery - panel collapsible */
+.history-panel {
+  background: #fff; border: 1px solid #E5E7EB; border-radius: 9px;
+  margin-bottom: 16px; overflow: hidden;
+}
+.history-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid #F3F4F6;
+  background: #FAFAF7;
+}
+.history-head strong { font-size: 13.5px; }
+.history-sub { font-size: 11.5px; color: #6B7280; flex: 1; }
+.btn-icon {
+  background: none; border: none; cursor: pointer;
+  color: #9CA3AF; padding: 4px; border-radius: 5px; display: flex;
+}
+.btn-icon:hover { background: #F3F4F6; color: #111; }
+.history-empty {
+  padding: 24px 16px; text-align: center; color: #9CA3AF; font-size: 13px;
+}
+.history-table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px;
+}
+.history-table th {
+  text-align: left; padding: 8px 12px; font-weight: 600;
+  color: #6B7280; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.5px; border-bottom: 1px solid #F3F4F6;
+}
+.history-table td {
+  padding: 9px 12px; border-bottom: 1px solid #F9FAFB; color: #1F2937;
+}
+.history-table tbody tr:hover { background: #FAFAF7; }
+.history-table tbody tr:last-child td { border-bottom: none; }
+
+/* Force-refresh toggle nad CTA */
+.force-refresh-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: #FAFAF7;
+  border: 1px solid #E5E7EB; border-radius: 7px;
+  font-size: 12.5px; color: #6B7280; cursor: pointer;
+  margin-bottom: 10px;
+}
+.force-refresh-toggle:hover { background: #F3F4F6; color: #111; }
+.force-refresh-toggle input[type="checkbox"] {
+  accent-color: #D4212C; cursor: pointer;
+}
 
 .mode-tabs {
   display: grid;
