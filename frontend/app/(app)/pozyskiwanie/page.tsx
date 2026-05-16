@@ -275,13 +275,19 @@ export default function PozyskiwaniePage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Historia error state - widoczny jak fetch padl (zamiast silent fail)
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
   // Pobierz historie discovery runow (do panelu "Historia").
   async function loadHistory() {
     try {
       const data = await api<DiscoveryHistoryItem[]>('/api/discovery/history?limit=50');
       setHistory(data);
-    } catch {
-      /* niekrytyczne - history to nice-to-have */
+      setHistoryError(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Błąd nieznany';
+      console.error('loadHistory failed:', err);
+      setHistoryError(msg);
     }
   }
 
@@ -887,12 +893,34 @@ export default function PozyskiwaniePage() {
                 {history.filter((h) => h.cache_active).length} runów w cache (30 dni) ·
                 pozostałe to historyczne
               </span>
+              <button
+                className="btn-icon"
+                onClick={() => void loadHistory()}
+                aria-label="Odśwież historię"
+                title="Pobierz ponownie z backendu"
+              >
+                <i className="ti ti-refresh" />
+              </button>
               <button className="btn-icon" onClick={() => setShowHistory(false)} aria-label="Zamknij">
                 <i className="ti ti-x" />
               </button>
             </div>
-            {history.length === 0 ? (
-              <div className="history-empty">Brak runów — pierwsze zapytanie pojawi się tutaj.</div>
+            {historyError ? (
+              <div className="history-empty" style={{ color: '#DC2626' }}>
+                <i className="ti ti-alert-triangle" /> Nie udało się pobrać historii: {historyError}
+                <div style={{ fontSize: 11, marginTop: 6, color: '#9CA3AF' }}>
+                  Możliwe: backend jeszcze nie wdrożony, brak tabeli discovery_runs w bazie, błąd 500.
+                  Sprawdź Railway logs backend service.
+                </div>
+              </div>
+            ) : history.length === 0 ? (
+              <div className="history-empty">
+                Brak runów — pierwsze zapytanie pojawi się tutaj.
+                <div style={{ fontSize: 11, marginTop: 6, color: '#9CA3AF' }}>
+                  Historia zapisuje się od momentu wdrożenia Fazy 1 cache (PR #33).
+                  Wcześniejsze peek'i nie były zapisywane.
+                </div>
+              </div>
             ) : (
               <table className="history-table">
                 <thead>
