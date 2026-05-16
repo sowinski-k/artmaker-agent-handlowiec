@@ -41,7 +41,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import case, desc, func, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, load_only
 
 from core.db import (
     DiscoveryExclusion,
@@ -1470,12 +1470,35 @@ def list_leads(
             ((empty_email & empty_phone), 1),
             else_=0,
         )
-        base = select(Lead).where(
+        # load_only: bez tego SELECT * Lead sciaga research_data JSON (czesto
+        # 10-50KB per lead). Lista 50 leadow bez load_only = ~2.5MB w tablicy
+        # ORM-ow + serialize. Bierzemy tylko pola ktore zwracamy do frontu.
+        base = select(Lead).options(
+            load_only(
+                Lead.id, Lead.segment, Lead.company_name, Lead.contact_name,
+                Lead.email, Lead.phone, Lead.website, Lead.city, Lead.status,
+                Lead.score, Lead.created_at,
+            )
+        ).where(
             Lead.workspace_id == cur.workspace_id,
             Lead.deleted_at.is_(None),  # ukryj kosz
         )
         if segment: base = base.where(Lead.segment == segment)
-        if status: base = base.where(Lead.status == status)
+        if status:
+            # 'not_sent' = wirtualny filtr: wszystkie statusy poza wysylkowymi.
+            # Domyslny w UI - user chce pracowac tylko z leadami do akcji.
+            if status == "not_sent":
+                # Tez ukrywamy BLACKLISTED - user chce widziec tylko leady "do
+                # akcji", a zablokowane to manualne hard-skipy. Widoczne pod
+                # filter "Status: blacklisted".
+                base = base.where(Lead.status.notin_([
+                    LeadStatus.SENT.value,
+                    LeadStatus.REPLIED.value,
+                    LeadStatus.BOUNCED.value,
+                    LeadStatus.BLACKLISTED.value,
+                ]))
+            else:
+                base = base.where(Lead.status == status)
         if min_score > 0: base = base.where(Lead.score >= min_score)
         if q and q.strip():
             search = f"%{q.strip()}%"
@@ -1891,6 +1914,80 @@ def bulk_delete_leads(
     }
 
 
+@app.post("/api/leads/{lead_id}/block")
+def block_lead(
+    lead_id: int, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Zablokuj lead - ustaw status=BLACKLISTED.
+
+    Use case: 'pewniaczek z ktorego nic nie bedzie' - user widzi ze firma
+    nie pasuje, klika Zablokuj. Lead znika z domyslnego filtra not_sent.
+    Nie usuwa - lead pozostaje (mozna potem unblock), ale nie pojawia sie
+    w listach do akcji.
+
+    Stany terminalne (SENT/REPLIED/BOUNCED) nadal blokowalne - user moze
+    chciec ukryc nawet wyslany lead z list jak np. odpowiedz byla 'spam'.
+    """
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+                Lead.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead nie istnieje.")
+        if lead.status == LeadStatus.BLACKLISTED.value:
+            return {"ok": True, "lead_id": lead_id, "already_blocked": True}
+        prev_status = lead.status
+        lead.status = LeadStatus.BLACKLISTED.value
+        session.add(Event(
+            workspace_id=cur.workspace_id,
+            user_id=cur.user_id,
+            lead_id=lead.id,
+            type="lead.blocked",
+            level="INFO",
+            source="user",
+            message=f"Lead #{lead_id} ({lead.company_name}) zablokowany (prev={prev_status})",
+            payload={"lead_id": lead_id, "prev_status": prev_status},
+        ))
+        session.commit()
+        return {"ok": True, "lead_id": lead_id, "company": lead.company_name}
+
+
+@app.post("/api/leads/{lead_id}/unblock")
+def unblock_lead(
+    lead_id: int, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Odblokuj lead - przywroc do RESEARCHED (jak ma research_data) lub NEW."""
+    with SessionLocal() as session:
+        lead = session.execute(
+            select(Lead).where(
+                Lead.id == lead_id, Lead.workspace_id == cur.workspace_id,
+                Lead.status == LeadStatus.BLACKLISTED.value,
+            )
+        ).scalar_one_or_none()
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Lead nie jest zablokowany.")
+        new_status = (
+            LeadStatus.RESEARCHED.value if lead.research_data
+            else LeadStatus.NEW.value
+        )
+        lead.status = new_status
+        session.add(Event(
+            workspace_id=cur.workspace_id,
+            user_id=cur.user_id,
+            lead_id=lead.id,
+            type="lead.unblocked",
+            level="INFO",
+            source="user",
+            message=f"Lead #{lead_id} ({lead.company_name}) odblokowany -> {new_status}",
+            payload={"lead_id": lead_id, "new_status": new_status},
+        ))
+        session.commit()
+        return {"ok": True, "lead_id": lead_id, "status": new_status}
+
+
 @app.post("/api/leads/{lead_id}/restore")
 def restore_lead(
     lead_id: int, cur: CurrentUser = Depends(get_current_user),
@@ -2242,8 +2339,14 @@ def bulk_send_drafts(
         raise HTTPException(status_code=400, detail="Max 50 draftow naraz.")
 
     with SessionLocal() as session:
+        # joinedload + load_only: tylko sprawdzamy lead.email (czy lead ma do
+        # kogo wyslac). Bez load_only joinedload ciagnie pelnego Lead-a z
+        # research_data JSON dla kazdego z 50 draftow - moze byc 1-3 MB
+        # niepotrzebnej alokacji.
         drafts = session.execute(
-            select(EmailDraft).options(joinedload(EmailDraft.lead)).where(
+            select(EmailDraft).options(
+                joinedload(EmailDraft.lead).load_only(Lead.id, Lead.email)
+            ).where(
                 EmailDraft.id.in_(payload.draft_ids),
                 EmailDraft.workspace_id == cur.workspace_id,
             )
@@ -3693,9 +3796,16 @@ async def events_stream(
                     .order_by(desc(Event.id)).limit(1)
                 ).scalar_one_or_none()
                 last_event_id = int(last_row or 0)
-                # Wstepny snapshot aktywnych jobow
+                # Wstepny snapshot aktywnych jobow.
+                # load_only: emitujemy tylko id/type/status/progress/total, wiec
+                # ladowanie Job.payload + Job.result (oba JSON, czesto >10KB)
+                # bylo niepotrzebna alokacja per SSE connection.
                 active = session.execute(
-                    select(Job).where(
+                    select(Job).options(
+                        load_only(
+                            Job.id, Job.type, Job.status, Job.progress, Job.total,
+                        )
+                    ).where(
                         Job.workspace_id == ws_id,
                         Job.status.in_(["pending", "running"]),
                     )
@@ -3739,9 +3849,16 @@ async def events_stream(
                             "lead_id": e.lead_id,
                             "created_at": iso_utc(e.created_at),
                         })
-                    # Snapshot biezacych jobow workspace'u
+                    # Snapshot biezacych jobow workspace'u.
+                    # load_only: SSE emituje tylko id/type/status/progress/total
+                    # - nie ma sensu ladowac payload+result (duze JSON, czesto
+                    # setki KB dla autonomous_discovery) co N sekund per klient.
                     current_jobs = session.execute(
-                        select(Job).where(Job.workspace_id == ws_id)
+                        select(Job).options(
+                            load_only(
+                                Job.id, Job.type, Job.status, Job.progress, Job.total,
+                            )
+                        ).where(Job.workspace_id == ws_id)
                         .order_by(desc(Job.id)).limit(20)
                     ).scalars().all()
                     seen_ids = set()
@@ -3794,6 +3911,17 @@ def list_jobs(
     with SessionLocal() as session:
         q = select(Job).where(Job.workspace_id == cur.workspace_id) \
             .order_by(desc(Job.created_at)).limit(limit)
+        # Lite path: load_only zeby SQLAlchemy nie ladowal payload/result JSON
+        # ktore i tak serialize_job(lite=True) dropuje. Frontend pollluje co 8s,
+        # bez tego mielismy ~30 jobow × 50KB JSON = 1.5MB DB read per poll.
+        if lite:
+            q = q.options(
+                load_only(
+                    Job.id, Job.type, Job.status, Job.progress, Job.total,
+                    Job.retries, Job.last_error, Job.created_at, Job.started_at,
+                    Job.completed_at,
+                )
+            )
         if status: q = q.where(Job.status == status)
         jobs = session.execute(q).scalars().all()
         return [serialize_job(j, lite=lite) for j in jobs]
