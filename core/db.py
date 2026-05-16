@@ -372,6 +372,36 @@ class DiscoveryRun(Base):
     run_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class DiscoveryExclusion(Base):
+    """Lista wykluczen per workspace - co nie ma sensu skanowac.
+
+    Typy:
+      'domain'        - znormalizowana domena ktora nigdy nie pasuje
+                        (np. "rossmann.pl" - sieć drogerii, nie nasz target)
+      'brand'         - nazwa marki ktora chcemy auto-skip'owac
+      'city_segment'  - kombinacja (city, segment) gdzie 0 nowych firm
+                        po 2+ runach - oszczedzamy kredyt
+
+    User dodaje recznie z drawera leada ("Wyklucz tę firmę z przyszlych
+    discoveries") albo system auto-dodaje po 2 nieudanych runach
+    (Faza 2.1 - dorobimy potem).
+    """
+    __tablename__ = "discovery_exclusions"
+    __table_args__ = (
+        Index("ix_disco_excl_ws_type", "workspace_id", "exclusion_type"),
+        # Unique zeby nie duplikowac wpisow per (workspace, type, value)
+        Index("ix_disco_excl_unique", "workspace_id", "exclusion_type", "value", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    exclusion_type: Mapped[str] = mapped_column(String(20))  # domain / brand / city_segment
+    value: Mapped[str] = mapped_column(String(255))
+    reason: Mapped[str | None] = mapped_column(Text)  # "sieć Rossmanna", "auto: 0 nowych w 2 runach"
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 # ─── Engine + session ────────────────────────────────────────────────────
 
 # Engine config: dla Postgres - skalowalne defaulty.
@@ -526,6 +556,8 @@ def _migrate_workspace_columns() -> None:
         # Discovery cache + history
         ("ix_discovery_runs_ws_hash_at", "discovery_runs", "(workspace_id, query_hash, run_at)"),
         ("ix_discovery_runs_ws_at", "discovery_runs", "(workspace_id, run_at)"),
+        # Discovery exclusions
+        ("ix_disco_excl_ws_type", "discovery_exclusions", "(workspace_id, exclusion_type)"),
     ]
     idx_added = 0
     for idx_name, table, cols in indexes_to_create:
