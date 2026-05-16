@@ -1028,6 +1028,8 @@ export default function PozyskiwaniePage() {
                 estimated_cost_usd?: number;
                 max_cost_usd?: number;
                 cities_skipped_no_results?: number;
+                cities_from_cache?: number;
+                cities_skipped_all_duplicates?: number;
                 stopped_reason?: string;
                 research_errors_count?: number;
                 last_research_error?: string;
@@ -1107,6 +1109,28 @@ export default function PozyskiwaniePage() {
                         {r.cities_skipped_no_results || 0}
                       </div>
                     </div>
+                    {(r.cities_from_cache || 0) > 0 && (
+                      <div className="as-stat as-stat-cache">
+                        <div className="as-label">Z cache (oszczędność)</div>
+                        <div
+                          className="as-value as-mono"
+                          title="Miasta wziete z cache (DiscoveryRun w ostatnich 30 dniach) - zero kosztu API"
+                        >
+                          {r.cities_from_cache}
+                        </div>
+                      </div>
+                    )}
+                    {(r.cities_skipped_all_duplicates || 0) > 0 && (
+                      <div className="as-stat as-stat-cache">
+                        <div className="as-label">Skip (juz wszystko)</div>
+                        <div
+                          className="as-value as-mono"
+                          title="Miasta gdzie poprzedni run dal 0 nowych leadow (wszystko duplikaty) - skip calkowicie, brak API call"
+                        >
+                          {r.cities_skipped_all_duplicates}
+                        </div>
+                      </div>
+                    )}
                     {(r.research_errors_count || 0) > 0 && (
                       <div className="as-stat as-stat-err">
                         <div className="as-label">Błędy researchu</div>
@@ -2569,6 +2593,14 @@ const CSS = `
   border: 1px solid rgba(220, 38, 38, 0.35);
 }
 .as-stat.as-stat-err .as-value { color: #FECACA; }
+
+/* Stat cache styling - zielonkawe, pokazuje oszczednosc API calls */
+.as-stat.as-stat-cache {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.as-stat.as-stat-cache .as-value { color: #86EFAC; }
+.as-stat.as-stat-cache .as-label { color: #BBF7D0; }
 
 /* Setup error - duzy banner gdy job padl na konfiguracji */
 .as-setup-error {
