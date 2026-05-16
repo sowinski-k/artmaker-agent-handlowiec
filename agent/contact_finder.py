@@ -408,8 +408,22 @@ def enrich_lead_in_db(lead_id: int, *, workspace_id: int | None = None) -> Enric
                 lead.status = LeadStatus.RESEARCHED.value
             log.info(f"Lead #{lead_id} enriched: email={result.email} phone={result.phone}")
         elif not lead.email and not lead.phone:
-            lead.status = LeadStatus.DEAD_END.value
-            log.info(f"Lead #{lead_id} marked DEAD_END (no contacts after enrichment)")
+            # SAFETY: NIE nadpisuj terminalnych stanow (SENT/REPLIED/BOUNCED) -
+            # to historia ktorej re-enrich nie powinien zniszczyc. Tylko leady
+            # ktore jeszcze nie weszly w pipeline kontaktu moga isc na DEAD_END.
+            terminal = {
+                LeadStatus.SENT.value,
+                LeadStatus.REPLIED.value,
+                LeadStatus.BOUNCED.value,
+            }
+            if lead.status not in terminal:
+                lead.status = LeadStatus.DEAD_END.value
+                log.info(f"Lead #{lead_id} marked DEAD_END (no contacts after enrichment)")
+            else:
+                log.info(
+                    f"Lead #{lead_id} brak kontaktow ale status terminalny "
+                    f"({lead.status}) - NIE nadpisuje na DEAD_END"
+                )
 
         session.commit()
         return result
@@ -430,7 +444,11 @@ def find_leads_to_enrich(
     from sqlalchemy import or_, select
     from core.db import Lead, LeadStatus, SessionLocal
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=RECHECK_DAYS)
+    # Postgres TIMESTAMP WITHOUT TIME ZONE porownuje tylko z naive datetime.
+    # Bez .replace(tzinfo=None) crashuje "can't compare offset-naive and aware".
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=RECHECK_DAYS)
+    ).replace(tzinfo=None)
 
     with SessionLocal() as session:
         q = select(Lead.id).where(
