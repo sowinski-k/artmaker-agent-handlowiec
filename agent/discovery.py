@@ -13,7 +13,10 @@ from __future__ import annotations
 import csv
 import io
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor, as_completed,
+    TimeoutError as FuturesTimeoutError,
+)
 from typing import Callable, Iterable, Protocol
 
 import httpx
@@ -926,11 +929,44 @@ def run_search(
             if progress_callback:
                 progress_callback(src.name, "done")
 
+    # Hard timeout per source = 300s (5 min). Bez tego, jak Apify aktor hangs
+    # (DataDome, slow proxy, server crash mid-stream), future.result() wisi w
+    # nieskonczonosc -> caly autonomous_discovery zacieta na pierwszym miescie.
+    # Lepiej zrejekcic source i wziac wyniki innych zrodel niz blokowac job.
+    PER_SOURCE_TIMEOUT_S = 300.0
+
     results: list[SourceResult] = []
     with ThreadPoolExecutor(max_workers=len(sources)) as executor:
         futures = {executor.submit(_run_one, s): s for s in sources}
-        for future in as_completed(futures):
-            results.append(future.result())
+        try:
+            for future in as_completed(futures, timeout=PER_SOURCE_TIMEOUT_S * 2):
+                src = futures[future]
+                try:
+                    results.append(future.result(timeout=1.0))
+                except Exception as exc:
+                    results.append(SourceResult(
+                        source=src.name,
+                        error=f"source timeout/crash: {exc}",
+                        duration_s=PER_SOURCE_TIMEOUT_S,
+                    ))
+        except FuturesTimeoutError:
+            # Co najmniej jedno source przekroczylo timeout. Zbieramy co mamy.
+            for future, src in futures.items():
+                if future.done():
+                    try:
+                        results.append(future.result(timeout=0.5))
+                    except Exception as exc:
+                        results.append(SourceResult(
+                            source=src.name, error=str(exc),
+                            duration_s=PER_SOURCE_TIMEOUT_S,
+                        ))
+                else:
+                    future.cancel()
+                    results.append(SourceResult(
+                        source=src.name,
+                        error=f"source timeout > {PER_SOURCE_TIMEOUT_S}s",
+                        duration_s=PER_SOURCE_TIMEOUT_S,
+                    ))
 
     seen: dict[str, DiscoveredPlace] = {}
     for r in results:
