@@ -2440,6 +2440,12 @@ class DiscoverIn(BaseModel):
     # w ostatnich CACHE_TTL_DAYS - serwujemy z bazy zamiast palac kredytu.
     # force_refresh=True omija cache - drogi, ale czasem chcesz odswiezyc.
     force_refresh: bool = False
+    # Query expansion: zamiast jednego query "sklep papierniczy Warszawa" wyslij
+    # serie wariantow (synonimy + dzielnice) zeby ominac limit 60/query. Kazdy
+    # wariant ma osobny cache key. Default OFF bo drogi (do 30 calli per peek).
+    expand_queries: bool = False
+    # Max wariantow przy expand_queries=True. Cap zeby user nie spalil budzetu.
+    expand_max_variants: int = 30
 
 
 def _discovery_today_count(workspace_id: int) -> int:
@@ -2507,6 +2513,192 @@ def _find_cached_discovery(
             DiscoveryRun.cached_places.isnot(None),
         ).order_by(DiscoveryRun.run_at.desc()).limit(1)
     ).scalar_one_or_none()
+
+
+def _run_expanded_discovery(
+    payload: "DiscoverIn",
+    cur: "CurrentUser",
+    sources_objs: list,
+) -> dict[str, Any]:
+    """Faza 1.5 - Query Expansion: omija limit 60 wynikow per API.
+
+    Dla (segment, location) generuje N wariacji (synonimy + dzielnice),
+    kazda variantka leci osobnym run_search + ma swoj cache key. Wyniki
+    dedupowane po normalize_url(website) - 5-8x wiecej unikalnych firm
+    niz pojedyncze query.
+
+    Cache dziala per variant - druga ta sama variantka w 30 dni = 0 kredytu.
+
+    Paralelizm: ThreadPoolExecutor(max_workers=5) bo Apify/Places maja
+    rate limits. Timeout per variant 60s.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from core.query_expansion import expand_query
+    from core.urls import normalize_url
+    from agent.discovery import (
+        DiscoveredPlace, mark_existing_in_db, run_search, score_relevance_batch,
+        _heuristic_score,
+    )
+
+    variants = expand_query(
+        payload.segment, payload.location,
+        max_variants=payload.expand_max_variants,
+    )
+    if not variants:
+        # Fallback: no expansion possible (np. preset bez synonimow), zwroc
+        # pusto - caller (discovery_peek) zlapie i pojdzie standardowa drogo
+        return {"_no_expansion": True}
+
+    log.info(
+        f"discovery expand: {len(variants)} wariantow dla "
+        f"segment={payload.segment!r} location={payload.location!r}"
+    )
+
+    stats = {"cache_hits": 0, "api_calls": 0, "errors": 0}
+
+    def _process_variant(query: str, location: str | None) -> list[DiscoveredPlace]:
+        """Pojedyncza variantka: cache check -> run_search -> cache write."""
+        v_hash = _discovery_query_hash(
+            payload.segment, location, payload.sources,
+            payload.custom_description,
+        )
+        # Cache lookup per variant
+        if not payload.force_refresh:
+            with SessionLocal() as session:
+                cached = _find_cached_discovery(session, cur.workspace_id, v_hash)
+                if cached is not None:
+                    stats["cache_hits"] += 1
+                    try:
+                        return [
+                            DiscoveredPlace(**p)
+                            for p in (cached.cached_places or [])
+                        ]
+                    except Exception:
+                        return []
+        # Cache miss - fire API
+        try:
+            places, _diag = run_search(
+                sources_objs,
+                query=query,
+                max_results_per_source=payload.max_per_source,
+                workspace_id=cur.workspace_id,
+                source_queries=payload.source_queries,
+            )
+            stats["api_calls"] += 1
+            # Cache write
+            try:
+                with SessionLocal() as session:
+                    session.add(DiscoveryRun(
+                        workspace_id=cur.workspace_id, user_id=cur.user_id,
+                        query_hash=v_hash, segment=payload.segment,
+                        location=location, sources=payload.sources,
+                        query=query, custom_description=payload.custom_description,
+                        cached_places=[p.model_dump() for p in places],
+                        result_count=len(places),
+                    ))
+                    session.commit()
+            except Exception:
+                pass  # cache write best-effort
+            return places
+        except Exception as exc:
+            log.warning(f"expand variant failed for query={query!r}: {exc}")
+            stats["errors"] += 1
+            return []
+
+    # Wykonaj wszystkie wariacje paralelnie
+    all_places: list[DiscoveredPlace] = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [
+            executor.submit(_process_variant, q, loc)
+            for q, loc in variants
+        ]
+        for future in futures:
+            try:
+                all_places.extend(future.result(timeout=60))
+            except Exception:
+                stats["errors"] += 1
+
+    # Dedup po normalize_url(website) - tylko unique firmy
+    seen: dict[str, DiscoveredPlace] = {}
+    for p in all_places:
+        key = normalize_url(p.website or "") or f"{p.source}:{p.raw_id or p.name}"
+        if key in seen:
+            existing = seen[key]
+            if not existing.website and p.website:
+                seen[key] = p
+            elif (p.review_count or 0) > (existing.review_count or 0):
+                seen[key] = p
+        else:
+            seen[key] = p
+    deduped = list(seen.values())
+
+    # Mark istniejace leady (existing_lead_id) zeby user wiedzial co duplikat
+    mark_existing_in_db(deduped, workspace_id=cur.workspace_id)
+
+    # LLM relevance scoring na mergowanej liscie
+    rel_map: dict[int, dict[str, Any]] = {}
+    relevance_source = "none"
+    if payload.use_relevance_filter and deduped:
+        try:
+            items, _ = score_relevance_batch(
+                deduped, segment=payload.segment,
+                city=payload.location,
+                custom_description=payload.custom_description,
+            )
+            for it in items:
+                if 0 <= it.idx < len(deduped):
+                    rel_map[it.idx] = {"score": it.score, "reason": it.reason}
+            relevance_source = "llm"
+        except Exception as exc:
+            log.warning(f"expand: relevance batch failed, falling back: {exc}")
+            for i, p in enumerate(deduped):
+                if p.existing_lead_id is not None:
+                    score_int = (
+                        int(round(p.existing_lead_score))
+                        if p.existing_lead_score is not None else 5
+                    )
+                    rel_map[i] = {
+                        "score": max(0, min(10, score_int)),
+                        "reason": f"Duplikat - juz w bazie jako lead #{p.existing_lead_id}",
+                    }
+                else:
+                    score, reason = _heuristic_score(p)
+                    rel_map[i] = {"score": score, "reason": reason}
+            relevance_source = "heuristic"
+
+    return {
+        "places": [{
+            "source": p.source, "name": p.name, "website": p.website,
+            "address": p.address, "phone": p.phone, "email": p.email,
+            "rating": p.rating, "review_count": p.review_count,
+            "existing_lead_id": p.existing_lead_id,
+            "existing_lead_score": p.existing_lead_score,
+            "relevance": rel_map.get(i),
+        } for i, p in enumerate(deduped)],
+        "diagnostics": [{
+            "source": "expanded",
+            "places": [],
+            "duration_s": 0,
+            "note": (
+                f"Expansion: {len(variants)} wariantow, "
+                f"{stats['cache_hits']} cache hit, "
+                f"{stats['api_calls']} API call, "
+                f"{stats['errors']} error, "
+                f"{len(all_places)} przed dedupem, "
+                f"{len(deduped)} po dedupie"
+            ),
+        }],
+        "relevance_source": relevance_source,
+        "from_cache": False,
+        "expand_stats": {
+            "variants_total": len(variants),
+            "cache_hits": stats["cache_hits"],
+            "api_calls": stats["api_calls"],
+            "errors": stats["errors"],
+            "places_before_dedup": len(all_places),
+            "places_after_dedup": len(deduped),
+        },
+    }
 
 
 @app.post("/api/discovery/peek")
@@ -2609,6 +2801,17 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
             status_code=400,
             detail="Żadne źródło nie jest skonfigurowane (brak kluczy API).",
         )
+
+    # Faza 1.5: Query Expansion - omija limit 60/query przez wariacje
+    # (synonimy + dzielnice). Per variant osobny cache key. Paralelnie.
+    if payload.expand_queries:
+        expanded = _run_expanded_discovery(payload, cur, sources)
+        if not expanded.get("_no_expansion"):
+            # Add daily counter info ktore expand sam nie wraca
+            expanded["daily_used"] = today_done
+            expanded["daily_cap"] = DISCOVERY_DAILY_CAP_FREE
+            return expanded
+        # Else: no variants generated, fall through to standard single-query flow
 
     try:
         places, diag = run_search(
