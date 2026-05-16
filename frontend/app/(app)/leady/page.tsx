@@ -1452,6 +1452,24 @@ export default function LeadyPage() {
                 {detail.research_data && (
                   <>
                     <h3 className="section-h">Research</h3>
+                    {/* Fallback banner: lead zapisany z Google Places bo research padl.
+                        Pokazujemy reason + sugestia "Re-research lead" ponizej. */}
+                    {(detail.research_data as { fallback?: boolean }).fallback === true && (
+                      <div className="fallback-banner">
+                        <div className="fb-head">
+                          <i className="ti ti-alert-circle" />
+                          <strong>Lead zapisany z Google Places (research strony padł)</strong>
+                        </div>
+                        <div className="fb-body">
+                          {(detail.research_data as { error?: string }).error || 'Brak szczegółów błędu'}
+                        </div>
+                        <div className="fb-hint">
+                          Score {detail.score?.toFixed(1) || '?'}/10 = ocena LLM z filtru trafności (Google Places matchował segment).
+                          Kliknij <strong>Re-research lead</strong> niżej żeby spróbować pobrać dane ze strony jeszcze raz
+                          (np. gdy strona wróciła z padu albo zdjęli CloudFlare).
+                        </div>
+                      </div>
+                    )}
                     {(detail.research_data as { rationale?: string }).rationale && (
                       <p style={{ fontSize: 13, color: '#374151', marginBottom: 12 }}>
                         {(detail.research_data as { rationale: string }).rationale}
@@ -2375,6 +2393,32 @@ table.tbl .row-check input[type="checkbox"] {
 
 /* Warning box dla research warning_flags */
 .warn-box { background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #9A3412; margin-bottom: 12px; }
+
+/* Fallback banner - lead zapisany z Places API bo research padl */
+.fallback-banner {
+  background: #FEF3C7;
+  border: 1px solid #FBBF24;
+  border-radius: 7px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+  color: #78350F;
+}
+.fb-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.fb-head i { color: #B45309; font-size: 16px; }
+.fb-head strong { color: #92400E; font-size: 13px; }
+.fb-body {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  background: rgba(0,0,0,0.04);
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  word-break: break-word;
+  color: #78350F;
+}
+.fb-hint { line-height: 1.45; color: #78350F; }
+.fb-hint strong { color: #1C1C1C; }
 
 .mono { font-family: 'JetBrains Mono', monospace; }
 
