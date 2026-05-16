@@ -1283,14 +1283,37 @@ def score_relevance_batch(
         "Pisz reason po polsku, jedno krótkie zdanie. Zwróć WSZYSTKIE indeksy."
     )
 
-    parsed, usage = parse_structured(
-        system=system,
-        user=user,
-        output_schema=RelevanceBatch,
-        provider=provider,
-        model=model,
-        max_tokens=4096,
-    )
+    # max_tokens=8192: dla 50 kandydatow z reasonem ~80-100 znakow PL output
+    # potrafi miec 5-6K tokenow. 4096 powodowal truncated JSON i ValidationError
+    # ("EOF while parsing a string"). 8192 daje bufor + tani na Gemini Flash Lite.
+    try:
+        parsed, usage = parse_structured(
+            system=system,
+            user=user,
+            output_schema=RelevanceBatch,
+            provider=provider,
+            model=model,
+            max_tokens=8192,
+        )
+    except Exception as exc:
+        # LLM zwrocil ucięty/niepoprawny JSON. Zamiast crashowac caly worker job,
+        # ozanaczamy wszystkich fresh kandydatow neutralnym score=5 - przebrnie
+        # przez threshold tylko 6+, a user widzi reason i moze recznie zweryfikowac.
+        # Logujemy zeby bylo widac w obserwability.
+        from core.logger import logger as _logger
+        _logger.bind(source="relevance").warning(
+            f"score_relevance_batch parse failed ({type(exc).__name__}): {exc}. "
+            f"Fallback: score=5 dla {len(fresh_indices)} kandydatow."
+        )
+        fallback_items = [
+            RelevanceItem(
+                idx=orig_idx,
+                score=5,
+                reason="LLM nie zwrocil poprawnego JSON - manualna weryfikacja",
+            )
+            for orig_idx in fresh_indices
+        ]
+        return fallback_items + prefilter_items, {}
 
     # Remap indeksy z lokalnych (LLM widział tylko fresh) na oryginalne
     remapped = [

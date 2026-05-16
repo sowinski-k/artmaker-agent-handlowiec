@@ -899,34 +899,75 @@ def workspace_overview(cur: CurrentUser = Depends(get_current_user)) -> dict[str
     }
 
 
+def _range_cutoff(range_: str | None) -> datetime | None:
+    """Mapowanie 24h/7d/30d/90d/ytd/all -> cutoff datetime (NAIVE UTC).
+
+    None = bez filtra (all-time). Postgres TIMESTAMP WITHOUT TIME ZONE
+    porownuje z naive, wiec uzywamy naive cutoff dla portability.
+    """
+    if not range_ or range_ == "all":
+        return None
+    now = datetime.utcnow()
+    if range_ == "24h":
+        return now - timedelta(days=1)
+    if range_ == "7d":
+        return now - timedelta(days=7)
+    if range_ == "30d":
+        return now - timedelta(days=30)
+    if range_ == "90d":
+        return now - timedelta(days=90)
+    if range_ == "ytd":
+        return datetime(now.year, 1, 1)
+    return None
+
+
 @app.get("/api/dashboard")
-def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+def get_dashboard(
+    range: str = "30d",
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
     """Handlowiec -> Pulpit. Module-specific dashboard cold-mail.
+
+    `range` filtruje counts po `created_at >= cutoff` (24h|7d|30d|90d|ytd|all).
+    Domyslnie 30d zeby user widzial "ostatni miesiac aktywnosci".
 
     Każda sekcja w try/except - empty workspace = wszystkie zera, nigdy 500.
     """
     ws_id = cur.workspace_id
+    cutoff = _range_cutoff(range)
 
     def _counts():
         with SessionLocal() as session:
             # Wszystkie KPI dashboardu wykluczaja leady w koszu - jak user
             # usunie 100 staruszek, dashboard pokazuje rzeczywisty stan.
-            def cnt(*conds): return int(session.scalar(
-                select(func.count(Lead.id)).where(
+            # Period filter: created_at >= cutoff (jak ustawione).
+            def cnt(*conds):
+                lead_conds: list[Any] = [
                     Lead.workspace_id == ws_id,
                     Lead.deleted_at.is_(None),
                     *conds,
-                )
-            ) or 0)
-            def cnt_d(*conds): return int(session.scalar(
-                select(func.count(EmailDraft.id)).where(EmailDraft.workspace_id == ws_id, *conds)
-            ) or 0)
+                ]
+                if cutoff is not None:
+                    lead_conds.append(Lead.created_at >= cutoff)
+                return int(session.scalar(
+                    select(func.count(Lead.id)).where(*lead_conds)
+                ) or 0)
+            def cnt_d(*conds):
+                d_conds: list[Any] = [EmailDraft.workspace_id == ws_id, *conds]
+                if cutoff is not None:
+                    d_conds.append(EmailDraft.created_at >= cutoff)
+                return int(session.scalar(
+                    select(func.count(EmailDraft.id)).where(*d_conds)
+                ) or 0)
 
+            avg_filters: list[Any] = [
+                Lead.workspace_id == ws_id,
+                Lead.deleted_at.is_(None),
+            ]
+            if cutoff is not None:
+                avg_filters.append(Lead.created_at >= cutoff)
             avg_q = session.scalar(
-                select(func.avg(Lead.score)).where(
-                    Lead.workspace_id == ws_id,
-                    Lead.deleted_at.is_(None),
-                )
+                select(func.avg(Lead.score)).where(*avg_filters)
             )
 
             return {
@@ -942,6 +983,7 @@ def get_dashboard(cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any
                 "sent_total": cnt_d(EmailDraft.status == DraftStatus.SENT.value),
                 "avg_score": float(avg_q) if avg_q is not None else 0.0,
                 "hot_leads": cnt(Lead.score >= 7.0),
+                "range": range,
             }
 
     c = _safe(_counts, {
@@ -2021,47 +2063,27 @@ def list_drafts(
         draft_ids = [d.id for d in drafts]
 
         # Status SEND_DRAFT jobow dla tych draftow - kolejka i ostatni blad.
-        # Worker triggeruje push_draft() ktore moze sie wywalic (DRY_RUN, brak
-        # WOODPECKER_API_KEY, lead bez emaila, STOP.txt). Pokazujemy to userowi.
-        # Optymalizacja: zamiast ladowac 500 ostatnich SEND_DRAFT jobow i
-        # filtrowac w Pythonie, queryujemy tylko PENDING/RUNNING + FAILED dla
-        # widocznych draftow. Postgres jsonb query: payload->>'draft_id' in
-        # str_ids. Dla SQLite (dev) fallback do prostego filter w Pythonie.
+        # Bezpieczne zapytanie portable Postgres+SQLite: filtr po workspace+type+
+        # status (PENDING/RUNNING/FAILED). Bez jsonb predykatow zeby uniknac
+        # roznic miedzy JSON vs JSONB. Wynik filtrowany Pythonem do draft_ids.
+        # Limit zapobiega ladowaniu calego archiwum failed jobow.
         last_send_error: dict[int, str] = {}
         send_in_progress: set[int] = set()
         if draft_ids:
-            dialect = session.get_bind().dialect.name
-            if dialect == "postgresql":
-                # Postgres: jsonb operator pozwala dac WHERE w SQL
-                from sqlalchemy import cast, Integer as SAInt
-                str_ids = [str(i) for i in draft_ids]
-                send_jobs = session.execute(
-                    select(Job).where(
-                        Job.workspace_id == cur.workspace_id,
-                        Job.type == JobType.SEND_DRAFT.value,
-                        Job.status.in_([
-                            JobStatus.PENDING.value, JobStatus.RUNNING.value,
-                            JobStatus.FAILED.value,
-                        ]),
-                        Job.payload["draft_id"].astext.in_(str_ids),
-                    ).order_by(desc(Job.created_at))
-                ).scalars().all()
-            else:
-                # SQLite fallback (dev): bez jsonb operatorow, filter Pythonem
-                # ale tylko dla active+failed (mniejsza pula niz limit 500)
-                send_jobs = session.execute(
-                    select(Job).where(
-                        Job.workspace_id == cur.workspace_id,
-                        Job.type == JobType.SEND_DRAFT.value,
-                        Job.status.in_([
-                            JobStatus.PENDING.value, JobStatus.RUNNING.value,
-                            JobStatus.FAILED.value,
-                        ]),
-                    ).order_by(desc(Job.created_at)).limit(500)
-                ).scalars().all()
+            send_jobs = session.execute(
+                select(Job).where(
+                    Job.workspace_id == cur.workspace_id,
+                    Job.type == JobType.SEND_DRAFT.value,
+                    Job.status.in_([
+                        JobStatus.PENDING.value, JobStatus.RUNNING.value,
+                        JobStatus.FAILED.value,
+                    ]),
+                ).order_by(desc(Job.created_at)).limit(500)
+            ).scalars().all()
+            draft_id_set = set(draft_ids)
             for j in send_jobs:
                 did = j.payload.get("draft_id") if isinstance(j.payload, dict) else None
-                if not isinstance(did, int) or did not in draft_ids:
+                if not isinstance(did, int) or did not in draft_id_set:
                     continue
                 if j.status in (JobStatus.PENDING.value, JobStatus.RUNNING.value):
                     send_in_progress.add(did)

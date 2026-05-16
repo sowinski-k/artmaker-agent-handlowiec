@@ -74,6 +74,9 @@ export default function PulpitPage() {
   const [events, setEvents] = useState<ActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Period filter dla statystyk: 24h | 7d | 30d | 90d | ytd | all
+  const [range, setRange] = useState<'24h' | '7d' | '30d' | '90d' | 'ytd' | 'all'>('30d');
+  const [rangeLoading, setRangeLoading] = useState(false);
 
   useEffect(() => {
     // Auth gate - bez tokena redirect na login
@@ -82,20 +85,26 @@ export default function PulpitPage() {
       return;
     }
 
+    const initial = !data;
+    if (initial) setLoading(true); else setRangeLoading(true);
+
     Promise.all([
-      api<DashboardData>('/api/dashboard'),
+      api<DashboardData>(`/api/dashboard?range=${range}`),
       api<ActivityItem[]>('/api/events?limit=8').catch(() => []),
     ])
       .then(([d, e]) => {
         setData(d);
         setEvents(e);
         setLoading(false);
+        setRangeLoading(false);
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : 'Błąd pobierania danych');
         setLoading(false);
+        setRangeLoading(false);
       });
-  }, [router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router, range]);
 
   if (loading) {
     return <Loading />;
@@ -140,12 +149,18 @@ export default function PulpitPage() {
             <h1>Pulpit Handlowca</h1>
             <p>Cold-mail · leady · drafty <span className="mono">·</span> <span className="last-update">aktualizacja właśnie</span></p>
           </div>
-          <div className="timerange">
-            <button>24h</button>
-            <button>7d</button>
-            <button className="active">30d</button>
-            <button>90d</button>
-            <button>YTD</button>
+          <div className="timerange" aria-busy={rangeLoading}>
+            {(['24h','7d','30d','90d','ytd'] as const).map((r) => (
+              <button
+                key={r}
+                type="button"
+                className={range === r ? 'active' : ''}
+                onClick={() => setRange(r)}
+                disabled={rangeLoading && range !== r}
+              >
+                {r === 'ytd' ? 'YTD' : r}
+              </button>
+            ))}
           </div>
         </div>
 
