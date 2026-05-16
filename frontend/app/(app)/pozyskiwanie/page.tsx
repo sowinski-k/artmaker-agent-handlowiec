@@ -6,10 +6,13 @@
  *     - /api/research/bulk -> BULK_RESEARCH_LEADS job -> worker
  *     - frontend polluje /api/jobs/{id}, pokazuje progress
  *
- *  2) Wyślij agenta w teren (full async)
- *     - /api/discovery/search -> DISCOVERY_PIPELINE job (znajdź + research + draft)
- *     - frontend polluje, user moze zamknac przegladarke
- *     - agent leci do skutku
+ *  2) Autonomous (cel + budzet, top miasta PL sam)
+ *     - /api/discovery/autonomous -> AUTONOMOUS_DISCOVERY job
+ *     - multi-segment chipy + bezposrednio do worker'a
+ *     - user widzi live panel z hero "SEGMENT -> MIASTO"
+ *
+ * Stary tryb "Wyslij agenta w teren" (single-query discovery_pipeline)
+ * usuniety - autonomous przejal funkcjonalnosc z wieksza widocznoscia.
  */
 
 'use client';
@@ -177,7 +180,9 @@ const POLSKA_LOCATIONS = [
   'Płock', 'Elbląg', 'Wałbrzych',
 ];
 
-type Mode = 'manual' | 'agent' | 'autonomous';
+// 'agent' (Wyslij agenta w teren) usuniety - duplikowal funkcjonalnosc
+// autonomous z mniejszymi mozliwosciami. Mniej kodu = mniej miejsc na buga.
+type Mode = 'manual' | 'autonomous';
 type Flash = { kind: 'success' | 'error' | 'info'; text: string };
 
 export default function PozyskiwaniePage() {
@@ -694,46 +699,6 @@ export default function PozyskiwaniePage() {
     }
   }
 
-  async function handleSendAgent(e: React.FormEvent) {
-    e.preventDefault();
-    if (selectedSources.length === 0) {
-      setFlash({ kind: 'error', text: 'Wybierz przynajmniej jedno źródło danych.' });
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await api<{ job_id: number; daily_used: number; daily_cap: number }>(
-        '/api/discovery/search', {
-        method: 'POST',
-        body: JSON.stringify({
-          query: buildQuery(),
-          sources: selectedSources,
-          source_queries: buildSourceQueries(),
-          max_per_source: maxPerSource,
-          segment,
-          location: location.trim() || null,
-          custom_description: customTarget.trim() || null,
-          use_relevance_filter: true,
-          relevance_threshold: relevanceThreshold,
-          auto_research: true,
-          auto_draft_threshold: autoDraft ? 7 : null,
-        }),
-      });
-      setActiveJob({
-        id: res.job_id, type: 'discovery_pipeline',
-        status: 'pending', progress: 0, total: 0,
-        result: null, last_error: null,
-        created_at: new Date().toISOString(),
-        started_at: null, completed_at: null,
-      });
-      startJobPolling(res.job_id);
-    } catch (err) {
-      await handleJobConflict(err, 'Błąd uruchomienia agenta');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function cancelJob() {
     if (!activeJob) return;
     try {
@@ -751,11 +716,8 @@ export default function PozyskiwaniePage() {
 
   const jobActive = activeJob && (activeJob.status === 'pending' || activeJob.status === 'running');
   // Peek (mode='manual') jest synchroniczny - nigdy nie blokowany przez aktywne joby.
-  // Tylko mode='agent' tworzy job DISCOVERY_PIPELINE wiec disable'ujemy go jak
-  // taki job juz dziala (zeby user nie spamowal tego samego query).
-  const submitButtonDisabled = mode === 'agent'
-    ? (!!jobActive && activeJob?.type === 'discovery_pipeline') || selectedSources.length === 0
-    : selectedSources.length === 0;
+  // Autonomous ma osobny button, ten dotyczy tylko manual.
+  const submitButtonDisabled = selectedSources.length === 0;
   // Research button (na zaznaczonych peek results) - tworzy BULK_RESEARCH_LEADS.
   // Blokujemy tylko jak juz leci research (nie discovery!).
   const researchButtonBlockedByJob = !!jobActive && activeJob?.type === 'bulk_research_leads';
@@ -981,8 +943,9 @@ export default function PozyskiwaniePage() {
           </div>
         )}
 
-        {/* MODE TOGGLE */}
-        <div className="mode-tabs mode-tabs-3">
+        {/* MODE TOGGLE - 2 tryby: manual (recznie wybieram firmy) +
+            autonomous (cel + budzet, agent leci sam) */}
+        <div className="mode-tabs">
           <button
             className={`mode-tab ${mode === 'manual' ? 'active' : ''}`}
             onClick={() => setMode('manual')}>
@@ -990,15 +953,6 @@ export default function PozyskiwaniePage() {
             <div className="mode-tab-text">
               <div className="mode-tab-name">Praca ręczna</div>
               <div className="mode-tab-desc">Zobacz listę, wybierz co researchować. Pojedyncze + bulk top miast.</div>
-            </div>
-          </button>
-          <button
-            className={`mode-tab ${mode === 'agent' ? 'active' : ''}`}
-            onClick={() => setMode('agent')}>
-            <div className="mode-tab-icon"><i className="ti ti-truck-delivery" /></div>
-            <div className="mode-tab-text">
-              <div className="mode-tab-name">Wyślij agenta w teren</div>
-              <div className="mode-tab-desc">Pojedyncze query - agent sam znajdzie, zrobi research, drafty.</div>
             </div>
           </button>
           <button
@@ -1279,54 +1233,61 @@ export default function PozyskiwaniePage() {
           <form
             onSubmit={
               mode === 'manual' ? handlePeek
-                : mode === 'agent' ? handleSendAgent
                 : (e) => e.preventDefault()  // autonomous uzywa type=button, no submit
             }
             className="card-body">
-            <div className="form-row">
-              <div className="field">
-                <label>Segment</label>
-                <select value={segment} onChange={(e) => setSegment(e.target.value)}>
-                  {SEGMENTS.map((s) => (
-                    <option key={s} value={s}>
-                      {SEGMENT_INFO[s]?.label || s}
-                    </option>
-                  ))}
-                </select>
-                <span className="field-hint">
-                  {SEGMENT_INFO[segment]?.desc || ''}
-                </span>
-              </div>
-              <div className="field">
-                <label>Lokalizacja (miasto / województwo)</label>
-                <input
-                  type="text"
-                  value={location}
-                  onChange={(e) => setLocation(e.target.value)}
-                  placeholder="np. Warszawa, Mazowieckie"
-                  list="pl-locations"
-                />
-                <datalist id="pl-locations">
-                  {POLSKA_LOCATIONS.map((loc) => (
-                    <option key={loc} value={loc} />
-                  ))}
-                </datalist>
-                <span className="field-hint">
-                  Wpisz miasto albo wybierz z listy 16 województw + top miast PL.
-                </span>
-              </div>
-              <div className="field" style={{ maxWidth: 200 }}>
-                <label>Max / źródło</label>
-                <input type="number" value={maxPerSource} min={1} max={100}
-                  onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 50)} />
-                <span className="field-hint">
-                  Twarde limity API: Google Places 60, Apify Maps 50, Allegro 100, LinkedIn 50.
-                </span>
-              </div>
-            </div>
+            {/* Manual: pojedyncze query - user wybiera segment + miasto.
+                Autonomous: hide te pola (multi-segment chipy + auto top miasta). */}
+            {mode === 'manual' && (
+              <>
+                <div className="form-row">
+                  <div className="field">
+                    <label>Segment</label>
+                    <select value={segment} onChange={(e) => setSegment(e.target.value)}>
+                      {SEGMENTS.map((s) => (
+                        <option key={s} value={s}>
+                          {SEGMENT_INFO[s]?.label || s}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="field-hint">
+                      {SEGMENT_INFO[segment]?.desc || ''}
+                    </span>
+                  </div>
+                  <div className="field">
+                    <label>Lokalizacja (miasto / województwo)</label>
+                    <input
+                      type="text"
+                      value={location}
+                      onChange={(e) => setLocation(e.target.value)}
+                      placeholder="np. Warszawa, Mazowieckie"
+                      list="pl-locations"
+                    />
+                    <datalist id="pl-locations">
+                      {POLSKA_LOCATIONS.map((loc) => (
+                        <option key={loc} value={loc} />
+                      ))}
+                    </datalist>
+                    <span className="field-hint">
+                      Wpisz miasto albo wybierz z listy 16 województw + top miast PL.
+                    </span>
+                  </div>
+                  <div className="field" style={{ maxWidth: 200 }}>
+                    <label>Max / źródło</label>
+                    <input type="number" value={maxPerSource} min={1} max={100}
+                      onChange={(e) => setMaxPerSource(parseInt(e.target.value) || 50)} />
+                    <span className="field-hint">
+                      Twarde limity API: Google Places 60, Apify Maps 50, Allegro 100, LinkedIn 50.
+                    </span>
+                  </div>
+                </div>
+              </>
+            )}
 
+            {/* Custom target - dla obu trybow. W autonomous nadpisuje segments chipy
+                w prompcie LLM relevance (jak user da target free-text). */}
             <div className="field">
-              <label>Własny opis targetu <span style={{ fontWeight: 400, color: '#9CA3AF' }}>(opcjonalny, nadpisuje segment)</span></label>
+              <label>Własny opis targetu <span style={{ fontWeight: 400, color: '#9CA3AF' }}>(opcjonalny{mode === 'manual' ? ', nadpisuje segment' : ''})</span></label>
               <textarea value={customTarget} onChange={(e) => setCustomTarget(e.target.value)}
                 placeholder="np. 'producenci sztalug i ram do obrazów', 'paint&sip studia z winem'"
                 rows={2} />
@@ -1370,8 +1331,10 @@ export default function PozyskiwaniePage() {
               </div>
             </div>
 
-            {/* Allegro mode panel - widoczny tylko gdy 'apify_allegro' zaznaczone */}
-            {selectedSources.includes('apify_allegro') && (
+            {/* Allegro mode panel - widoczny tylko w manual + gdy 'apify_allegro'
+                zaznaczone. Autonomous nie korzysta z keyword/category modes,
+                tylko przerabia top miasta z presetem segmentowym. */}
+            {mode === 'manual' && selectedSources.includes('apify_allegro') && (
               <div className="field allegro-panel">
                 <label>
                   <i className="ti ti-shopping-cart" /> Allegro - tryb wyszukiwania
@@ -1667,9 +1630,7 @@ export default function PozyskiwaniePage() {
                   ) : (
                     <button type="submit" className="btn btn-primary btn-cta"
                       disabled={submitButtonDisabled}>
-                      {mode === 'manual'
-                        ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
-                        : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
+                      <i className="ti ti-search" /> Zajrzyj na rynek
                     </button>
                   )}
                   {mode === 'manual' && (
@@ -1916,22 +1877,6 @@ export default function PozyskiwaniePage() {
           </div>
         )}
 
-        {/* AGENT MODE EXPLAINER (no results yet) */}
-        {mode === 'agent' && !activeJob && (
-          <div className="explainer">
-            <div className="explainer-head">
-              <i className="ti ti-info-circle" /> Jak działa patrol agenta
-            </div>
-            <ol className="explainer-list">
-              <li>Klikasz "Wyślij agenta w teren" - powstaje zadanie w kolejce.</li>
-              <li>Worker (osobny serwer) zaczyna pracę: znajduje firmy w wybranych źródłach.</li>
-              <li>LLM filtruje trafność (próg &ge; {relevanceThreshold}) - odpada szum z Google Maps.</li>
-              <li>Dla każdej trafnej firmy: scraping strony + research LLM + scoring 0-10.</li>
-              <li>{autoDraft ? 'Score ≥ 7 → wygenerowany draft maila gotowy do approve.' : 'Drafty NIE są generowane (włącz checkbox jeśli chcesz).'}</li>
-              <li>Możesz wylogować się / zamknąć przeglądarkę. Patrol leci do końca.</li>
-            </ol>
-          </div>
-        )}
       </div>
     </>
   );
@@ -2095,12 +2040,8 @@ const CSS = `
 }
 .btn-cta-bulk .ti-loader { animation: spin 1.2s linear infinite; }
 
-/* Mode tabs - 3 kolumny gdy mamy autonomous mode */
-.mode-tabs-3 {
-  grid-template-columns: 1fr 1fr 1fr !important;
-}
 @media (max-width: 800px) {
-  .mode-tabs-3 { grid-template-columns: 1fr !important; }
+  .mode-tabs { grid-template-columns: 1fr !important; }
 }
 
 /* Autonomous mode controls - target + budget inputy */

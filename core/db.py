@@ -232,8 +232,12 @@ class Event(Base):
     # lead_id - dla szybkiego timeline per-lead (klik na lead -> historia).
     # Bez tej kolumny trzeba bylo szukac po payload JSON co jest wolne na
     # Postgres bez funkcjonalnego indeksu.
+    # ondelete=SET NULL: lead permanent delete (kosz auto-purge LUB user permanent)
+    # nie moze rzucac IntegrityError bo eventy istnieja. Stare Eventy pozostaja
+    # w timeline workspace (workspace_id ich nadal trzyma), tylko trace do leada
+    # gubia - lead i tak zniknal.
     lead_id: Mapped[int | None] = mapped_column(
-        ForeignKey("leads.id"), nullable=True, index=True,
+        ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     type: Mapped[str] = mapped_column(String(100), index=True)
     level: Mapped[str] = mapped_column(String(20), default="INFO", index=True)
