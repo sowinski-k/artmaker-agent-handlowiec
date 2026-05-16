@@ -108,6 +108,43 @@ class TestAllegromailFiltering:
         assert place.email is None
 
 
+class TestSellerLinkRegex:
+    """Regex do wyciagniecia sellerLogin z HTML strony oferty Allegro.
+    Allegro renderuje link do profilu sprzedawcy w roznych formach
+    (relative / absolute, z/bez https) - test pokrywa wszystkie."""
+
+    def test_relative_url_match(self):
+        html = '<a href="/uzytkownik/ArtBoxSklep" data-role="seller-link">Sklep</a>'
+        m = ApifyAllegroSource._SELLER_LINK_RE.search(html)
+        assert m is not None
+        assert m.group(1) == "ArtBoxSklep"
+
+    def test_absolute_url_match(self):
+        html = '<a href="https://allegro.pl/uzytkownik/FarbyPL_2024">Profil</a>'
+        m = ApifyAllegroSource._SELLER_LINK_RE.search(html)
+        assert m is not None
+        assert m.group(1) == "FarbyPL_2024"
+
+    def test_login_with_hyphen_and_dot(self):
+        html = '<a href="/uzytkownik/abc.shop-123">Sklep</a>'
+        m = ApifyAllegroSource._SELLER_LINK_RE.search(html)
+        assert m.group(1) == "abc.shop-123"
+
+    def test_no_match_returns_none(self):
+        html = '<div>nothing here</div>'
+        assert ApifyAllegroSource._SELLER_LINK_RE.search(html) is None
+
+    def test_takes_first_match(self):
+        # Allegro czasem ma kilka linkow do uzytkownika (np. footer)
+        # - bierzemy pierwszy ktory zwykle jest w sekcji "O sprzedawcy"
+        html = (
+            '<a href="/uzytkownik/FirstSeller">A</a>'
+            '<a href="/uzytkownik/SecondSeller">B</a>'
+        )
+        m = ApifyAllegroSource._SELLER_LINK_RE.search(html)
+        assert m.group(1) == "FirstSeller"
+
+
 class TestParseQuery:
     """parse_query - obsluga 3 modow query string (keyword/category/preset)."""
 

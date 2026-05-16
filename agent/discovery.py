@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, Protocol
 
@@ -318,6 +319,21 @@ class ApifyAllegroSource:
                 f"co wysylamy), brak wynikow dla query."
             )
 
+        # Stage 2: wyciagnij sellerLogin z URL ofert.
+        # Listing scrapery (parseforge/automation-lab) zwracaja tylko ofert
+        # info bez seller-level data. Stage 2 wchodzi na strone oferty
+        # HTTPS GET, parsuje HTML regex'em po href="/uzytkownik/<login>"
+        # i wpisuje seller info do item przed _normalize.
+        #
+        # Bez tego user widzialby "(sprzedawca Allegro)" + brak WWW (tak
+        # jak na screenach z testow). Z tym dostaje real seller name +
+        # URL profilu Allegro (dedup key).
+        #
+        # Wykonujemy paralelnie (thread pool) zeby nie zatrzymywac
+        # discovery na 10 sekwencyjnych requestach.
+        if data:
+            self._enrich_with_seller_logins(data)
+
         # Stage 1 normalize + filtr skali
         places: list[DiscoveredPlace] = []
         for item in data:
@@ -339,6 +355,92 @@ class ApifyAllegroSource:
             self._enrich_emails(deduped)
 
         return deduped
+
+    # Regex do wyciagniecia sellerLogin z HTML strony oferty Allegro.
+    # Allegro renderuje link do profilu sprzedawcy jako
+    # <a href="/uzytkownik/<login>" ...>. Czasem z full URL (https://allegro.pl),
+    # czasem relative. Bierzemy pierwszy match - to zazwyczaj link do
+    # sprzedawcy w sekcji "O sprzedawcy".
+    _SELLER_LINK_RE = re.compile(
+        r'href="(?:https?://allegro\.pl)?/uzytkownik/([A-Za-z0-9._\-]+)"'
+    )
+
+    @staticmethod
+    def _scrape_seller_login(offer_url: str, client: "httpx.Client") -> str | None:
+        """Wyciagnij sellerLogin z HTML strony oferty Allegro.
+
+        Bezpieczne: na error (403 DataDome, timeout, parsing fail) zwraca
+        None - caller wpadnie wtedy do _normalize fallback "(sprzedawca
+        Allegro)" + brak WWW.
+        """
+        try:
+            resp = client.get(offer_url, timeout=10.0, follow_redirects=True)
+            if resp.status_code != 200:
+                return None
+            match = ApifyAllegroSource._SELLER_LINK_RE.search(resp.text)
+            if match:
+                return match.group(1)
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _enrich_with_seller_logins(cls, items: list[dict]) -> None:
+        """In-place enrichment: dla kazdego item.url scrape Allegro offer
+        page i wpisz sellerLogin jako item['sellerLogin'].
+
+        Paralelnie przez ThreadPoolExecutor (max 5 watki) - bez tego 10
+        ofert = 10s+ sekwencyjnie, z poolem ~2s.
+
+        Allegro chroni DataDome - czesc requestow moze padac (403).
+        Bezpieczne: lead bez sellera dropuje sie potem w _dedup_by_seller
+        (pusta nazwa).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        import logging
+        log = logging.getLogger("agent.discovery")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+            "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+        }
+
+        urls_to_fetch: list[tuple[int, str]] = [
+            (i, item.get("url", "").strip())
+            for i, item in enumerate(items)
+            if item.get("url")
+        ]
+        if not urls_to_fetch:
+            return
+
+        with httpx.Client(headers=headers, follow_redirects=True) as client:
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_idx = {
+                    executor.submit(cls._scrape_seller_login, url, client): idx
+                    for idx, url in urls_to_fetch
+                }
+                successful = 0
+                for future in future_to_idx:
+                    idx = future_to_idx[future]
+                    try:
+                        login = future.result(timeout=15.0)
+                    except Exception:
+                        login = None
+                    if login:
+                        items[idx]["sellerLogin"] = login
+                        items[idx]["sellerUrl"] = f"https://allegro.pl/uzytkownik/{login}"
+                        successful += 1
+
+        log.info(
+            f"ApifyAllegro stage2: scraped {successful}/{len(urls_to_fetch)} "
+            f"seller logins from offer pages"
+        )
 
     @staticmethod
     def _parse_query(q: str) -> tuple[str, str]:
