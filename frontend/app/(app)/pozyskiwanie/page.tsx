@@ -506,6 +506,15 @@ export default function PozyskiwaniePage() {
   }
 
   const jobActive = activeJob && (activeJob.status === 'pending' || activeJob.status === 'running');
+  // Peek (mode='manual') jest synchroniczny - nigdy nie blokowany przez aktywne joby.
+  // Tylko mode='agent' tworzy job DISCOVERY_PIPELINE wiec disable'ujemy go jak
+  // taki job juz dziala (zeby user nie spamowal tego samego query).
+  const submitButtonDisabled = mode === 'agent'
+    ? (!!jobActive && activeJob?.type === 'discovery_pipeline') || selectedSources.length === 0
+    : selectedSources.length === 0;
+  // Research button (na zaznaczonych peek results) - tworzy BULK_RESEARCH_LEADS.
+  // Blokujemy tylko jak juz leci research (nie discovery!).
+  const researchButtonBlockedByJob = !!jobActive && activeJob?.type === 'bulk_research_leads';
 
   return (
     <>
@@ -989,7 +998,7 @@ export default function PozyskiwaniePage() {
               </div>
             ) : (
               <button type="submit" className="btn btn-primary btn-cta"
-                disabled={!!jobActive || selectedSources.length === 0}>
+                disabled={submitButtonDisabled}>
                 {mode === 'manual'
                   ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
                   : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
@@ -1098,7 +1107,7 @@ export default function PozyskiwaniePage() {
               <div className="card-actions">
                 <span style={{ fontSize: 12 }}>Zaznaczonych: {selected.size}</span>
                 <button className="btn btn-primary"
-                  disabled={submitting || selected.size === 0 || !!jobActive}
+                  disabled={submitting || selected.size === 0 || researchButtonBlockedByJob}
                   onClick={handleResearchSelected}>
                   {submitting ? 'Tworzę job...' : `Researchuj ${selected.size} →`}
                 </button>

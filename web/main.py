@@ -73,10 +73,10 @@ from web.auth import (
 )
 from web.jobs_dispatcher import count_active_jobs, create_job, find_active_job, serialize_job
 
-# Maks ile DISCOVERY/BULK_RESEARCH jobow moze byc w queue per workspace.
-# Worker przetwarza sekwencyjnie - ten cap to ochrona przed spamem + uzasadnienie
-# dla 409 (user widzi 'kolejka pelna, anuluj cos').
-MAX_CONCURRENT_HEAVY_JOBS = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS") or 3)
+# Maks ile DISCOVERY/BULK_RESEARCH jobow moze byc rownolegle/w queue per workspace.
+# Worker ma thread pool (WORKER_THREADS, default 3) - przetwarza rownolegle.
+# Ten cap to gorny limit zeby user nie zalal queue 100+ jobami naraz (cost guard).
+MAX_CONCURRENT_HEAVY_JOBS = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS") or 10)
 
 
 # ─── ROI: stawki i czasy ręcznej pracy per rok ──────────────────────────
