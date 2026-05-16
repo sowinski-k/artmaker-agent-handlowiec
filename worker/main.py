@@ -13,7 +13,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Allow imports z root projektu
@@ -44,6 +44,11 @@ HEARTBEAT_S = float(os.getenv("WORKER_HEARTBEAT_INTERVAL", "60"))  # heartbeat c
 # (cascade na drafty). Tick co PURGE_TICK_S - default 1h zeby nie spamowac DB.
 RECYCLE_BIN_DAYS = int(os.getenv("RECYCLE_BIN_DAYS", "7"))
 PURGE_TICK_S = float(os.getenv("PURGE_TICK_INTERVAL", "3600"))  # co 1h
+# Stall detector: RUNNING joby ktore nie zaktualizowaly progresu w ciagu
+# STALL_TIMEOUT_S idzie do FAILED. Bez tego Apify/sieci hang zamraza job na
+# zawsze, user widzi "0/500" w nieskonczonosc.
+STALL_TIMEOUT_S = float(os.getenv("JOB_STALL_TIMEOUT", "900"))  # 15 min bez progresu
+STALL_TICK_S = float(os.getenv("STALL_TICK_INTERVAL", "120"))  # check co 2 min
 
 from core.observability import init_sentry
 init_sentry("worker")
@@ -497,7 +502,11 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
 
     def _save_progress(current_city: str | None = None, status: str = "running"):
         """Update job.result + job.progress dla live UI updates.
-        Wywolywane po kazdym mieście + zmianie statu w trakcie."""
+        Wywolywane po kazdym mieście + zmianie statu w trakcie.
+
+        Zapisujemy last_progress_at - watchdog scheduler tick wykrywa jak job
+        stoi (np. Apify hang) i mu zabija RUNNING zeby nie blokowal slota.
+        """
         job.progress = new_leads_count
         job.total = target
         job.result = {
@@ -514,6 +523,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "max_cost_usd": max_cost,
             "cities_skipped_no_results": cities_skipped_no_results,
             "recent": list(recent),  # deque maxlen=15, juz bounded
+            "last_progress_at": datetime.now(timezone.utc).isoformat(),
         }
         session.commit()
 
@@ -556,6 +566,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             log.warning(f"Job #{job.id} {current_segment_label}+{city_name!r} search failed: {exc}")
             recent.append({
                 "name": city_name, "segment": current_segment_label,
+                "city": city_name,
                 "status": "city_search_failed",
                 "error": str(exc)[:120],
             })
@@ -584,6 +595,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 log.warning(f"Job #{job.id} relevance batch failed for {city_name}: {exc}")
                 recent.append({
                     "name": city_name, "segment": current_segment_label,
+                    "city": city_name,
                     "status": "city_relevance_failed",
                     "error": str(exc)[:120],
                 })
@@ -594,6 +606,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         recent.append({
             "name": city_name,
             "segment": current_segment_label,
+            "city": city_name,
             "status": "city_scanned",
             "places_found": len(places),
             "duplicates_in_db": existing_count,
@@ -988,6 +1001,62 @@ def _purge_trash_tick() -> int:
     return deleted_count
 
 
+def _stall_detector_tick() -> None:
+    """Wykrywa stuck RUNNING joby (np. Apify hang, sieci timeout) i kasuje
+    je do FAILED + last_error 'stalled'.
+
+    Heurystyka: job ma result['last_progress_at'] - jak starszy niz
+    STALL_TIMEOUT_S, znaczy ze _save_progress() nie byl wolany od dawna ->
+    handler stoi w I/O. Lepiej killnac niz blokowac slot w worker pool.
+
+    Fallback dla starych jobow bez last_progress_at: uzyj started_at. Wolny
+    job (np. 5h research) bez progres update'ow tez idzie FAILED - ale to
+    desired - to znaczy ze utknal.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALL_TIMEOUT_S)
+    cutoff_naive = cutoff.replace(tzinfo=None)  # Postgres TIMESTAMP bez tz
+    try:
+        with SessionLocal() as session:
+            running = session.execute(
+                select(Job).where(Job.status == JobStatus.RUNNING.value)
+            ).scalars().all()
+            killed = 0
+            for j in running:
+                last_iso = None
+                if isinstance(j.result, dict):
+                    last_iso = j.result.get("last_progress_at")
+                last_dt: datetime | None = None
+                if isinstance(last_iso, str):
+                    try:
+                        last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+                        if last_dt.tzinfo is not None:
+                            last_dt = last_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    except ValueError:
+                        last_dt = None
+                # Fallback: started_at (naive Postgres column)
+                ref = last_dt or j.started_at
+                if ref is None:
+                    continue  # nie wiadomo kiedy zaczal, omijaj
+                if ref < cutoff_naive:
+                    j.status = JobStatus.FAILED.value
+                    j.last_error = (
+                        f"Stalled: no progress update for >{int(STALL_TIMEOUT_S/60)} min "
+                        f"(last_progress_at={last_iso or 'never'}). "
+                        f"Sprobuj odpalic ponownie."
+                    )
+                    j.completed_at = datetime.now(timezone.utc)
+                    killed += 1
+                    log.warning(
+                        f"Stall detector: job #{j.id} ({j.type}) -> FAILED "
+                        f"(no progress >{int(STALL_TIMEOUT_S/60)} min)"
+                    )
+            if killed > 0:
+                session.commit()
+                log.info(f"Stall detector: killed {killed} stalled jobs")
+    except Exception as exc:
+        log.exception(f"Stall detector tick failed (non-fatal): {exc}")
+
+
 def _heartbeat() -> None:
     """Zapisz "pulse" do tabeli Event - pozwala backendowi sprawdzic czy worker zyje.
 
@@ -1054,6 +1123,7 @@ def loop_forever() -> None:
     last_patrol_tick = 0.0
     last_heartbeat = time.time()
     last_purge_tick = time.time()
+    last_stall_tick = time.time()
 
     # Pool watkow do przetwarzania jobow rownolegle
     executor = ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="job-worker")
@@ -1073,6 +1143,9 @@ def loop_forever() -> None:
                 if now_ts - last_purge_tick >= PURGE_TICK_S:
                     last_purge_tick = now_ts
                     _purge_trash_tick()
+                if now_ts - last_stall_tick >= STALL_TICK_S:
+                    last_stall_tick = now_ts
+                    _stall_detector_tick()
                 time.sleep(POLL_INTERVAL_S)
             except Exception as exc:
                 log.exception(f"Scheduler loop error: {exc}")
