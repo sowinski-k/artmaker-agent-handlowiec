@@ -38,13 +38,21 @@ interface DiscoveredPlace {
 
 interface PeekResponse {
   places: DiscoveredPlace[];
-  diagnostics: Array<{ source: string; places: unknown[]; error?: string; duration_s?: number }>;
+  diagnostics: Array<{ source: string; places: unknown[]; error?: string; duration_s?: number; note?: string }>;
   daily_used: number;
   daily_cap: number;
   relevance_source?: 'llm' | 'heuristic' | 'none' | 'cache';
   from_cache?: boolean;
   cached_at?: string | null;
   cached_run_id?: number;
+  expand_stats?: {
+    variants_total: number;
+    cache_hits: number;
+    api_calls: number;
+    errors: number;
+    places_before_dedup: number;
+    places_after_dedup: number;
+  };
 }
 
 interface DiscoveryHistoryItem {
@@ -198,6 +206,10 @@ export default function PozyskiwaniePage() {
   // Force refresh: jezeli zaznaczone, omijamy 30-dniowy cache i wywolujemy
   // API od nowa. Domyslnie OFF zeby chronic kredyty.
   const [forceRefresh, setForceRefresh] = useState(false);
+  // Query expansion: zamiast jednego query "sklep papierniczy Warszawa" wyslij
+  // serie wariantow (synonimy + dzielnice). Omija limit 60/query.
+  const [expandQueries, setExpandQueries] = useState(false);
+  const [peekExpandStats, setPeekExpandStats] = useState<PeekResponse['expand_stats'] | null>(null);
   // Historia discovery runow - lista lewa nad wynikami
   const [history, setHistory] = useState<DiscoveryHistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
@@ -376,12 +388,14 @@ export default function PozyskiwaniePage() {
           use_relevance_filter: true,
           relevance_threshold: relevanceThreshold,
           force_refresh: forceRefresh,
+          expand_queries: expandQueries,
         }),
       });
       setPeekResults(res.places);
       setPeekDiag(res.diagnostics);
       setPeekCap({ used: res.daily_used, cap: res.daily_cap });
       setPeekRelevanceSource(res.relevance_source || null);
+      setPeekExpandStats(res.expand_stats || null);
       if (res.from_cache) {
         setPeekFromCache({ at: res.cached_at || null, run_id: res.cached_run_id });
       }
@@ -1109,14 +1123,26 @@ export default function PozyskiwaniePage() {
             ) : (
               <>
                 {mode === 'manual' && (
-                  <label className="force-refresh-toggle" title="Domyslnie pomijamy zapytanie ktorego identyczna wersja byla w ostatnich 30 dniach (cache). Zaznacz aby wymusic odswiezenie i zapłacic za nowe API call.">
-                    <input
-                      type="checkbox"
-                      checked={forceRefresh}
-                      onChange={(e) => setForceRefresh(e.target.checked)}
-                    />
-                    <span>Pomiń cache (zapłać za odświeżenie zapytania)</span>
-                  </label>
+                  <div className="peek-options">
+                    <label className="peek-toggle" title="Domyslnie pomijamy zapytanie ktorego identyczna wersja byla w ostatnich 30 dniach (cache). Zaznacz aby wymusic odswiezenie i zapłacic za nowe API call.">
+                      <input
+                        type="checkbox"
+                        checked={forceRefresh}
+                        onChange={(e) => setForceRefresh(e.target.checked)}
+                      />
+                      <span>Pomiń cache (zapłać za odświeżenie zapytania)</span>
+                    </label>
+                    <label className="peek-toggle peek-toggle-expand" title="Wyślij serię wariantów zapytania (synonimy + dzielnice) zamiast jednego. Omija limit 60/query, znajduje 5-8x więcej firm. Każdy wariant ma swój cache - 0 kredytu jak już sprawdzane.">
+                      <input
+                        type="checkbox"
+                        checked={expandQueries}
+                        onChange={(e) => setExpandQueries(e.target.checked)}
+                      />
+                      <span>
+                        <i className="ti ti-arrows-maximize" /> Rozszerz zapytanie (5-8× więcej firm, omija limit 60)
+                      </span>
+                    </label>
+                  </div>
                 )}
                 <button type="submit" className="btn btn-primary btn-cta"
                   disabled={submitButtonDisabled}>
@@ -1137,6 +1163,24 @@ export default function PozyskiwaniePage() {
                 <strong>{d.source}</strong>: {d.error || `${(d.places as unknown[]).length} firm · ${d.duration_s}s`}
               </div>
             ))}
+          </div>
+        )}
+
+        {/* PEEK RESULTS - banner ze statsami expansion */}
+        {mode === 'manual' && peekExpandStats && (
+          <div className="banner-info" style={{ marginTop: 16 }}>
+            <i className="ti ti-arrows-maximize" />
+            <div>
+              <strong>Rozszerzone zapytanie:</strong>{' '}
+              {peekExpandStats.variants_total} wariantów ·{' '}
+              <span style={{ color: '#10B981' }}>{peekExpandStats.cache_hits} z cache (0 kredytu)</span> ·{' '}
+              <span>{peekExpandStats.api_calls} nowych API calls</span>
+              {peekExpandStats.errors > 0 && (
+                <span style={{ color: '#DC2626' }}> · {peekExpandStats.errors} błędów</span>
+              )}
+              {' '}→ <strong>{peekExpandStats.places_after_dedup} unikalnych firm</strong>{' '}
+              (z {peekExpandStats.places_before_dedup} przed dedupem)
+            </div>
           </div>
         )}
 
@@ -1460,18 +1504,27 @@ const CSS = `
 .history-table tbody tr:hover { background: #FAFAF7; }
 .history-table tbody tr:last-child td { border-bottom: none; }
 
-/* Force-refresh toggle nad CTA */
-.force-refresh-toggle {
+/* Peek options - toggle'i nad CTA (force_refresh, expand_queries) */
+.peek-options {
+  display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px;
+}
+.peek-toggle {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 8px 12px; background: #FAFAF7;
   border: 1px solid #E5E7EB; border-radius: 7px;
   font-size: 12.5px; color: #6B7280; cursor: pointer;
-  margin-bottom: 10px;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.force-refresh-toggle:hover { background: #F3F4F6; color: #111; }
-.force-refresh-toggle input[type="checkbox"] {
+.peek-toggle:hover { background: #F3F4F6; color: #111; }
+.peek-toggle input[type="checkbox"] {
   accent-color: #D4212C; cursor: pointer;
 }
+.peek-toggle-expand {
+  background: linear-gradient(90deg, #F0FDF4 0%, #FAFAF7 100%);
+  border-color: #BBF7D0;
+}
+.peek-toggle-expand:hover { background: #DCFCE7; }
+.peek-toggle-expand i { color: #10B981; }
 
 .mode-tabs {
   display: grid;
