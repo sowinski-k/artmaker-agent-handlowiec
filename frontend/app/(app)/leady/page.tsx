@@ -623,6 +623,56 @@ export default function LeadyPage() {
     }
   }
 
+  async function excludeBrandPermanently() {
+    if (!detail) return;
+    const ok = await confirm({
+      title: 'Wykluczyć ten brand PERMANENTNIE?',
+      message: (
+        <>
+          Dodaje <strong>{detail.company_name}</strong> do listy wykluczeń workspace.
+          KAŻDE przyszłe discovery (autonomous + manual) pominie firmy o tej nazwie -
+          nie będą wpadać do leadów nawet jak Google Places je zwróci.
+          <br /><br />
+          Use case: korporacje (Empik, Flying Tiger, Rossmann) z którymi nigdy nie zrobimy
+          B2B - szkoda kredytu na ich przepuszczanie przez LLM.
+          <br /><br />
+          Lead zostanie też przeniesiony do kosza.
+        </>
+      ),
+      confirmLabel: 'Wyklucz brand + do kosza',
+      cancelLabel: 'Anuluj',
+      destructive: true,
+      icon: 'ban',
+    });
+    if (!ok) return;
+    try {
+      // 1. Dodaj brand do DiscoveryExclusion (idempotent)
+      await api('/api/discovery/exclusions', {
+        method: 'POST',
+        body: JSON.stringify({
+          exclusion_type: 'brand',
+          value: detail.company_name,
+          reason: `Wykluczony z drawera leada #${detail.id}`,
+        }),
+      });
+      // 2. Soft-delete lead (do kosza)
+      await api(`/api/leads/${detail.id}`, { method: 'DELETE' });
+      setFlash({
+        kind: 'success',
+        text: `Brand "${detail.company_name}" wykluczony permanentnie. Discovery juz go nie znajdzie. Lead w koszu.`,
+      });
+      setSelectedId(null);
+      setDetail(null);
+      await load();
+      await refreshTrashCount();
+    } catch (err) {
+      setFlash({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Nie udalo sie wykluczyc brand',
+      });
+    }
+  }
+
   async function blockLead() {
     if (!detail) return;
     const ok = await confirm({
@@ -1797,13 +1847,22 @@ export default function LeadyPage() {
                       <i className="ti ti-rotate-clockwise" /> Odblokuj lead
                     </button>
                   ) : (
-                    <button
-                      className="btn-block-lead"
-                      onClick={blockLead}
-                      title="Ukryj lead z listy - pozostaje w bazie, ale znika z domyslnego filtra"
-                    >
-                      <i className="ti ti-ban" /> Zablokuj lead
-                    </button>
+                    <>
+                      <button
+                        className="btn-block-lead"
+                        onClick={blockLead}
+                        title="Ukryj lead z listy - pozostaje w bazie, ale znika z domyslnego filtra"
+                      >
+                        <i className="ti ti-ban" /> Zablokuj lead
+                      </button>
+                      <button
+                        className="btn-exclude-brand"
+                        onClick={excludeBrandPermanently}
+                        title="Wyklucz brand PERMANENTNIE - dodaje do DiscoveryExclusion, przyszle discovery omijaja. Plus lead do kosza."
+                      >
+                        <i className="ti ti-shield-x" /> Wyklucz brand z discovery
+                      </button>
+                    </>
                   )}
 
                   {/* Destrukcyjna akcja - na samym dole, dyskretna.
@@ -2613,5 +2672,22 @@ table.tbl .row-check input[type="checkbox"] {
 .btn-block-lead i { font-size: 14px; }
 .btn-block-lead:hover {
   background: #FEF3C7; border-color: #FBBF24; color: #78350F;
+}
+
+/* Exclude brand permanently - destrukcyjne, dodaje do DiscoveryExclusion */
+.btn-exclude-brand {
+  margin-top: 4px;
+  padding: 7px 11px;
+  background: none; border: 1px solid #FCA5A5;
+  border-radius: 6px;
+  color: #991B1B; font-size: 12px;
+  cursor: pointer; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 6px;
+  align-self: flex-start;
+  transition: all 0.15s;
+}
+.btn-exclude-brand i { font-size: 14px; }
+.btn-exclude-brand:hover {
+  background: #FEE2E2; border-color: #DC2626; color: #7F1D1D;
 }
 `;
