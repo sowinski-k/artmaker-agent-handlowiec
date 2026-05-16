@@ -200,6 +200,10 @@ export default function PozyskiwaniePage() {
   const [autonomousTarget, setAutonomousTarget] = useState(50);
   const [autonomousBudget, setAutonomousBudget] = useState(5.0);
   const [autonomousSubmitting, setAutonomousSubmitting] = useState(false);
+  // Multi-segment dla autonomicznego: pusta = uzyj `segment` (single, legacy),
+  // niepusta = backend przerabia wszystkie segmenty z listy × miasta. Toggle
+  // przez chip selector ponizej.
+  const [autonomousSegments, setAutonomousSegments] = useState<string[]>([]);
   // Allegro query mode - widoczne tylko gdy 'apify_allegro' w selectedSources.
   // 'preset' = preset branzowy z core/industry_presets.py (najbardziej skalowalne)
   // 'keyword' = user wpisuje wlasne slowo kluczowe
@@ -640,18 +644,26 @@ export default function PozyskiwaniePage() {
     }
     setAutonomousSubmitting(true);
     try {
+      // Jak user wybral multi-segment (chipy), wyslij `segments[]`. Backend ma
+      // jeden work_queue (segment × miasto). Inaczej (pusty) wysylamy `segment`
+      // pojedyncze - legacy single-segment path.
+      const body: Record<string, unknown> = {
+        sources: selectedSources,
+        target_new_leads: autonomousTarget,
+        max_cost_usd: autonomousBudget,
+        relevance_threshold: relevanceThreshold,
+        auto_draft_threshold: autoDraft ? 7 : null,
+        custom_description: customTarget.trim() || null,
+      };
+      if (autonomousSegments.length > 0) {
+        body.segments = autonomousSegments;
+      } else {
+        body.segment = segment;
+      }
       const res = await api<{ ok: boolean; job_id: number }>(
         '/api/discovery/autonomous', {
         method: 'POST',
-        body: JSON.stringify({
-          segment,
-          sources: selectedSources,
-          target_new_leads: autonomousTarget,
-          max_cost_usd: autonomousBudget,
-          relevance_threshold: relevanceThreshold,
-          auto_draft_threshold: autoDraft ? 7 : null,
-          custom_description: customTarget.trim() || null,
-        }),
+        body: JSON.stringify(body),
       });
       setFlash({
         kind: 'success',
@@ -1518,26 +1530,73 @@ export default function PozyskiwaniePage() {
                   </div>
                 )}
                 {mode === 'autonomous' && (
-                  <div className="autonomous-controls">
-                    <div className="autonomous-input">
-                      <label>Cel - ile nowych leadów chcę?</label>
-                      <input
-                        type="number" min={1} max={500}
-                        value={autonomousTarget}
-                        onChange={(e) => setAutonomousTarget(Math.max(1, Math.min(500, Number(e.target.value) || 50)))}
-                      />
-                      <span className="field-hint">1-500</span>
+                  <>
+                    <div className="autonomous-controls">
+                      <div className="autonomous-input">
+                        <label>Cel - ile nowych leadów chcę?</label>
+                        <input
+                          type="number" min={1} max={500}
+                          value={autonomousTarget}
+                          onChange={(e) => setAutonomousTarget(Math.max(1, Math.min(500, Number(e.target.value) || 50)))}
+                        />
+                        <span className="field-hint">1-500</span>
+                      </div>
+                      <div className="autonomous-input">
+                        <label>Max budżet API ($)</label>
+                        <input
+                          type="number" min={0.1} max={100} step={0.5}
+                          value={autonomousBudget}
+                          onChange={(e) => setAutonomousBudget(Math.max(0.1, Math.min(100, Number(e.target.value) || 5)))}
+                        />
+                        <span className="field-hint">Stop gdy osiągniesz</span>
+                      </div>
                     </div>
-                    <div className="autonomous-input">
-                      <label>Max budżet API ($)</label>
-                      <input
-                        type="number" min={0.1} max={100} step={0.5}
-                        value={autonomousBudget}
-                        onChange={(e) => setAutonomousBudget(Math.max(0.1, Math.min(100, Number(e.target.value) || 5)))}
-                      />
-                      <span className="field-hint">Stop gdy osiągniesz</span>
+                    {/* Multi-segment chips: wybor wielu segmentow naraz. Worker
+                        przerabia segment × miasto. Pusty wybor = uzywa pojedynczego
+                        segmentu z dropdowna powyzej (legacy mode). */}
+                    <div className="autonomous-segments">
+                      <div className="autonomous-segments-head">
+                        <strong>
+                          <i className="ti ti-stack-2" /> Multi-segment (opcjonalne)
+                        </strong>
+                        <span className="autonomous-segments-sub">
+                          {autonomousSegments.length === 0
+                            ? `Pojedynczy: ${SEGMENT_INFO[segment]?.label || segment}`
+                            : `${autonomousSegments.length} segmentów wybranych - agent zrobi każdy × każde miasto`}
+                        </span>
+                        {autonomousSegments.length > 0 && (
+                          <button
+                            type="button" className="link-btn"
+                            onClick={() => setAutonomousSegments([])}
+                          >
+                            Wyczyść
+                          </button>
+                        )}
+                      </div>
+                      <div className="autonomous-segments-chips">
+                        {SEGMENTS.map((s) => {
+                          const active = autonomousSegments.includes(s);
+                          return (
+                            <button
+                              key={s} type="button"
+                              className={`seg-chip ${active ? 'active' : ''}`}
+                              onClick={() => {
+                                setAutonomousSegments((prev) =>
+                                  prev.includes(s)
+                                    ? prev.filter((x) => x !== s)
+                                    : [...prev, s],
+                                );
+                              }}
+                              title={SEGMENT_INFO[s]?.desc || s}
+                            >
+                              {active && <i className="ti ti-check" />}
+                              {SEGMENT_INFO[s]?.label || s}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
+                  </>
                 )}
                 <div className="cta-row">
                   {mode === 'autonomous' ? (
@@ -2020,6 +2079,44 @@ const CSS = `
   box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.2);
 }
 .autonomous-input .field-hint { font-size: 11px; color: #92400E; }
+
+/* Autonomous multi-segment chips */
+.autonomous-segments {
+  padding: 14px;
+  margin-bottom: 14px;
+  background: #FAFAF7;
+  border: 1px dashed #D1D5DB;
+  border-radius: 9px;
+}
+.autonomous-segments-head {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 10px; font-size: 12px;
+}
+.autonomous-segments-head strong { font-size: 13px; color: #1C1C1C; }
+.autonomous-segments-sub {
+  color: #6B7280; font-size: 11.5px; flex: 1;
+}
+.autonomous-segments-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.seg-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid #D1D5DB; background: #fff;
+  font-size: 12px; color: #4B5563; cursor: pointer;
+  transition: all 0.15s;
+}
+.seg-chip:hover { border-color: #6B7280; color: #1C1C1C; }
+.seg-chip.active {
+  background: #1C1C1C; border-color: #1C1C1C; color: #fff;
+}
+.seg-chip.active i { font-size: 14px; }
+.link-btn {
+  background: transparent; border: none; padding: 0;
+  font-size: 11.5px; color: #DC2626; cursor: pointer;
+  text-decoration: underline;
+}
+.link-btn:hover { color: #991B1B; }
 
 /* Autonomous status panel - live updates w trakcie joba */
 .autonomous-status {

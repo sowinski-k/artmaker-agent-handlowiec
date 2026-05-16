@@ -77,28 +77,32 @@ def _build_prospect(lead: Lead, draft: EmailDraft) -> WoodpeckerProspect:
     )
 
 
-def _count_sent_today() -> int:
+def _count_sent_today(workspace_id: int | None = None) -> int:
     """Ile draftów ostatnio poszło - do cap'a DAILY_EMAIL_LIMIT.
+
+    MULTI-TENANT: cap jest PER WORKSPACE. Bez filtra workspace A by zablokowal
+    workspace B po hicie globalnego limitu. workspace_id=None -> count globalny
+    (backward compat dla starych CLI uzyc bez kontekstu).
 
     Uwaga: cap jest celowo wysoki (10k default) bo wlasciwa cadencja
     wysylki maili jest po stronie Woodpeckera (jego kampania ma
     daily_per_mailbox + throttle + schedule). My pushujemy prospects
     do kampanii, Woodpecker je rozprowadza w czasie.
-    Cap zachowany jako infrastructure pod przyszle pakiety subskrypcyjne.
     """
     start_of_day = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     with SessionLocal() as session:
-        return session.scalar(
-            select(func.count(EmailDraft.id)).where(
-                EmailDraft.status == DraftStatus.SENT.value,
-                EmailDraft.sent_at >= start_of_day,
-            )
-        ) or 0
+        q = select(func.count(EmailDraft.id)).where(
+            EmailDraft.status == DraftStatus.SENT.value,
+            EmailDraft.sent_at >= start_of_day,
+        )
+        if workspace_id is not None:
+            q = q.where(EmailDraft.workspace_id == workspace_id)
+        return session.scalar(q) or 0
 
 
-def push_draft(draft_id: int, campaign_id: int) -> str:
+def push_draft(draft_id: int, campaign_id: int, workspace_id: int | None = None) -> str:
     """Wyślij jeden draft do kampanii Woodpecker. Returns prospect_id z Woodpeckera.
 
     Skipuje + raise jeśli:
@@ -119,7 +123,9 @@ def push_draft(draft_id: int, campaign_id: int) -> str:
     if not has_woodpecker_key():
         raise RuntimeError("Brak WOODPECKER_API_KEY w env / Streamlit secrets.")
 
-    sent_today = _count_sent_today()
+    # Per-workspace daily cap (jak workspace_id znany). Zapobiega cross-tenant
+    # blokowaniu - kazdy tenant ma swoj limit, nie ma global pool.
+    sent_today = _count_sent_today(workspace_id=workspace_id)
     if sent_today >= settings.daily_email_limit:
         raise RuntimeError(
             f"Dzienny limit wysyłki osiągnięty: {sent_today}/{settings.daily_email_limit}. "
@@ -166,8 +172,13 @@ def push_draft(draft_id: int, campaign_id: int) -> str:
         draft.woodpecker_prospect_id = prospect_id or None
         lead.status = LeadStatus.SENT.value
 
+        # MULTI-TENANT: Event musi miec workspace_id + lead_id zeby pojawil sie
+        # w timeline tenanta. Bez tego Event wpada do workspace_id=NULL i znika
+        # z UI per-workspace.
         session.add(
             Event(
+                workspace_id=lead.workspace_id,
+                lead_id=lead.id,
                 level="INFO",
                 source="push",
                 type="email_sent",

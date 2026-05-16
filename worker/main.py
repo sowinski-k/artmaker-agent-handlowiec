@@ -404,7 +404,9 @@ def handle_bulk_generate_drafts(session: Session, job: Job) -> dict:
 def handle_send_draft(session: Session, job: Job) -> dict:
     from agent.push_to_sender import push_draft
     p = job.payload
-    prospect_id = push_draft(p["draft_id"], p["campaign_id"])
+    prospect_id = push_draft(
+        p["draft_id"], p["campaign_id"], workspace_id=job.workspace_id,
+    )
     return {"prospect_id": prospect_id}
 
 
