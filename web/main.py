@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +41,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import case, desc, func, select
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import Session, joinedload
 
 from core.db import (
+    DiscoveryRun,
     DraftStatus,
     EmailDraft,
     Event,
@@ -2435,6 +2436,10 @@ class DiscoverIn(BaseModel):
     # requescie Apify Allegro po "preset:sklep_plastyczny". Brak override =
     # source dostaje glowny `query`.
     source_queries: dict[str, str] | None = None
+    # Skip-if-recent: jak ten sam (segment, location, sources) zostal odpalony
+    # w ostatnich CACHE_TTL_DAYS - serwujemy z bazy zamiast palac kredytu.
+    # force_refresh=True omija cache - drogi, ale czasem chcesz odswiezyc.
+    force_refresh: bool = False
 
 
 def _discovery_today_count(workspace_id: int) -> int:
@@ -2461,6 +2466,49 @@ def list_industry_presets(cur: CurrentUser = Depends(get_current_user)) -> list[
     return list_segments_with_presets()
 
 
+# Cache TTL dla discovery runow - po tym czasie ten sam (segment, location,
+# sources) wywoluje API od nowa. 30 dni = balance miedzy ratowaniem kredytu
+# a swiezoscia danych (firmy umieraja/powstaja powoli).
+DISCOVERY_CACHE_TTL_DAYS = int(os.getenv("DISCOVERY_CACHE_TTL_DAYS") or 30)
+
+
+def _discovery_query_hash(
+    segment: str, location: str | None, sources: list[str],
+    custom_description: str | None,
+) -> str:
+    """Stabilny hash query do cache lookup.
+
+    Bierze: segment + location + sorted sources + custom_description.
+    Stable across requests - identyczny query daje identyczny hash niezaleznie
+    od kolejnosci elementow w sources liscie.
+    """
+    import hashlib
+    key = "|".join([
+        (segment or "").strip().lower(),
+        (location or "").strip().lower(),
+        ",".join(sorted(s.strip().lower() for s in sources or [])),
+        (custom_description or "").strip().lower(),
+    ])
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _find_cached_discovery(
+    session: Session, workspace_id: int, query_hash: str,
+) -> DiscoveryRun | None:
+    """Zwraca najswiezszy DiscoveryRun dla danego query_hash w workspace,
+    jezeli jest mlodszy niz CACHE_TTL i ma cached_places. Inaczej None.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)
+    return session.execute(
+        select(DiscoveryRun).where(
+            DiscoveryRun.workspace_id == workspace_id,
+            DiscoveryRun.query_hash == query_hash,
+            DiscoveryRun.run_at >= cutoff,
+            DiscoveryRun.cached_places.isnot(None),
+        ).order_by(DiscoveryRun.run_at.desc()).limit(1)
+    ).scalar_one_or_none()
+
+
 @app.post("/api/discovery/peek")
 def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     """Praca ręczna: SYNC discovery + relevance scoring, BEZ researchu i draftów.
@@ -2483,6 +2531,67 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
             detail=f"Dzienny limit pozyskiwania ({DISCOVERY_DAILY_CAP_FREE} leadów) "
                    f"wyczerpany. Spróbuj jutro.",
         )
+
+    # Cache check - pomijamy Apify/Places call jak ten sam query byl w
+    # ostatnich CACHE_TTL_DAYS dni. Force refresh omija.
+    query_hash = _discovery_query_hash(
+        payload.segment, payload.location, payload.sources,
+        payload.custom_description,
+    )
+    cached_run: DiscoveryRun | None = None
+    if not payload.force_refresh:
+        with SessionLocal() as session:
+            cached_run = _find_cached_discovery(session, cur.workspace_id, query_hash)
+    if cached_run is not None:
+        # Serve from cache - mark places z aktualnymi existing_lead_id
+        # (lead'y w bazie mogly sie pojawic/zniknac od cached run).
+        from agent.discovery import DiscoveredPlace, mark_existing_in_db
+        try:
+            cached_places = [
+                DiscoveredPlace(**p) for p in (cached_run.cached_places or [])
+            ]
+        except Exception:
+            cached_places = []
+        if cached_places:
+            mark_existing_in_db(cached_places, workspace_id=cur.workspace_id)
+        rel_map_cached: dict[int, dict[str, Any]] = {}
+        # Zwracamy bez LLM relevance (cache nie trzyma reason'ow per place)
+        # - frontend pokazuje placeholder lub heurystyke
+        from agent.discovery import _heuristic_score
+        for i, p in enumerate(cached_places):
+            if p.existing_lead_id is not None:
+                score_int = (
+                    int(round(p.existing_lead_score))
+                    if p.existing_lead_score is not None else 5
+                )
+                rel_map_cached[i] = {
+                    "score": max(0, min(10, score_int)),
+                    "reason": f"Duplikat - już w bazie jako lead #{p.existing_lead_id}",
+                }
+            else:
+                score, reason = _heuristic_score(p)
+                rel_map_cached[i] = {"score": score, "reason": reason}
+        return {
+            "places": [{
+                "source": p.source, "name": p.name, "website": p.website,
+                "address": p.address, "phone": p.phone, "email": p.email,
+                "rating": p.rating, "review_count": p.review_count,
+                "existing_lead_id": p.existing_lead_id,
+                "existing_lead_score": p.existing_lead_score,
+                "relevance": rel_map_cached.get(i),
+            } for i, p in enumerate(cached_places)],
+            "diagnostics": [{
+                "source": "cache",
+                "places": cached_run.cached_places or [],
+                "duration_s": 0,
+            }],
+            "daily_used": today_done,
+            "daily_cap": DISCOVERY_DAILY_CAP_FREE,
+            "relevance_source": "cache",
+            "from_cache": True,
+            "cached_at": iso_utc(cached_run.run_at),
+            "cached_run_id": cached_run.id,
+        }
 
     src_classes = {
         "apify": ApifySource, "google_places": GooglePlacesSource,
@@ -2510,6 +2619,17 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
         )
     except Exception as exc:
         log.exception(f"discovery_peek run_search failed: {exc}")
+        # Zapisz audit log nawet dla błędu
+        with SessionLocal() as session:
+            session.add(DiscoveryRun(
+                workspace_id=cur.workspace_id, user_id=cur.user_id,
+                query_hash=query_hash, segment=payload.segment,
+                location=payload.location, sources=payload.sources,
+                query=payload.query, custom_description=payload.custom_description,
+                result_count=0, cached_places=None,
+                error=str(exc)[:1000],
+            ))
+            session.commit()
         raise HTTPException(status_code=502, detail=f"Błąd źródeł: {exc}")
 
     rel_map: dict[int, dict[str, Any]] = {}
@@ -2546,6 +2666,23 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
                     rel_map[i] = {"score": score, "reason": reason}
             relevance_source = "heuristic"
 
+    # Zapisz audit log + cache snapshot wynikow zeby ten sam query w
+    # ciagu DISCOVERY_CACHE_TTL_DAYS nie palil kredytu ponownie.
+    try:
+        cached_places_snapshot = [p.model_dump() for p in places]
+        with SessionLocal() as session:
+            session.add(DiscoveryRun(
+                workspace_id=cur.workspace_id, user_id=cur.user_id,
+                query_hash=query_hash, segment=payload.segment,
+                location=payload.location, sources=payload.sources,
+                query=payload.query, custom_description=payload.custom_description,
+                cached_places=cached_places_snapshot,
+                result_count=len(places),
+            ))
+            session.commit()
+    except Exception as exc:
+        log.warning(f"Failed to write DiscoveryRun cache snapshot: {exc}")
+
     return {
         "places": [{
             "source": p.source, "name": p.name, "website": p.website,
@@ -2560,7 +2697,43 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
         "daily_cap": DISCOVERY_DAILY_CAP_FREE,
         # Flaga dla frontu - czy relevance pochodzi z LLM czy fallback
         "relevance_source": relevance_source,
+        "from_cache": False,
     }
+
+
+@app.get("/api/discovery/history")
+def discovery_history(
+    limit: int = 50, cur: CurrentUser = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """Lista ostatnich discovery runow workspace - dla "Historia" panelu.
+
+    Pokazuje co user juz sprawdzal, kiedy, ile firm wrocilo i czy
+    skonczylo sie błędem. Klik wiersza pozwala wrocic do wynikow
+    (jeszcze nie zaimplementowane - tylko log audit na teraz).
+    """
+    limit = max(1, min(limit, 200))
+    with SessionLocal() as session:
+        runs = session.execute(
+            select(DiscoveryRun).where(
+                DiscoveryRun.workspace_id == cur.workspace_id,
+            ).order_by(DiscoveryRun.run_at.desc()).limit(limit)
+        ).scalars().all()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)
+        return [{
+            "id": r.id,
+            "segment": r.segment,
+            "location": r.location,
+            "sources": r.sources or [],
+            "query": r.query,
+            "result_count": r.result_count,
+            "leads_added": r.leads_added,
+            "cost_usd": r.cost_usd,
+            "error": r.error,
+            "run_at": iso_utc(r.run_at),
+            # True jezeli ten run jest jeszcze w okresie cache - znaczy ze
+            # kolejne zapytanie z tym samym query_hash nie zapłaci za API.
+            "cache_active": r.run_at >= cutoff and r.cached_places is not None,
+        } for r in runs]
 
 
 @app.post("/api/discovery/search")
