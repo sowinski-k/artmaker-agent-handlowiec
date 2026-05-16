@@ -69,6 +69,14 @@ interface DiscoveryHistoryItem {
   cache_active: boolean;
 }
 
+interface DiscoveryExclusion {
+  id: number;
+  exclusion_type: string;  // 'domain' | 'brand' | 'city_segment'
+  value: string;
+  reason: string | null;
+  created_at: string;
+}
+
 interface JobInfo {
   id: number;
   type: string;
@@ -213,6 +221,12 @@ export default function PozyskiwaniePage() {
   // Historia discovery runow - lista lewa nad wynikami
   const [history, setHistory] = useState<DiscoveryHistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  // Exclusions (wykluczenia per workspace) - panel ponizej historii
+  const [exclusions, setExclusions] = useState<DiscoveryExclusion[]>([]);
+  const [showExclusions, setShowExclusions] = useState(false);
+  const [newExclusionType, setNewExclusionType] = useState<'domain' | 'brand'>('domain');
+  const [newExclusionValue, setNewExclusionValue] = useState('');
+  const [newExclusionReason, setNewExclusionReason] = useState('');
 
   // Job tracking (manual bulk research + agent mode)
   const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
@@ -264,8 +278,52 @@ export default function PozyskiwaniePage() {
     }
   }
 
+  // Pobierz exclusions (wykluczenia per workspace).
+  async function loadExclusions() {
+    try {
+      const data = await api<DiscoveryExclusion[]>('/api/discovery/exclusions');
+      setExclusions(data);
+    } catch {
+      /* niekrytyczne */
+    }
+  }
+
+  async function addExclusion() {
+    const value = newExclusionValue.trim();
+    if (!value) {
+      setFlash({ kind: 'error', text: 'Wartość nie może być pusta.' });
+      return;
+    }
+    try {
+      await api('/api/discovery/exclusions', {
+        method: 'POST',
+        body: JSON.stringify({
+          exclusion_type: newExclusionType,
+          value,
+          reason: newExclusionReason.trim() || null,
+        }),
+      });
+      setNewExclusionValue('');
+      setNewExclusionReason('');
+      await loadExclusions();
+      setFlash({ kind: 'success', text: `Wykluczono ${newExclusionType}: ${value}` });
+    } catch (err) {
+      setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd' });
+    }
+  }
+
+  async function deleteExclusion(id: number) {
+    try {
+      await api(`/api/discovery/exclusions/${id}`, { method: 'DELETE' });
+      await loadExclusions();
+    } catch (err) {
+      setFlash({ kind: 'error', text: err instanceof Error ? err.message : 'Błąd' });
+    }
+  }
+
   useEffect(() => {
     void loadHistory();
+    void loadExclusions();
   }, []);
 
   // Allegro source_queries - zbuduj na podstawie wybranego trybu.
@@ -613,14 +671,108 @@ export default function PozyskiwaniePage() {
             <h1>Pozyskiwanie leadów</h1>
             <p>Wybierz tryb i zacznij szukać. Praca leci w tle - możesz wylogować się.</p>
           </div>
-          <button
-            className="btn btn-ghost"
-            onClick={() => setShowHistory((s) => !s)}
-            title="Historia ostatnich zapytań discovery - chroni Cię przed powtarzaniem"
-          >
-            <i className="ti ti-history" /> Historia ({history.length})
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setShowExclusions((s) => !s)}
+              title="Wykluczenia - domeny / brandy które na zawsze ignorujemy w discovery"
+            >
+              <i className="ti ti-ban" /> Wykluczenia ({exclusions.length})
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setShowHistory((s) => !s)}
+              title="Historia ostatnich zapytań discovery - chroni Cię przed powtarzaniem"
+            >
+              <i className="ti ti-history" /> Historia ({history.length})
+            </button>
+          </div>
         </div>
+
+        {/* EXCLUSIONS PANEL - workspace blacklist domain/brand */}
+        {showExclusions && (
+          <div className="history-panel">
+            <div className="history-head">
+              <strong>Wykluczenia</strong>
+              <span className="history-sub">
+                Domeny i brandy które discovery automatycznie pominie (sieci handlowe, marki nie pasujące do oferty).
+              </span>
+              <button className="btn-icon" onClick={() => setShowExclusions(false)} aria-label="Zamknij">
+                <i className="ti ti-x" />
+              </button>
+            </div>
+            <div style={{ padding: 12, display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', borderBottom: '1px solid #F3F4F6' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <label style={{ fontSize: 11, color: '#6B7280', fontWeight: 500 }}>Typ</label>
+                <select
+                  value={newExclusionType}
+                  onChange={(e) => setNewExclusionType(e.target.value as 'domain' | 'brand')}
+                  style={{ padding: '6px 8px', border: '1px solid #E5E7EB', borderRadius: 6, fontSize: 13 }}
+                >
+                  <option value="domain">Domena</option>
+                  <option value="brand">Brand (nazwa)</option>
+                </select>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 180 }}>
+                <label style={{ fontSize: 11, color: '#6B7280', fontWeight: 500 }}>Wartość</label>
+                <input
+                  type="text"
+                  value={newExclusionValue}
+                  onChange={(e) => setNewExclusionValue(e.target.value)}
+                  placeholder={newExclusionType === 'domain' ? 'np. rossmann.pl' : 'np. Empik'}
+                  style={{ padding: '6px 8px', border: '1px solid #E5E7EB', borderRadius: 6, fontSize: 13 }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 180 }}>
+                <label style={{ fontSize: 11, color: '#6B7280', fontWeight: 500 }}>Powód (opcjonalny)</label>
+                <input
+                  type="text"
+                  value={newExclusionReason}
+                  onChange={(e) => setNewExclusionReason(e.target.value)}
+                  placeholder="np. sieć drogerii"
+                  style={{ padding: '6px 8px', border: '1px solid #E5E7EB', borderRadius: 6, fontSize: 13 }}
+                />
+              </div>
+              <button className="btn btn-primary" onClick={addExclusion}>
+                <i className="ti ti-plus" /> Dodaj
+              </button>
+            </div>
+            {exclusions.length === 0 ? (
+              <div className="history-empty">Brak wykluczeń — dodaj domenę/brand który chcesz pomijać.</div>
+            ) : (
+              <table className="history-table">
+                <thead>
+                  <tr>
+                    <th>Typ</th>
+                    <th>Wartość</th>
+                    <th>Powód</th>
+                    <th>Dodano</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {exclusions.map((e) => (
+                    <tr key={e.id}>
+                      <td>{e.exclusion_type === 'domain' ? '🌐 Domena' : '🏷️ Brand'}</td>
+                      <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{e.value}</td>
+                      <td style={{ color: '#6B7280', fontSize: 12 }}>{e.reason || '—'}</td>
+                      <td style={{ fontSize: 11, color: '#9CA3AF' }}>{new Date(e.created_at).toLocaleDateString('pl-PL')}</td>
+                      <td>
+                        <button
+                          className="btn-icon"
+                          onClick={() => void deleteExclusion(e.id)}
+                          title="Usuń wykluczenie"
+                        >
+                          <i className="ti ti-trash" style={{ color: '#DC2626' }} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
         {/* HISTORY PANEL - kolepsowalny */}
         {showHistory && (

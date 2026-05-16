@@ -44,6 +44,7 @@ from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from core.db import (
+    DiscoveryExclusion,
     DiscoveryRun,
     DraftStatus,
     EmailDraft,
@@ -2472,6 +2473,113 @@ def list_industry_presets(cur: CurrentUser = Depends(get_current_user)) -> list[
     return list_segments_with_presets()
 
 
+@app.get("/api/discovery/cities")
+def list_cities_pl(
+    voivodeship: str | None = None,
+    top_n: int | None = None,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Lista miast PL z knowledge base. Frontend uzywa do smart city picker.
+
+    Filtry:
+      voivodeship - tylko z danego wojewodztwa
+      top_n - tylko top N po populacji (np. ?top_n=30)
+    """
+    from core.cities_pl import CITIES_PL, VOIVODESHIPS, cities_in_voivodeship, get_top_cities
+    _ = cur
+    if voivodeship:
+        cities = cities_in_voivodeship(voivodeship)
+    elif top_n:
+        cities = get_top_cities(top_n)
+    else:
+        cities = CITIES_PL
+    return {
+        "cities": cities,
+        "voivodeships": VOIVODESHIPS,
+        "total": len(CITIES_PL),
+    }
+
+
+# ── Discovery Exclusions (per-workspace blacklist) ─────────────────────
+
+class DiscoveryExclusionIn(BaseModel):
+    exclusion_type: str  # 'domain' | 'brand' | 'city_segment'
+    value: str
+    reason: str | None = None
+
+
+@app.get("/api/discovery/exclusions")
+def list_exclusions(cur: CurrentUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+    """Lista exclusions per workspace - co nie ma sensu skanowac."""
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(DiscoveryExclusion).where(
+                DiscoveryExclusion.workspace_id == cur.workspace_id,
+            ).order_by(DiscoveryExclusion.created_at.desc())
+        ).scalars().all()
+        return [{
+            "id": r.id, "exclusion_type": r.exclusion_type,
+            "value": r.value, "reason": r.reason,
+            "created_at": iso_utc(r.created_at),
+        } for r in rows]
+
+
+@app.post("/api/discovery/exclusions")
+def add_exclusion(
+    payload: DiscoveryExclusionIn,
+    cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Dodaj wykluczenie. Idempotent - jak juz istnieje, zwraca 200 OK
+    z istniejacym id."""
+    valid_types = {"domain", "brand", "city_segment"}
+    if payload.exclusion_type not in valid_types:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Nieprawidlowy typ. Dozwolone: {sorted(valid_types)}",
+        )
+    value = (payload.value or "").strip().lower()
+    if not value:
+        raise HTTPException(status_code=422, detail="Wartosc nie moze byc pusta.")
+
+    with SessionLocal() as session:
+        existing = session.execute(
+            select(DiscoveryExclusion).where(
+                DiscoveryExclusion.workspace_id == cur.workspace_id,
+                DiscoveryExclusion.exclusion_type == payload.exclusion_type,
+                DiscoveryExclusion.value == value,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return {"ok": True, "id": existing.id, "created": False}
+        excl = DiscoveryExclusion(
+            workspace_id=cur.workspace_id, user_id=cur.user_id,
+            exclusion_type=payload.exclusion_type,
+            value=value, reason=(payload.reason or "").strip() or None,
+        )
+        session.add(excl)
+        session.commit()
+        session.refresh(excl)
+        return {"ok": True, "id": excl.id, "created": True}
+
+
+@app.delete("/api/discovery/exclusions/{exclusion_id}")
+def delete_exclusion(
+    exclusion_id: int, cur: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    with SessionLocal() as session:
+        excl = session.execute(
+            select(DiscoveryExclusion).where(
+                DiscoveryExclusion.id == exclusion_id,
+                DiscoveryExclusion.workspace_id == cur.workspace_id,
+            )
+        ).scalar_one_or_none()
+        if excl is None:
+            raise HTTPException(status_code=404, detail="Nie ma takiego wykluczenia.")
+        session.delete(excl)
+        session.commit()
+    return {"ok": True}
+
+
 # Cache TTL dla discovery runow - po tym czasie ten sam (segment, location,
 # sources) wywoluje API od nowa. 30 dni = balance miedzy ratowaniem kredytu
 # a swiezoscia danych (firmy umieraja/powstaja powoli).
@@ -2513,6 +2621,53 @@ def _find_cached_discovery(
             DiscoveryRun.cached_places.isnot(None),
         ).order_by(DiscoveryRun.run_at.desc()).limit(1)
     ).scalar_one_or_none()
+
+
+def _filter_excluded(places: list, workspace_id: int) -> list:
+    """Wyrzuca places ktore matchuja domain/brand z DiscoveryExclusion.
+
+    Match logika:
+      - 'domain': znormalizowana domena z place.website zawiera wartosc
+      - 'brand': nazwa firmy (place.name) zawiera wartosc (case insensitive)
+
+    Zwraca tylko te ktore PRZESZLY filter (NIE wykluczone).
+    Tania query - jedno SELECT exclusions per workspace.
+    """
+    from core.urls import normalize_url
+
+    if not places:
+        return places
+    with SessionLocal() as session:
+        exclusions = session.execute(
+            select(DiscoveryExclusion).where(
+                DiscoveryExclusion.workspace_id == workspace_id,
+                DiscoveryExclusion.exclusion_type.in_(["domain", "brand"]),
+            )
+        ).scalars().all()
+    if not exclusions:
+        return places
+
+    excluded_domains = {
+        e.value.lower() for e in exclusions if e.exclusion_type == "domain"
+    }
+    excluded_brands = {
+        e.value.lower() for e in exclusions if e.exclusion_type == "brand"
+    }
+
+    kept = []
+    for p in places:
+        # Domain match (substring w znormalizowanej domenie)
+        if excluded_domains:
+            domain = normalize_url(p.website or "").lower()
+            if any(d in domain for d in excluded_domains):
+                continue
+        # Brand match (nazwa zawiera value)
+        if excluded_brands:
+            name_lower = (p.name or "").lower()
+            if any(b in name_lower for b in excluded_brands):
+                continue
+        kept.append(p)
+    return kept
 
 
 def _run_expanded_discovery(
@@ -2634,6 +2789,9 @@ def _run_expanded_discovery(
 
     # Mark istniejace leady (existing_lead_id) zeby user wiedzial co duplikat
     mark_existing_in_db(deduped, workspace_id=cur.workspace_id)
+
+    # Filter exclusions - znormalizowana domena lub brand match
+    deduped = _filter_excluded(deduped, cur.workspace_id)
 
     # LLM relevance scoring na mergowanej liscie
     rel_map: dict[int, dict[str, Any]] = {}
@@ -2834,6 +2992,9 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
             ))
             session.commit()
         raise HTTPException(status_code=502, detail=f"Błąd źródeł: {exc}")
+
+    # Apply user-defined exclusions (domain/brand) przed LLM scoring
+    places = _filter_excluded(places, cur.workspace_id)
 
     rel_map: dict[int, dict[str, Any]] = {}
     relevance_source = "none"  # "llm" | "heuristic" | "none"
