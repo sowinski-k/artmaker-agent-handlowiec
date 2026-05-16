@@ -422,6 +422,68 @@ def handle_poll_woodpecker(session: Session, job: Job) -> dict:
     return counts
 
 
+def _autonomous_cache_lookup(
+    workspace_id: int,
+    segment: str,
+    city: str,
+    sources_list: list[str],
+    custom_desc: str | None,
+    ttl_days: int = 30,
+) -> tuple[list[Any] | None, int, bool]:
+    """Sprawdza cache w discovery_runs dla (workspace, segment, city, sources).
+
+    Returns (cached_places, prev_leads_added, skip_because_zero_new):
+    - cached_places: lista DiscoveredPlace z cache albo None (cache miss)
+    - prev_leads_added: ile leadow poprzedni run dodal (0 = wszystko duplikaty)
+    - skip_because_zero_new: True jezeli poprzedni run dal 0 nowych - znaczy ze
+      ta kombinacja juz nic nie da, mozemy skipowac calkowicie (oszczednosc API)
+
+    TTL 30d match z manual discovery_search cache logic w web/main.py.
+    """
+    import hashlib
+    from agent.discovery import DiscoveredPlace
+    from core.db import DiscoveryRun, SessionLocal
+
+    sources_csv = ",".join(sorted(sources_list))
+    key = "|".join([
+        segment.lower(),
+        city.lower(),
+        sources_csv,
+        (custom_desc or "").strip().lower(),
+    ])
+    query_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=ttl_days)).replace(tzinfo=None)
+
+    with SessionLocal() as sess:
+        latest = sess.execute(
+            select(DiscoveryRun).where(
+                DiscoveryRun.workspace_id == workspace_id,
+                DiscoveryRun.query_hash == query_hash,
+                DiscoveryRun.run_at >= cutoff,
+            ).order_by(DiscoveryRun.run_at.desc()).limit(1)
+        ).scalar_one_or_none()
+
+        if latest is None:
+            return None, 0, False
+
+        # Hard skip: jezeli poprzedni run mial >= 1 place ale dodal 0 leadow,
+        # znaczy ze WSZYSTKO juz w bazie. Nie ma sensu odpalac LLM relevance
+        # bo i tak filter `existing_lead_id is None` da pusta liste.
+        if latest.result_count > 0 and latest.leads_added == 0:
+            return [], int(latest.leads_added), True
+
+        if latest.cached_places is None:
+            return None, int(latest.leads_added), False
+
+        try:
+            places = [DiscoveredPlace(**p) for p in latest.cached_places]
+        except Exception:
+            return None, int(latest.leads_added), False
+
+        return places, int(latest.leads_added), False
+
+
 def _save_fallback_lead_from_place(
     place: Any,
     *,
@@ -606,6 +668,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     new_leads_count = 0
     cities_processed = 0
     cities_skipped_no_results = 0
+    cities_from_cache = 0  # ile (segment,city) wzietych z cache zamiast API
+    cities_skipped_all_duplicates = 0  # ile poprzedni run dal 0 nowych - skip
     drafts_made = 0
     # Tracking bledow researchu - user musi widziec ile leadow przeleciało
     # przez filter ALE research nie poszedl (timeout, CloudFlare, brak API key).
@@ -646,6 +710,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "estimated_cost_usd": round(estimated_cost, 3),
             "max_cost_usd": max_cost,
             "cities_skipped_no_results": cities_skipped_no_results,
+            "cities_from_cache": cities_from_cache,
+            "cities_skipped_all_duplicates": cities_skipped_all_duplicates,
             "research_errors_count": research_errors_count,
             "last_research_error": last_research_error,
             "recent": list(recent),  # deque maxlen=15, juz bounded
@@ -678,26 +744,74 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         # Live update - user widzi "Sprawdzam: Warszawa (sklep_papierniczy)"
         _save_progress(current_city=city_name)
 
-        # Run search dla tego miasta
-        try:
-            places, _diag = run_search(
-                sources,
-                query=query,
-                max_results_per_source=60,
-                workspace_id=job.workspace_id,
-                city_filter=city_name,
+        # CACHE LOOKUP: jezeli ta sama kombinacja (workspace, segment, city,
+        # sources, custom_desc) byla skanowana w ostatnich 30 dniach - bierzemy
+        # cached places z DB zamiast wywolywac Google Places / Apify ponownie.
+        # Plus: jezeli poprzedni run dal places ALE 0 nowych leadow
+        # (wszystko duplikaty) - skip calkowicie, bo i tak nic nowego nie da.
+        cached_places, prev_leads_added, skip_zero = _autonomous_cache_lookup(
+            workspace_id=job.workspace_id,
+            segment=current_segment_label,
+            city=city_name,
+            sources_list=sources_list,
+            custom_desc=custom_desc,
+            ttl_days=30,
+        )
+
+        if skip_zero:
+            cities_skipped_all_duplicates += 1
+            log.info(
+                f"Job #{job.id} SKIP {current_segment_label}+{city_name} "
+                f"(poprzedni run = 0 nowych, wszystko duplikaty)"
             )
-            estimated_cost += len(sources) * 0.03
-        except Exception as exc:
-            log.warning(f"Job #{job.id} {current_segment_label}+{city_name!r} search failed: {exc}")
             recent.append({
                 "name": city_name, "segment": current_segment_label,
                 "city": city_name,
-                "status": "city_search_failed",
-                "error": str(exc)[:120],
+                "status": "city_skipped_cache_no_new",
+                "places_found": 0,
+                "matching_relevance": 0,
             })
             _save_progress(current_city=city_name)
             continue
+
+        if cached_places is not None:
+            cities_from_cache += 1
+            places = cached_places
+            log.info(
+                f"Job #{job.id} CACHE HIT {current_segment_label}+{city_name} "
+                f"({len(places)} places, prev_leads={prev_leads_added})"
+            )
+            # Cache hit = ZERO kosztu API. Nic nie dodajemy do estimated_cost.
+        else:
+            # Cache miss - prawdziwy API call
+            try:
+                places, _diag = run_search(
+                    sources,
+                    query=query,
+                    max_results_per_source=60,
+                    workspace_id=job.workspace_id,
+                    city_filter=city_name,
+                )
+                estimated_cost += len(sources) * 0.03
+            except Exception as exc:
+                log.warning(f"Job #{job.id} {current_segment_label}+{city_name!r} search failed: {exc}")
+                recent.append({
+                    "name": city_name, "segment": current_segment_label,
+                    "city": city_name,
+                    "status": "city_search_failed",
+                    "error": str(exc)[:120],
+                })
+                _save_progress(current_city=city_name)
+                continue
+
+        # Po cache hit places nie maja existing_lead_id wypelnionego (mark_existing
+        # nie byl wolany na cached snapshot). Musimy zmarkowac przed filter.
+        if cached_places is not None and places:
+            try:
+                from agent.discovery import mark_existing_in_db
+                mark_existing_in_db(places, workspace_id=job.workspace_id)
+            except Exception as exc:
+                log.warning(f"mark_existing_in_db on cached places failed: {exc}")
 
         # Relevance filter - tylko nowe places (rename pl zeby nie shadow'owac p=payload)
         new_places_for_llm = [
@@ -920,6 +1034,8 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         "drafts_made": drafts_made,
         "cities_processed": cities_processed,
         "cities_skipped_no_results": cities_skipped_no_results,
+        "cities_from_cache": cities_from_cache,
+        "cities_skipped_all_duplicates": cities_skipped_all_duplicates,
         "research_errors_count": research_errors_count,
         "last_research_error": last_research_error,
         "estimated_cost_usd": round(estimated_cost, 3),
