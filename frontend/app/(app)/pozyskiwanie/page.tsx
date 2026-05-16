@@ -28,6 +28,7 @@ interface DiscoveredPlace {
   website: string | null;
   address: string | null;
   phone: string | null;
+  email: string | null;
   rating: number | null;
   review_count: number | null;
   existing_lead_id: number | null;
@@ -159,6 +160,15 @@ export default function PozyskiwaniePage() {
   const [selectedSources, setSelectedSources] = useState<string[]>(['google_places']);
   const [autoDraft, setAutoDraft] = useState(false);
   const [relevanceThreshold, setRelevanceThreshold] = useState(6);
+  // Allegro query mode - widoczne tylko gdy 'apify_allegro' w selectedSources.
+  // 'preset' = preset branzowy z core/industry_presets.py (najbardziej skalowalne)
+  // 'keyword' = user wpisuje wlasne slowo kluczowe
+  // 'category' = user wkleja URL kategorii Allegro
+  const [allegroMode, setAllegroMode] = useState<'preset' | 'keyword' | 'category'>('preset');
+  const [allegroPreset, setAllegroPreset] = useState('sklep_plastyczny');
+  const [allegroKeyword, setAllegroKeyword] = useState('');
+  const [allegroCategoryUrl, setAllegroCategoryUrl] = useState('');
+  const [industryPresets, setIndustryPresets] = useState<{ key: string; label: string }[]>([]);
 
   // Peek state (manual)
   const [peeking, setPeeking] = useState(false);
@@ -198,6 +208,31 @@ export default function PozyskiwaniePage() {
     const t = setTimeout(() => setFlash(null), 5000);
     return () => clearTimeout(t);
   }, [flash]);
+
+  // Pobierz presety branzy z backendu (uzywane gdy Allegro w trybie 'preset')
+  useEffect(() => {
+    let cancelled = false;
+    api<{ key: string; label: string }[]>('/api/discovery/industry-presets')
+      .then((data) => { if (!cancelled) setIndustryPresets(data); })
+      .catch(() => { /* fallback - allegro mode 'preset' bedzie pusty */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Allegro source_queries - zbuduj na podstawie wybranego trybu.
+  // Wraca null jak Allegro nie jest zaznaczone (zaden override).
+  function buildAllegroQuery(): string | null {
+    if (!selectedSources.includes('apify_allegro')) return null;
+    if (allegroMode === 'keyword') return `keyword:${allegroKeyword.trim()}`;
+    if (allegroMode === 'category') return `category:${allegroCategoryUrl.trim()}`;
+    if (allegroMode === 'preset') return `preset:${allegroPreset}`;
+    return null;
+  }
+
+  function buildSourceQueries(): Record<string, string> | undefined {
+    const allegro = buildAllegroQuery();
+    if (!allegro) return undefined;
+    return { apify_allegro: allegro };
+  }
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -294,6 +329,7 @@ export default function PozyskiwaniePage() {
         body: JSON.stringify({
           query: buildQuery(),
           sources: selectedSources,
+          source_queries: buildSourceQueries(),
           max_per_source: maxPerSource,
           segment,
           location: location.trim() || null,
@@ -428,6 +464,7 @@ export default function PozyskiwaniePage() {
         body: JSON.stringify({
           query: buildQuery(),
           sources: selectedSources,
+          source_queries: buildSourceQueries(),
           max_per_source: maxPerSource,
           segment,
           location: location.trim() || null,
@@ -766,6 +803,100 @@ export default function PozyskiwaniePage() {
               </div>
             </div>
 
+            {/* Allegro mode panel - widoczny tylko gdy 'apify_allegro' zaznaczone */}
+            {selectedSources.includes('apify_allegro') && (
+              <div className="field allegro-panel">
+                <label>
+                  <i className="ti ti-shopping-cart" /> Allegro - tryb wyszukiwania
+                </label>
+                <div className="allegro-mode-grid">
+                  <label className={`allegro-mode-card ${allegroMode === 'preset' ? 'on' : ''}`}>
+                    <input
+                      type="radio"
+                      name="allegro-mode"
+                      checked={allegroMode === 'preset'}
+                      onChange={() => setAllegroMode('preset')}
+                    />
+                    <div className="amc-content">
+                      <div className="amc-title">Preset branżowy</div>
+                      <div className="amc-desc">
+                        Wbudowane keywords + kategorie + filtry skali per branża.
+                        Rekomendowane.
+                      </div>
+                    </div>
+                  </label>
+                  <label className={`allegro-mode-card ${allegroMode === 'keyword' ? 'on' : ''}`}>
+                    <input
+                      type="radio"
+                      name="allegro-mode"
+                      checked={allegroMode === 'keyword'}
+                      onChange={() => setAllegroMode('keyword')}
+                    />
+                    <div className="amc-content">
+                      <div className="amc-title">Po słowie kluczowym</div>
+                      <div className="amc-desc">
+                        Wpisz dokładnie czego szukasz (np. "farby akrylowe hurt").
+                      </div>
+                    </div>
+                  </label>
+                  <label className={`allegro-mode-card ${allegroMode === 'category' ? 'on' : ''}`}>
+                    <input
+                      type="radio"
+                      name="allegro-mode"
+                      checked={allegroMode === 'category'}
+                      onChange={() => setAllegroMode('category')}
+                    />
+                    <div className="amc-content">
+                      <div className="amc-title">URL kategorii Allegro</div>
+                      <div className="amc-desc">
+                        Wklej link kategorii (np. allegro.pl/kategoria/sztuki-piekne-...).
+                      </div>
+                    </div>
+                  </label>
+                </div>
+
+                {allegroMode === 'preset' && (
+                  <div style={{ marginTop: 10 }}>
+                    <select
+                      value={allegroPreset}
+                      onChange={(e) => setAllegroPreset(e.target.value)}
+                      style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #E5E7EB', fontSize: 13.5 }}
+                    >
+                      {industryPresets.length === 0 ? (
+                        <option value="sklep_plastyczny">Sklepy plastyczne / artystyczne</option>
+                      ) : (
+                        industryPresets.map((p) => (
+                          <option key={p.key} value={p.key}>{p.label}</option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                )}
+                {allegroMode === 'keyword' && (
+                  <input
+                    type="text"
+                    value={allegroKeyword}
+                    onChange={(e) => setAllegroKeyword(e.target.value)}
+                    placeholder="np. farby akrylowe hurt"
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #E5E7EB', fontSize: 13.5, marginTop: 10 }}
+                  />
+                )}
+                {allegroMode === 'category' && (
+                  <input
+                    type="url"
+                    value={allegroCategoryUrl}
+                    onChange={(e) => setAllegroCategoryUrl(e.target.value)}
+                    placeholder="https://allegro.pl/kategoria/..."
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #E5E7EB', fontSize: 13.5, marginTop: 10 }}
+                  />
+                )}
+                <span className="field-hint" style={{ marginTop: 8 }}>
+                  Po stage 1 (lista sprzedawców) agent włączy stage 2 - scraping
+                  emaili z profili sprzedawców (1.2s/seller). Wyniki w "Pozyskane" z emailem.
+                </span>
+              </div>
+            )}
+
             <div className="form-row" style={{ alignItems: 'center' }}>
               <div className="field" style={{ maxWidth: 280 }}>
                 <label>
@@ -1026,6 +1157,11 @@ export default function PozyskiwaniePage() {
                             {p.website.replace(/^https?:\/\//, '').slice(0, 28)}...
                           </a>
                         ) : '-'}
+                        {p.email && (
+                          <div style={{ fontSize: 11, color: '#10B981', marginTop: 2, fontFamily: 'JetBrains Mono, monospace' }}>
+                            <i className="ti ti-mail" /> {p.email}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1671,6 +1807,40 @@ table.tbl tr:hover td { background: #FAFAF7; }
   flex-shrink: 0;
 }
 .check-card i { color: #D4212C; }
+
+/* Allegro mode panel - widoczny gdy 'apify_allegro' jest w selectedSources */
+.allegro-panel {
+  background: #FAFAF7;
+  border: 1px solid #E5E7EB;
+  border-radius: 9px;
+  padding: 14px;
+}
+.allegro-panel > label:first-child {
+  display: flex; align-items: center; gap: 6px;
+  font-weight: 600; font-size: 13px;
+}
+.allegro-panel > label:first-child i { color: #D4212C; font-size: 16px; }
+.allegro-mode-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px; margin-top: 10px;
+}
+.allegro-mode-card {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 10px; border: 1px solid #E5E7EB; border-radius: 7px;
+  background: #fff; cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.allegro-mode-card:hover { border-color: #D1D5DB; }
+.allegro-mode-card.on {
+  border-color: #D4212C;
+  background: #FEF7F7;
+}
+.allegro-mode-card input[type="radio"] {
+  accent-color: #D4212C; margin-top: 1px; flex-shrink: 0;
+}
+.amc-content { flex: 1; }
+.amc-title { font-size: 12.5px; font-weight: 600; color: #111; margin-bottom: 2px; }
+.amc-desc { font-size: 11px; color: #6B7280; line-height: 1.4; }
 
 /* ============ COST ESTIMATE ============ */
 .cost-estimate {

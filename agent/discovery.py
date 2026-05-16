@@ -28,11 +28,12 @@ class DiscoveredPlace(BaseModel):
     """A lead candidate produced by some source. Matches the bare minimum we
     need to send the URL into research_and_save()."""
 
-    source: str  # "apify" | "google_places" | "csv"
+    source: str  # "apify" | "google_places" | "csv" | "apify_allegro" | ...
     name: str
     website: str | None = None
     address: str | None = None
     phone: str | None = None
+    email: str | None = None  # opcjonalne: Apify Allegro Email Scraper (stage 2)
     rating: float | None = None
     review_count: int | None = None
     raw_id: str | None = None
@@ -186,12 +187,30 @@ class ApifySource:
 
 
 class ApifyAllegroSource:
-    """Apify Allegro Scraper — finds sellers and offers on Allegro.pl.
+    """Apify Allegro Scraper - 2-stage pipeline.
 
-    Useful for sourcing competitor sellers in plastic/art categories that we
-    could approach for B2B / private label deals. Default actor configurable
-    via APIFY_ALLEGRO_ACTOR (no widely-adopted "official" Allegro actor on
-    the marketplace; user picks one from apify.com/store).
+    Stage 1 (search): query Allegro przez parseforge/allegro-scraper.
+      Obsluguje 3 tryby query, koduje sie w prefix query string:
+        - "keyword:<text>"          - search po slowie kluczowym (default)
+        - "category:<url>"          - search po URL kategorii Allegro
+        - "preset:<segment>"        - lookup w core/industry_presets.py
+                                      (zwraca keywords + filtry skali)
+      Brak prefixu -> traktuje jako keyword (backward-compat).
+
+    Po stage 1 robimy dedup po seller (jeden sklep = wiele ofert).
+
+    Stage 2 (email enrichment): jesli skonfigurowany
+    APIFY_ALLEGRO_EMAIL_ACTOR, bierze unique seller URLs i scrapuje maile
+    z profili sprzedawcow. Wynik wraca jako `place.phone/email` na
+    DiscoveredPlace (place.phone bo nie mamy email field na model;
+    placeholder dla email-domain dedup).
+
+    Filtry skali (min_reviews, min_rating) sa aplikowane na koncu stage 1
+    przed dedupem - sprzedawcy bez sygnalow skali sa odrzucani.
+
+    Config:
+        APIFY_ALLEGRO_ACTOR        (default: parseforge~allegro-scraper)
+        APIFY_ALLEGRO_EMAIL_ACTOR  (default: contactminerlabs~allegro-email-scraper)
     """
 
     name = "apify_allegro"
@@ -200,34 +219,164 @@ class ApifyAllegroSource:
         return has_apify_token() and bool(settings.apify_allegro_actor)
 
     def search(self, *, query: str, max_results: int) -> list[DiscoveredPlace]:
-        payload = {
-            "searchTerms": [query],
-            "maxItems": min(max_results, 100),
-        }
-        data = _apify_run_actor(settings.apify_allegro_actor, payload)
-        return [self._normalize(item) for item in data][:max_results]
+        mode, value = self._parse_query(query)
+        min_reviews = 0
+        min_rating = 0.0
+        keywords: list[str] = []
+        category_urls: list[str] = []
+
+        if mode == "keyword":
+            keywords = [value]
+        elif mode == "category":
+            category_urls = [value]
+        elif mode == "preset":
+            from core.industry_presets import get_preset
+            preset = get_preset(value)
+            keywords = preset["allegro_keywords"]
+            category_urls = preset["allegro_categories"]
+            min_reviews = preset["min_reviews"]
+            min_rating = preset["min_rating"]
+
+        # parseforge actor accepts searchTerms (keywords) OR startUrls (URLs).
+        # Send both - actor handles each, results get merged in dataset.
+        payload: dict = {"maxItems": min(max_results * 3, 300)}
+        if keywords:
+            payload["searchTerms"] = keywords
+        if category_urls:
+            payload["startUrls"] = [{"url": u} for u in category_urls]
+        if not keywords and not category_urls:
+            return []  # preset bez kategorii / keywords - nic do scrapowania
+
+        try:
+            data = _apify_run_actor(settings.apify_allegro_actor, payload)
+        except Exception:
+            # Nie psuj reszty discovery - zwroc pusto, run_search to zbierze
+            # jako per-source error w diagnostics.
+            raise
+
+        # Stage 1 normalize + filtr skali
+        places: list[DiscoveredPlace] = []
+        for item in data:
+            place = self._normalize(item)
+            if min_reviews and (place.review_count or 0) < min_reviews:
+                continue
+            if min_rating and (place.rating or 0) < min_rating:
+                continue
+            places.append(place)
+
+        # Dedup po sellerze (jeden sklep = wiele ofert na Allegro)
+        deduped = self._dedup_by_seller(places)[:max_results]
+
+        # Stage 2 - email enrichment (opt-in, tylko jesli actor skonfigurowany)
+        if settings.apify_allegro_email_actor and deduped:
+            self._enrich_emails(deduped)
+
+        return deduped
+
+    @staticmethod
+    def _parse_query(q: str) -> tuple[str, str]:
+        """Zwraca (mode, value). Default 'keyword' jak nie ma prefixu."""
+        if not q or ":" not in q:
+            return "keyword", (q or "").strip()
+        prefix, _, rest = q.partition(":")
+        prefix = prefix.strip().lower()
+        rest = rest.strip()
+        if prefix in {"keyword", "category", "preset"}:
+            return prefix, rest
+        return "keyword", q.strip()
 
     @staticmethod
     def _normalize(item: dict) -> DiscoveredPlace:
+        seller_obj = item.get("seller") or {}
         seller = (
             item.get("sellerName")
-            or item.get("seller", {}).get("login")
+            or seller_obj.get("login")
+            or seller_obj.get("name")
             or item.get("sellerLogin")
-            or item.get("title")
             or "(sprzedawca Allegro)"
+        )
+        # sellerUrl ma byc kluczem dedupu - URL strony sklepu Allegro.
+        seller_url = (
+            item.get("sellerUrl")
+            or seller_obj.get("url")
+            or seller_obj.get("storeUrl")
         )
         return DiscoveredPlace(
             source="apify_allegro",
             name=str(seller),
-            website=item.get("sellerUrl")
-            or item.get("seller", {}).get("url")
-            or item.get("url"),
-            address=item.get("location"),
-            rating=item.get("sellerRating") or item.get("rating"),
-            review_count=item.get("sellerFeedbackCount") or item.get("reviewCount"),
-            raw_id=item.get("offerId") or item.get("id"),
-            notes=item.get("category") or "Allegro listing",
+            website=seller_url,
+            address=item.get("location") or seller_obj.get("location"),
+            rating=item.get("sellerRating") or seller_obj.get("rating") or item.get("rating"),
+            review_count=(
+                item.get("sellerFeedbackCount")
+                or seller_obj.get("feedbackCount")
+                or item.get("reviewCount")
+            ),
+            raw_id=seller_obj.get("id") or item.get("offerId") or item.get("id"),
+            notes=item.get("category") or "Allegro seller",
         )
+
+    @staticmethod
+    def _dedup_by_seller(places: list[DiscoveredPlace]) -> list[DiscoveredPlace]:
+        """Dedup po sellerUrl (Allegro seller page URL). Zachowuje pierwszy
+        wpis dla danego sprzedawcy - reszta ofert tego samego sklepu jest
+        droppowana. Preferuje wpis z najwyzsza review_count."""
+        seen: dict[str, DiscoveredPlace] = {}
+        for p in places:
+            key = (p.website or p.raw_id or p.name or "").strip().lower()
+            if not key:
+                continue
+            if key not in seen:
+                seen[key] = p
+            elif (p.review_count or 0) > (seen[key].review_count or 0):
+                seen[key] = p
+        return list(seen.values())
+
+    @staticmethod
+    def _enrich_emails(places: list[DiscoveredPlace]) -> None:
+        """Stage 2: in-place enrichment - dla kazdego place'a probuje
+        wyciagnac email ze strony Allegro sprzedawcy. Email trzymamy w
+        place.phone bo na modelu nie ma osobnego pola email - downstream
+        save_lead() wyciaga jedno i drugie z notes/strony WWW.
+
+        Bezpieczne na failures: jak actor sie wywali, oryginalne places
+        wracaja bez enrichmentu."""
+        seller_urls = [p.website for p in places if p.website]
+        if not seller_urls:
+            return
+
+        try:
+            data = _apify_run_actor(
+                settings.apify_allegro_email_actor,
+                {"startUrls": [{"url": u} for u in seller_urls], "maxItems": len(seller_urls)},
+                timeout=120.0,
+            )
+        except Exception:
+            # Email enrichment to feature dodatkowy - nie psujemy stage 1
+            # jak email-actor padnie. Sprzedawcy wracaja bez maili.
+            return
+
+        # Index emails by seller URL (key normalized to host)
+        from core.urls import normalize_url as _nu
+        emails_by_key: dict[str, str] = {}
+        for item in data:
+            url = item.get("url") or item.get("sellerUrl") or item.get("source")
+            email = item.get("email") or item.get("emails", [None])[0]
+            if not url or not email:
+                continue
+            key = _nu(url)
+            if key and key not in emails_by_key:
+                emails_by_key[key] = str(email).strip()
+
+        if not emails_by_key:
+            return
+
+        for p in places:
+            if not p.website:
+                continue
+            key = _nu(p.website)
+            if key in emails_by_key:
+                p.email = emails_by_key[key]
 
 
 class ApifyLinkedInSource:
@@ -408,6 +557,7 @@ def run_search(
     progress_callback: Callable[[str, str], None] | None = None,
     workspace_id: int | None = None,
     city_filter: str | None = None,
+    source_queries: dict[str, str] | None = None,
 ) -> tuple[list[DiscoveredPlace], list[SourceResult]]:
     """Run all enabled sources in parallel; return deduplicated places + per-source diagnostics.
 
@@ -415,6 +565,10 @@ def run_search(
     miasta (substring match po normalizacji, fallback na postal code prefix).
     Aplikuje sie PO mergu z roznych zrodel, PRZED mark_existing_in_db (oszczednosc
     SQL) i PRZED relevance scoring (oszczednosc LLM).
+
+    source_queries: opcjonalny override - mapowanie source.name -> query string.
+    Pozwala wyslac np. Google Places "sklep plastyczny" a Allegro "preset:X"
+    w jednym wywolaniu. Brak override = source dostaje glowny `query`.
     """
     import time
 
@@ -427,7 +581,8 @@ def run_search(
             progress_callback(src.name, "started")
         t0 = time.time()
         try:
-            places = src.search(query=query, max_results=max_results_per_source)
+            src_query = (source_queries or {}).get(src.name, query)
+            places = src.search(query=src_query, max_results=max_results_per_source)
             return SourceResult(
                 source=src.name, places=places, duration_s=round(time.time() - t0, 2)
             )
@@ -535,6 +690,46 @@ def mark_existing_in_db(places: list[DiscoveredPlace], workspace_id: int | None 
         norm = normalize_url(p.website)
         if norm in by_norm:
             p.existing_lead_id, p.existing_lead_score = by_norm[norm]
+
+    # Dedup layer 2: po domenie emaila. Useful dla Allegro - place.website
+    # to URL strony Allegro (allegro.pl/...), nie strona WWW firmy. Ale jak
+    # mamy email tomasz@artbox.pl, znamy domene 'artbox.pl' i mozemy
+    # sprawdzic czy istnieje lead z taka strona WWW albo emailem.
+    places_with_email = [p for p in places if p.email and p.existing_lead_id is None]
+    if places_with_email:
+        # Wyciagnij unikalne domeny z emaili
+        domains: dict[str, list[DiscoveredPlace]] = {}
+        for p in places_with_email:
+            email = p.email or ""
+            if "@" not in email:
+                continue
+            domain = email.rsplit("@", 1)[-1].strip().lower()
+            if domain:
+                domains.setdefault(domain, []).append(p)
+
+        if domains:
+            with SessionLocal() as session:
+                for domain, place_list in domains.items():
+                    # Match po lead.website (zawiera domene) ALBO lead.email
+                    # (konczy sie na @domain)
+                    row = session.execute(
+                        select(Lead.id, Lead.score).where(
+                            or_(
+                                Lead.website.ilike(f"%{domain}%"),
+                                Lead.email.ilike(f"%@{domain}"),
+                            ),
+                            Lead.deleted_at.is_(None),
+                            *(
+                                [Lead.workspace_id == workspace_id]
+                                if workspace_id is not None else []
+                            ),
+                        ).limit(1)
+                    ).first()
+                    if row is not None:
+                        lead_id, score = row
+                        for p in place_list:
+                            p.existing_lead_id = lead_id
+                            p.existing_lead_score = score
 
 
 # ---- Relevance filter (cheap LLM batch scoring) -----------------------------
