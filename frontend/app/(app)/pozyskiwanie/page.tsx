@@ -177,7 +177,7 @@ const POLSKA_LOCATIONS = [
   'Płock', 'Elbląg', 'Wałbrzych',
 ];
 
-type Mode = 'manual' | 'agent';
+type Mode = 'manual' | 'agent' | 'autonomous';
 type Flash = { kind: 'success' | 'error' | 'info'; text: string };
 
 export default function PozyskiwaniePage() {
@@ -196,6 +196,10 @@ export default function PozyskiwaniePage() {
   // Bulk discovery state - jeden klik = N jobow per city.
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
   const [bulkCount, setBulkCount] = useState<30 | 50 | 100>(30);
+  // Autonomous discovery - Faza 4
+  const [autonomousTarget, setAutonomousTarget] = useState(50);
+  const [autonomousBudget, setAutonomousBudget] = useState(5.0);
+  const [autonomousSubmitting, setAutonomousSubmitting] = useState(false);
   // Allegro query mode - widoczne tylko gdy 'apify_allegro' w selectedSources.
   // 'preset' = preset branzowy z core/industry_presets.py (najbardziej skalowalne)
   // 'keyword' = user wpisuje wlasne slowo kluczowe
@@ -621,6 +625,52 @@ export default function PozyskiwaniePage() {
     }
   }
 
+  // Autonomous discovery: agent sam iteruje top miast PL z celem +
+  // budżetem. Stop gdy target_new_leads osiagniete LUB max_cost_usd.
+  async function handleAutonomousDiscover() {
+    if (selectedSources.length === 0) {
+      setFlash({ kind: 'error', text: 'Wybierz przynajmniej jedno źródło.' });
+      return;
+    }
+    setAutonomousSubmitting(true);
+    try {
+      const res = await api<{ ok: boolean; job_id: number }>(
+        '/api/discovery/autonomous', {
+        method: 'POST',
+        body: JSON.stringify({
+          segment,
+          sources: selectedSources,
+          target_new_leads: autonomousTarget,
+          max_cost_usd: autonomousBudget,
+          relevance_threshold: relevanceThreshold,
+          auto_draft_threshold: autoDraft ? 7 : null,
+          custom_description: customTarget.trim() || null,
+        }),
+      });
+      setFlash({
+        kind: 'success',
+        text: (
+          `Agent autonomous uruchomiony (job #${res.job_id}). ` +
+          `Cel: ${autonomousTarget} nowych leadów, budżet $${autonomousBudget.toFixed(2)}. ` +
+          `Postępy w /pulpit. Możesz wylogować się - agent leci dalej.`
+        ),
+      });
+      // Pobierz info o jobie i pokazaj activeJob "panel pracy w tle"
+      try {
+        const job = await api<JobInfo>(`/api/jobs/${res.job_id}`);
+        setActiveJob(job);
+        if (job.status === 'pending' || job.status === 'running') {
+          startJobPolling(job.id);
+        }
+      } catch {/* ignore */}
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Błąd';
+      setFlash({ kind: 'error', text: msg });
+    } finally {
+      setAutonomousSubmitting(false);
+    }
+  }
+
   async function handleSendAgent(e: React.FormEvent) {
     e.preventDefault();
     if (selectedSources.length === 0) {
@@ -887,14 +937,14 @@ export default function PozyskiwaniePage() {
         )}
 
         {/* MODE TOGGLE */}
-        <div className="mode-tabs">
+        <div className="mode-tabs mode-tabs-3">
           <button
             className={`mode-tab ${mode === 'manual' ? 'active' : ''}`}
             onClick={() => setMode('manual')}>
             <div className="mode-tab-icon"><i className="ti ti-hand-click" /></div>
             <div className="mode-tab-text">
               <div className="mode-tab-name">Praca ręczna</div>
-              <div className="mode-tab-desc">Zobacz listę, wybierz co researchować. Nie pali tokenów dopóki nie klikniesz.</div>
+              <div className="mode-tab-desc">Zobacz listę, wybierz co researchować. Pojedyncze + bulk top miast.</div>
             </div>
           </button>
           <button
@@ -903,7 +953,16 @@ export default function PozyskiwaniePage() {
             <div className="mode-tab-icon"><i className="ti ti-truck-delivery" /></div>
             <div className="mode-tab-text">
               <div className="mode-tab-name">Wyślij agenta w teren</div>
-              <div className="mode-tab-desc">Agent sam znajdzie, zrobi research, wygeneruje drafty. Możesz wyjść.</div>
+              <div className="mode-tab-desc">Pojedyncze query - agent sam znajdzie, zrobi research, drafty.</div>
+            </div>
+          </button>
+          <button
+            className={`mode-tab ${mode === 'autonomous' ? 'active' : ''}`}
+            onClick={() => setMode('autonomous')}>
+            <div className="mode-tab-icon"><i className="ti ti-robot" /></div>
+            <div className="mode-tab-text">
+              <div className="mode-tab-name">Autonomous</div>
+              <div className="mode-tab-desc">Powiedz "chcę 50 nowych leadów za $5". Agent iteruje top miasta sam, stop gdy osiągnie cel.</div>
             </div>
           </button>
         </div>
@@ -1054,7 +1113,13 @@ export default function PozyskiwaniePage() {
               )}
             </div>
           </div>
-          <form onSubmit={mode === 'manual' ? handlePeek : handleSendAgent} className="card-body">
+          <form
+            onSubmit={
+              mode === 'manual' ? handlePeek
+                : mode === 'agent' ? handleSendAgent
+                : (e) => e.preventDefault()  // autonomous uzywa type=button, no submit
+            }
+            className="card-body">
             <div className="form-row">
               <div className="field">
                 <label>Segment</label>
@@ -1350,13 +1415,53 @@ export default function PozyskiwaniePage() {
                     </label>
                   </div>
                 )}
+                {mode === 'autonomous' && (
+                  <div className="autonomous-controls">
+                    <div className="autonomous-input">
+                      <label>Cel - ile nowych leadów chcę?</label>
+                      <input
+                        type="number" min={1} max={500}
+                        value={autonomousTarget}
+                        onChange={(e) => setAutonomousTarget(Math.max(1, Math.min(500, Number(e.target.value) || 50)))}
+                      />
+                      <span className="field-hint">1-500</span>
+                    </div>
+                    <div className="autonomous-input">
+                      <label>Max budżet API ($)</label>
+                      <input
+                        type="number" min={0.1} max={100} step={0.5}
+                        value={autonomousBudget}
+                        onChange={(e) => setAutonomousBudget(Math.max(0.1, Math.min(100, Number(e.target.value) || 5)))}
+                      />
+                      <span className="field-hint">Stop gdy osiągniesz</span>
+                    </div>
+                  </div>
+                )}
                 <div className="cta-row">
-                  <button type="submit" className="btn btn-primary btn-cta"
-                    disabled={submitButtonDisabled}>
-                    {mode === 'manual'
-                      ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
-                      : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
-                  </button>
+                  {mode === 'autonomous' ? (
+                    <button type="button" className="btn btn-primary btn-cta"
+                      onClick={handleAutonomousDiscover}
+                      disabled={autonomousSubmitting || selectedSources.length === 0 || !!jobActive}
+                      title={
+                        jobActive
+                          ? 'Aktywny job - poczekaj albo anuluj'
+                          : `Uruchom agenta autonomicznego - cel ${autonomousTarget} leadów, budżet $${autonomousBudget.toFixed(2)}`
+                      }
+                    >
+                      {autonomousSubmitting ? (
+                        <><i className="ti ti-loader" /> Startuję…</>
+                      ) : (
+                        <><i className="ti ti-robot" /> Uruchom agenta autonomicznego</>
+                      )}
+                    </button>
+                  ) : (
+                    <button type="submit" className="btn btn-primary btn-cta"
+                      disabled={submitButtonDisabled}>
+                      {mode === 'manual'
+                        ? <><i className="ti ti-search" /> Zajrzyj na rynek</>
+                        : <><i className="ti ti-rocket" /> Wyślij agenta w teren</>}
+                    </button>
+                  )}
                   {mode === 'manual' && (
                     <div className="bulk-cta-group">
                       <select
@@ -1779,6 +1884,40 @@ const CSS = `
   display: inline-flex; align-items: center; gap: 6px;
 }
 .btn-cta-bulk .ti-loader { animation: spin 1.2s linear infinite; }
+
+/* Mode tabs - 3 kolumny gdy mamy autonomous mode */
+.mode-tabs-3 {
+  grid-template-columns: 1fr 1fr 1fr !important;
+}
+@media (max-width: 800px) {
+  .mode-tabs-3 { grid-template-columns: 1fr !important; }
+}
+
+/* Autonomous mode controls - target + budget inputy */
+.autonomous-controls {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  padding: 16px; margin-bottom: 14px;
+  background: linear-gradient(135deg, #FEF3C7 0%, #FAFAF7 100%);
+  border: 1px solid #FDE68A; border-radius: 9px;
+}
+.autonomous-input {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: 1; min-width: 180px;
+}
+.autonomous-input label {
+  font-size: 12px; font-weight: 600; color: #4B5563;
+}
+.autonomous-input input {
+  padding: 8px 10px; border: 1px solid #FBBF24;
+  border-radius: 7px; font-size: 15px; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace; color: #92400E;
+  background: #fff;
+}
+.autonomous-input input:focus {
+  outline: none; border-color: #F59E0B;
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.2);
+}
+.autonomous-input .field-hint { font-size: 11px; color: #92400E; }
 
 .mode-tabs {
   display: grid;
