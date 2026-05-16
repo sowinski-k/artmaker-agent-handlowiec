@@ -422,6 +422,58 @@ def handle_poll_woodpecker(session: Session, job: Job) -> dict:
     return counts
 
 
+def _autonomous_filter_excluded(places: list, workspace_id: int) -> tuple[list, int]:
+    """Wyrzuca places ktore matchuja DiscoveryExclusion (domain / brand)
+    dla workspace'u. Worker MUSI to wolac przed relevance/research bo
+    inaczej user excludowal Empik a Empik nadal wpada do leadow.
+
+    Match identyczny jak web._filter_excluded:
+    - 'domain': znormalizowana domena z place.website zawiera value
+    - 'brand': name (case insensitive) zawiera value
+
+    Returns (kept_places, excluded_count) - count zeby pokazac w live
+    panelu ile wyleciało przez exclusion (debug + transparency).
+    """
+    if not places:
+        return places, 0
+
+    from core.db import DiscoveryExclusion, SessionLocal
+    from core.urls import normalize_url
+
+    with SessionLocal() as sess:
+        exclusions = sess.execute(
+            select(DiscoveryExclusion).where(
+                DiscoveryExclusion.workspace_id == workspace_id,
+                DiscoveryExclusion.exclusion_type.in_(["domain", "brand"]),
+            )
+        ).scalars().all()
+    if not exclusions:
+        return places, 0
+
+    excluded_domains = {
+        e.value.lower() for e in exclusions if e.exclusion_type == "domain"
+    }
+    excluded_brands = {
+        e.value.lower() for e in exclusions if e.exclusion_type == "brand"
+    }
+
+    kept: list = []
+    blocked = 0
+    for p in places:
+        if excluded_domains:
+            domain = (normalize_url(p.website or "") or "").lower()
+            if any(d in domain for d in excluded_domains):
+                blocked += 1
+                continue
+        if excluded_brands:
+            name_lower = (p.name or "").lower()
+            if any(b in name_lower for b in excluded_brands):
+                blocked += 1
+                continue
+        kept.append(p)
+    return kept, blocked
+
+
 def _autonomous_cache_lookup(
     workspace_id: int,
     segment: str,
@@ -812,6 +864,19 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 mark_existing_in_db(places, workspace_id=job.workspace_id)
             except Exception as exc:
                 log.warning(f"mark_existing_in_db on cached places failed: {exc}")
+
+        # EXCLUSION filter - wyrzuc places ktore matchuja DiscoveryExclusion
+        # (Empik, Flying Tiger Copenhagen, itp. dodane przez usera). MUSI byc
+        # PRZED relevance/research zeby nie palic tokenow LLM na excludowane
+        # firmy. Wczesniej autonomous to omijal -> Empik nadal wpadal.
+        places, excluded_now = _autonomous_filter_excluded(
+            places, workspace_id=job.workspace_id,
+        )
+        if excluded_now > 0:
+            log.info(
+                f"Job #{job.id} EXCLUSION: blocked {excluded_now} places for "
+                f"{current_segment_label}+{city_name} (Empik/brand/domain)"
+            )
 
         # Relevance filter - tylko nowe places (rename pl zeby nie shadow'owac p=payload)
         new_places_for_llm = [
