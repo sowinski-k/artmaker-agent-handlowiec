@@ -122,6 +122,7 @@ def handle_discovery_pipeline(session: Session, job: Job) -> dict:
         max_results_per_source=int(p.get("max_per_source", 50)),
         workspace_id=job.workspace_id,
         city_filter=p.get("location") if p.get("apply_city_filter", True) else None,
+        source_queries=p.get("source_queries"),
     )
 
     threshold = int(p.get("relevance_threshold", 6))

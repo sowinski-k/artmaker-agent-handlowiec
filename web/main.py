@@ -2430,6 +2430,11 @@ class DiscoverIn(BaseModel):
     relevance_threshold: int = 6
     auto_research: bool = True
     auto_draft_threshold: int | None = 7
+    # Per-source query override. Klucz = source key (np. "apify_allegro").
+    # Pozwala wyslac Google Places po "sklep plastyczny Krakow" a w tym samym
+    # requescie Apify Allegro po "preset:sklep_plastyczny". Brak override =
+    # source dostaje glowny `query`.
+    source_queries: dict[str, str] | None = None
 
 
 def _discovery_today_count(workspace_id: int) -> int:
@@ -2445,6 +2450,15 @@ def _discovery_today_count(workspace_id: int) -> int:
                 Lead.created_at >= _start_of_day_utc(),
             )
         ) or 0)
+
+
+@app.get("/api/discovery/industry-presets")
+def list_industry_presets(cur: CurrentUser = Depends(get_current_user)) -> list[dict[str, str]]:
+    """Lista presetow branz dla query mode 'preset' (Allegro discovery).
+    Frontend uzywa do dropdownu."""
+    from core.industry_presets import list_segments_with_presets
+    _ = cur  # auth check
+    return list_segments_with_presets()
 
 
 @app.post("/api/discovery/peek")
@@ -2492,6 +2506,7 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
             sources, query=payload.query,
             max_results_per_source=payload.max_per_source,
             workspace_id=cur.workspace_id,
+            source_queries=payload.source_queries,
         )
     except Exception as exc:
         log.exception(f"discovery_peek run_search failed: {exc}")
@@ -2534,7 +2549,7 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
     return {
         "places": [{
             "source": p.source, "name": p.name, "website": p.website,
-            "address": p.address, "phone": p.phone,
+            "address": p.address, "phone": p.phone, "email": p.email,
             "rating": p.rating, "review_count": p.review_count,
             "existing_lead_id": p.existing_lead_id,
             "existing_lead_score": p.existing_lead_score,
