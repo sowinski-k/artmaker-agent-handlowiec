@@ -78,7 +78,14 @@ def _build_prospect(lead: Lead, draft: EmailDraft) -> WoodpeckerProspect:
 
 
 def _count_sent_today() -> int:
-    """Ile draftów ostatnio poszło - do cap'a DAILY_EMAIL_LIMIT."""
+    """Ile draftów ostatnio poszło - do cap'a DAILY_EMAIL_LIMIT.
+
+    Uwaga: cap jest celowo wysoki (10k default) bo wlasciwa cadencja
+    wysylki maili jest po stronie Woodpeckera (jego kampania ma
+    daily_per_mailbox + throttle + schedule). My pushujemy prospects
+    do kampanii, Woodpecker je rozprowadza w czasie.
+    Cap zachowany jako infrastructure pod przyszle pakiety subskrypcyjne.
+    """
     start_of_day = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )

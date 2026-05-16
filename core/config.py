@@ -61,7 +61,14 @@ class Settings(BaseSettings):
     company_website: str = ""
 
     dry_run: bool = True
-    daily_email_limit: int = 30
+    # Ilu draftow mozemy max pushnac do Woodpeckera w jednym dniu UTC.
+    # Po naszej stronie ten cap jest ZACHOWANY tylko do przyszlych pakietow
+    # subskrypcyjnych (per-account limit). Wlasciwa cadencja wysylki maili
+    # JEST PO STRONIE WOODPECKERA - jego kampania ma daily sending limit
+    # per mailbox + throttle + schedule godzin pracy. User pushuje 10000
+    # prospects, Woodpecker je rozprowadza w czasie zgodnie z kampania.
+    # Default 10000 = praktycznie bez limitu dla MVP.
+    daily_email_limit: int = 10_000
     daily_research_limit: int = 100  # max nowych researchy / dzień (token guard)
     daily_api_budget_usd: float = 10.0
     log_level: str = "INFO"
