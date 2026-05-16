@@ -477,15 +477,41 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         "apify_allegro": ApifyAllegroSource, "apify_linkedin": ApifyLinkedInSource,
     }
     sources = []
+    unavailable: list[str] = []
     for s in sources_list:
         cls = src_classes.get(s)
         if cls is None:
+            unavailable.append(f"{s} (unknown type)")
             continue
         inst = cls()
         if inst.available():
             sources.append(inst)
+        else:
+            unavailable.append(f"{s} (brak API key)")
     if not sources:
-        raise RuntimeError("Brak skonfigurowanych zrodel discovery.")
+        # Deterministyczny blad (brak konfigurowanych source-ow) - retry nic nie da.
+        # Zwracamy result z error info zamiast raise - execute_job zapisze DONE z
+        # detalami, user widzi co poszlo nie tak (nie 3x retry → FAILED → znika).
+        msg = (
+            f"Brak skonfigurowanych zrodel discovery. "
+            f"Wybrane: {sources_list or []}. Niedostepne: {unavailable or []}. "
+            "Skonfiguruj API keys (APIFY_TOKEN, GOOGLE_PLACES_API_KEY) lub wybierz "
+            "inne zrodla w pozyskiwaniu."
+        )
+        log.warning(f"Job #{job.id} autonomous setup failed (no retry): {msg}")
+        return {
+            "target_new_leads": target,
+            "new_leads_count": 0,
+            "drafts_made": 0,
+            "cities_processed": 0,
+            "cities_skipped_no_results": 0,
+            "estimated_cost_usd": 0.0,
+            "max_cost_usd": max_cost,
+            "stopped_reason": "setup_error_no_sources",
+            "setup_error": msg,
+            "recent": [],
+            "last_progress_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     from collections import deque
 
@@ -613,6 +639,39 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "matching_relevance": len(targets),
         })
         _save_progress(current_city=city_name)
+
+        # History entry per (segment, city) - zeby autonomous run pojawil sie w
+        # panelu Historia rownolegle z manual discovery. Cache aktywny (30d):
+        # nastepny autonomous z tym samym segment+city dostanie cached_places.
+        try:
+            from core.db import DiscoveryRun
+            import hashlib
+            sources_csv = ",".join(sorted(sources_list))
+            key = "|".join([
+                current_segment_label.lower(),
+                city_name.lower(),
+                sources_csv,
+                (custom_desc or "").strip().lower(),
+            ])
+            query_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            session.add(DiscoveryRun(
+                workspace_id=job.workspace_id,
+                user_id=job.user_id,
+                query_hash=query_hash,
+                segment=current_segment_label,
+                location=city_name,
+                sources=sources_list,
+                query=query,
+                custom_description=custom_desc,
+                cached_places=[pl.model_dump() for pl in places] if places else None,
+                result_count=len(places),
+                leads_added=0,  # zaktualizujemy ponizej jak research zrobi nowy lead
+                cost_usd=round(len(sources_list) * 0.03, 3),
+                error=None,
+            ))
+            session.commit()
+        except Exception as exc:
+            log.warning(f"Job #{job.id} discovery_runs history write failed for {city_name}: {exc}")
 
         if not targets:
             cities_skipped_no_results += 1
