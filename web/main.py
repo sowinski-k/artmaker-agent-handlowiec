@@ -1317,27 +1317,33 @@ def create_lead(
     website_norm = normalize_url(website_raw) if website_raw else ""
 
     with SessionLocal() as session:
-        # Dedup po website (znormalizowanym) - jesli ten sam adres juz w bazie
-        # i nie w koszu -> 409 zamiast cicho tworzyc duplikat.
+        # Dedup po website (znormalizowanym) - prefilter ILIKE po hoscie zamiast
+        # SELECT *. Bez tego dla workspace'u z 10k+ leadow ladujemy wszystko
+        # do pamieci - skali nie wytrzyma. Teraz queryujemy tylko leady ze
+        # zblizonym hostem (max parescie wynikow), potem confirm po normalize_url.
         if website_norm:
-            existing = session.execute(
-                select(Lead).where(
-                    Lead.workspace_id == cur.workspace_id,
-                    Lead.deleted_at.is_(None),
-                )
-            ).scalars().all()
-            for ex in existing:
-                if normalize_url(ex.website) == website_norm:
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "message": (
-                                f"Lead o tym adresie www juz istnieje: "
-                                f"#{ex.id} {ex.company_name}."
-                            ),
-                            "existing_lead_id": ex.id,
-                        },
+            from core.urls import host_only as _host_only
+            host = _host_only(website_raw or "")
+            if host:
+                candidates = session.execute(
+                    select(Lead.id, Lead.website, Lead.company_name).where(
+                        Lead.workspace_id == cur.workspace_id,
+                        Lead.deleted_at.is_(None),
+                        Lead.website.ilike(f"%{host}%"),
                     )
+                ).all()
+                for ex_id, ex_website, ex_company in candidates:
+                    if normalize_url(ex_website) == website_norm:
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "message": (
+                                    f"Lead o tym adresie www juz istnieje: "
+                                    f"#{ex_id} {ex_company}."
+                                ),
+                                "existing_lead_id": ex_id,
+                            },
+                        )
 
         status_value = (
             LeadStatus.RESEARCHED.value if email else LeadStatus.NEW.value
@@ -1997,7 +2003,16 @@ def list_drafts(
     """
     limit = max(1, min(limit, 200))
     with SessionLocal() as session:
-        q = select(EmailDraft).options(joinedload(EmailDraft.lead)) \
+        # load_only: bez tego joinedload sciaga Lead.research_data (czesto >10KB
+        # JSON) dla kazdego draftu - duza alokacja pamieci. Bierzemy tylko pola
+        # potrzebne dla header'a maila w UI.
+        from sqlalchemy.orm import load_only as _load_only
+        q = select(EmailDraft).options(
+            joinedload(EmailDraft.lead).load_only(
+                Lead.id, Lead.company_name, Lead.contact_name, Lead.email,
+                Lead.segment, Lead.city, Lead.score,
+            )
+        ) \
             .where(EmailDraft.workspace_id == cur.workspace_id) \
             .order_by(desc(EmailDraft.created_at)).limit(limit)
         if status_filter and status_filter != "all":
@@ -2008,15 +2023,42 @@ def list_drafts(
         # Status SEND_DRAFT jobow dla tych draftow - kolejka i ostatni blad.
         # Worker triggeruje push_draft() ktore moze sie wywalic (DRY_RUN, brak
         # WOODPECKER_API_KEY, lead bez emaila, STOP.txt). Pokazujemy to userowi.
+        # Optymalizacja: zamiast ladowac 500 ostatnich SEND_DRAFT jobow i
+        # filtrowac w Pythonie, queryujemy tylko PENDING/RUNNING + FAILED dla
+        # widocznych draftow. Postgres jsonb query: payload->>'draft_id' in
+        # str_ids. Dla SQLite (dev) fallback do prostego filter w Pythonie.
         last_send_error: dict[int, str] = {}
         send_in_progress: set[int] = set()
         if draft_ids:
-            send_jobs = session.execute(
-                select(Job).where(
-                    Job.workspace_id == cur.workspace_id,
-                    Job.type == JobType.SEND_DRAFT.value,
-                ).order_by(desc(Job.created_at)).limit(500)
-            ).scalars().all()
+            dialect = session.get_bind().dialect.name
+            if dialect == "postgresql":
+                # Postgres: jsonb operator pozwala dac WHERE w SQL
+                from sqlalchemy import cast, Integer as SAInt
+                str_ids = [str(i) for i in draft_ids]
+                send_jobs = session.execute(
+                    select(Job).where(
+                        Job.workspace_id == cur.workspace_id,
+                        Job.type == JobType.SEND_DRAFT.value,
+                        Job.status.in_([
+                            JobStatus.PENDING.value, JobStatus.RUNNING.value,
+                            JobStatus.FAILED.value,
+                        ]),
+                        Job.payload["draft_id"].astext.in_(str_ids),
+                    ).order_by(desc(Job.created_at))
+                ).scalars().all()
+            else:
+                # SQLite fallback (dev): bez jsonb operatorow, filter Pythonem
+                # ale tylko dla active+failed (mniejsza pula niz limit 500)
+                send_jobs = session.execute(
+                    select(Job).where(
+                        Job.workspace_id == cur.workspace_id,
+                        Job.type == JobType.SEND_DRAFT.value,
+                        Job.status.in_([
+                            JobStatus.PENDING.value, JobStatus.RUNNING.value,
+                            JobStatus.FAILED.value,
+                        ]),
+                    ).order_by(desc(Job.created_at)).limit(500)
+                ).scalars().all()
             for j in send_jobs:
                 did = j.payload.get("draft_id") if isinstance(j.payload, dict) else None
                 if not isinstance(did, int) or did not in draft_ids:
@@ -2586,6 +2628,14 @@ def delete_exclusion(
 DISCOVERY_CACHE_TTL_DAYS = int(os.getenv("DISCOVERY_CACHE_TTL_DAYS") or 30)
 
 
+def _cache_cutoff_naive() -> datetime:
+    """Cutoff dla cache lookup, BEZ tzinfo (Postgres TIMESTAMP WITHOUT TIME
+    ZONE w SQLAlchemy DateTime() zwraca naive datetime). Porównanie z aware
+    cutoff rzucalo "can't compare offset-naive and offset-aware datetimes".
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)).replace(tzinfo=None)
+
+
 def _discovery_query_hash(
     segment: str, location: str | None, sources: list[str],
     custom_description: str | None,
@@ -2612,7 +2662,7 @@ def _find_cached_discovery(
     """Zwraca najswiezszy DiscoveryRun dla danego query_hash w workspace,
     jezeli jest mlodszy niz CACHE_TTL i ma cached_places. Inaczej None.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)
+    cutoff = _cache_cutoff_naive()
     return session.execute(
         select(DiscoveryRun).where(
             DiscoveryRun.workspace_id == workspace_id,
@@ -3114,7 +3164,7 @@ def discovery_history(
                     DiscoveryRun.workspace_id == cur.workspace_id,
                 ).order_by(DiscoveryRun.run_at.desc()).limit(limit)
             ).scalars().all()
-            cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVERY_CACHE_TTL_DAYS)
+            cutoff = _cache_cutoff_naive()
             return [{
                 "id": r.id,
                 "segment": r.segment,
@@ -3353,11 +3403,12 @@ class AutonomousDiscoveryIn(BaseModel):
     miast PL (top X), w kazdym wykonuje discovery z cache + relevance
     filter + auto-research, stopuje gdy osiagnie cel ALBO budzet.
 
-    Wszystko w JEDNYM jobie typu AUTONOMOUS_DISCOVERY ktory worker
-    przerabia sekwencyjnie. Progress widzialny przez standardowy
-    job polling.
+    Multi-segment: jak `segments` ustawione (lista), agent iteruje przez
+    KAZDY segment x kazde miasto. Inaczej (legacy) lecimy z `segment`.
     """
-    segment: str
+    # Backward compat: pojedynczy segment albo lista. Co najmniej jedno.
+    segment: str | None = None
+    segments: list[str] | None = None
     sources: list[str]
     target_new_leads: int = 50           # cel: tyle nowych leadow w bazie
     max_cost_usd: float = 5.0            # twardy budzet
@@ -3375,6 +3426,10 @@ def start_autonomous_discovery(
 ) -> dict[str, Any]:
     """Tworzy AUTONOMOUS_DISCOVERY job. Worker przerabia w tle - moze
     trwac nawet 30+ minut dla duzych celow. User loguje sie potem.
+
+    Wiele jobow rownoleglie OK - worker pool (WORKER_THREADS=3) je przerabia.
+    Cache (Faza 1) zapewnia ze rozne autonomous na tym samym segmencie + miastach
+    nie palic kredytu duplikatami.
     """
     if not payload.sources:
         raise HTTPException(status_code=400, detail="Wybierz przynajmniej jedno źródło.")
@@ -3382,34 +3437,45 @@ def start_autonomous_discovery(
         raise HTTPException(status_code=400, detail="target_new_leads: 1-500.")
     if payload.max_cost_usd < 0.10 or payload.max_cost_usd > 100:
         raise HTTPException(status_code=400, detail="max_cost_usd: $0.10-$100.")
+    # Walidacja segmentu - moze byc 'segment' (legacy) ALBO 'segments' (multi).
+    segments_list: list[str] = []
+    if payload.segments:
+        segments_list = [s.strip() for s in payload.segments if s and s.strip()]
+    elif payload.segment:
+        segments_list = [payload.segment.strip()]
+    if not segments_list:
+        raise HTTPException(
+            status_code=400,
+            detail="Wybierz przynajmniej jeden segment (segment lub segments).",
+        )
+    # Walidacja: wszystkie segmenty musza byc znane
+    valid_segments = {s.value for s in LeadSegment}
+    for seg in segments_list:
+        if seg not in valid_segments:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Nieprawidlowy segment '{seg}'. Dozwolone: {sorted(valid_segments)}",
+            )
 
     with SessionLocal() as session:
-        # Tylko jeden autonomous job naraz per workspace - inaczej kazdy by
-        # rownolegle przerabial te same miasta
-        active = session.execute(
-            select(Job).where(
-                Job.workspace_id == cur.workspace_id,
-                Job.type == JobType.AUTONOMOUS_DISCOVERY.value,
-                Job.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]),
-            ).limit(1)
-        ).scalar_one_or_none()
-        if active is not None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "msg": "Autonomous discovery juz biega. Anuluj go przed nowym.",
-                    "active_job_id": active.id,
-                },
-            )
+        # USUNIETE: 409 guard dla jednego naraz. User chce moc odpalic kilka
+        # paralelnie. Worker pool ogarnia, cache filtruje duplikaty.
+        # Wzorzec: 1 autonomous per segment = wieksza paraleizm dla wszystkich.
+
+        # Payload: zachowaj segments[] zeby worker wiedzial o multi-segment.
+        # Dla backward compat zapisz tez `segment` = pierwszy z listy.
+        payload_dict = payload.model_dump()
+        payload_dict["segments"] = segments_list
+        payload_dict["segment"] = segments_list[0]
 
         job = create_job(
             session,
             job_type=JobType.AUTONOMOUS_DISCOVERY,
             workspace_id=cur.workspace_id, user_id=cur.user_id,
-            payload=payload.model_dump(),
+            payload=payload_dict,
             total=payload.target_new_leads,  # progress = how many leads znalezionych
         )
-    return {"ok": True, "job_id": job.id}
+    return {"ok": True, "job_id": job.id, "segments": segments_list}
 
 
 class ResearchIn(BaseModel):

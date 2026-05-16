@@ -101,10 +101,16 @@ def research_url(
     return result
 
 
-def find_existing_lead(url: str) -> int | None:
+def find_existing_lead(url: str, workspace_id: int | None = None) -> int | None:
     """Return the id of an existing Lead whose website normalizes to the same
-    key as `url`, or None. Uses host-prefix ILIKE for fast prefilter, then
-    confirms with full normalize() match."""
+    key as `url`, or None.
+
+    SECURITY (multi-tenant): JEZELI workspace_id != None, filtruje TYLKO leady
+    z tego workspace'u. Bez filtru istniało ryzyko data leak - workspace A's
+    research_and_save mogl matchnac lead workspace B i go nadpisac.
+
+    Caller (research_and_save) MUSI przekazac workspace_id z job context.
+    """
     target = normalize_url(url)
     if not target:
         return None
@@ -114,12 +120,13 @@ def find_existing_lead(url: str) -> int | None:
     with SessionLocal() as session:
         # Pomijaj soft-deleted (kosz). User usunal lead -> chce go pozyskac
         # ponownie -> nowy lead. Stary zostaje w trash do auto-purge.
-        rows = session.execute(
-            select(Lead.id, Lead.website).where(
-                Lead.website.ilike(f"%{host}%"),
-                Lead.deleted_at.is_(None),
-            )
-        ).all()
+        q = select(Lead.id, Lead.website).where(
+            Lead.website.ilike(f"%{host}%"),
+            Lead.deleted_at.is_(None),
+        )
+        if workspace_id is not None:
+            q = q.where(Lead.workspace_id == workspace_id)
+        rows = session.execute(q).all()
     for lead_id, website in rows:
         if normalize_url(website) == target:
             return lead_id
@@ -154,10 +161,22 @@ def save_lead(
     contact_name = _clean(result.contact_name)
     city = _clean(result.city)
 
-    existing_id = find_existing_lead(target_url)
+    existing_id = find_existing_lead(target_url, workspace_id=workspace_id)
     with SessionLocal() as session:
         if existing_id is not None:
             lead = session.get(Lead, existing_id)
+            # SAFETY: jak workspace_id przekazany ALE wczytany lead jest w innym
+            # workspace, NIE nadpisuj. Cross-workspace boundary protection.
+            if workspace_id is not None and lead is not None \
+                    and lead.workspace_id is not None \
+                    and lead.workspace_id != workspace_id:
+                logger.bind(source="research").error(
+                    f"Cross-workspace save_lead attempt blocked: target ws={workspace_id} "
+                    f"vs lead ws={lead.workspace_id}. Falling back to create new."
+                )
+                existing_id = None
+                lead = None
+        if existing_id is not None and lead is not None:
             lead.segment = result.segment
             lead.company_name = result.company_name
             lead.contact_name = contact_name
@@ -212,7 +231,7 @@ def research_and_save(
     instead of skipping it.
     """
     if not force_refresh:
-        existing_id = find_existing_lead(url)
+        existing_id = find_existing_lead(url, workspace_id=workspace_id)
         if existing_id is not None:
             logger.bind(source="research").info(
                 f"Skipping research for {url}: lead #{existing_id} already exists."
