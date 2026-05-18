@@ -96,12 +96,14 @@ interface LeadsResponse {
   items: LeadRow[];
 }
 
-// 'not_sent' to virtualny filter (backend rozpoznaje) = wszystkie poza
-// sent/replied/bounced. Domyslny by user widzial leady "do roboty".
-const STATUSES = ['not_sent', '', 'new', 'researched', 'drafted', 'approved', 'sent', 'replied', 'bounced', 'blacklisted'];
+// Virtual filters (backend rozpoznaje):
+// - 'not_sent' = wszystkie poza sent/replied/bounced/blacklisted (default)
+// - 'needs_draft' = researched + email + bez aktywnego draftu (do dalszej obrobki)
+const STATUSES = ['not_sent', 'needs_draft', '', 'new', 'researched', 'drafted', 'approved', 'sent', 'replied', 'bounced', 'blacklisted'];
 const STATUS_LABELS: Record<string, string> = {
   '': 'Wszystkie statusy',
   'not_sent': 'Tylko nie wysłane (domyślne)',
+  'needs_draft': 'Do draftowania (researched, brak draftu)',
   'new': 'Status: new',
   'researched': 'Status: researched',
   'drafted': 'Status: drafted',
@@ -225,10 +227,14 @@ export default function LeadyPage() {
     return () => clearTimeout(t);
   }, [flash]);
 
+  // Dynamiczny limit listy - default 200, user moze rozszerzyc gdy chce
+  // zaznaczyc bulk > 200. Backend cap = 500.
+  const [pageLimit, setPageLimit] = useState(200);
+
   async function load() {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '100', sort });
+      const params = new URLSearchParams({ limit: String(pageLimit), sort });
       if (segment) params.set('segment', segment);
       if (status) params.set('status', status);
       if (minScore > 0) params.set('min_score', String(minScore));
@@ -274,7 +280,7 @@ export default function LeadyPage() {
       void loadTrash();
     }
     /* eslint-disable-next-line */
-  }, [view, segment, status, minScore, search, sort]);
+  }, [view, segment, status, minScore, search, sort, pageLimit]);
 
   // Trash count - laduje sie raz na mount + przy zmianie view (do badge w tab)
   useEffect(() => { void refreshTrashCount(); }, []);
@@ -1164,6 +1170,16 @@ export default function LeadyPage() {
           <div className="card-head">
             <div className="card-title">
               <i className="ti ti-users" /> Wyniki ({leads.length}{total > leads.length ? ` z ${total}` : ''})
+              {total > leads.length && pageLimit < 500 && (
+                <button
+                  className="btn-link-sm"
+                  onClick={() => setPageLimit(Math.min(pageLimit + 200, 500))}
+                  title="Pobierz wiecej leadow zeby zaznaczyc bulk > 200"
+                  style={{ marginLeft: 10 }}
+                >
+                  + załaduj kolejne 200
+                </button>
+              )}
             </div>
             {eligibleForBulk.length > 0 && (
               <button
