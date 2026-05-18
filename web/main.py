@@ -1461,7 +1461,7 @@ def list_leads(
       sort    - 'score' (default: score DESC, puste na dol) | 'newest' | 'oldest' | 'company'
       segment/status/min_score - filtry
     """
-    limit = max(1, min(limit, 200)); offset = max(0, offset)
+    limit = max(1, min(limit, 500)); offset = max(0, offset)
     with SessionLocal() as session:
         empty_email = (Lead.email.is_(None)) | (Lead.email == "")
         empty_phone = (Lead.phone.is_(None)) | (Lead.phone == "")
@@ -1485,18 +1485,30 @@ def list_leads(
         )
         if segment: base = base.where(Lead.segment == segment)
         if status:
-            # 'not_sent' = wirtualny filtr: wszystkie statusy poza wysylkowymi.
-            # Domyslny w UI - user chce pracowac tylko z leadami do akcji.
             if status == "not_sent":
-                # Tez ukrywamy BLACKLISTED - user chce widziec tylko leady "do
-                # akcji", a zablokowane to manualne hard-skipy. Widoczne pod
-                # filter "Status: blacklisted".
+                # 'not_sent' = wszystkie statusy poza wysylkowymi/blacklisted.
+                # Default w UI - user chce pracowac tylko z leadami do akcji.
                 base = base.where(Lead.status.notin_([
                     LeadStatus.SENT.value,
                     LeadStatus.REPLIED.value,
                     LeadStatus.BOUNCED.value,
                     LeadStatus.BLACKLISTED.value,
                 ]))
+            elif status == "needs_draft":
+                # 'needs_draft' = lead jest RESEARCHED, ma email, NIE ma draftu
+                # (poza odrzuconym). Czyli "do dalszej obrobki: generuj draft".
+                # Subquery zeby wykluczyc leady z aktywnym/sent/approved draftem.
+                # User: "filtruje tylko zresearchowane wymagajace draftowania".
+                drafted_lead_ids = select(EmailDraft.lead_id).where(
+                    EmailDraft.workspace_id == cur.workspace_id,
+                    EmailDraft.status != DraftStatus.REJECTED.value,
+                )
+                base = base.where(
+                    Lead.status == LeadStatus.RESEARCHED.value,
+                    Lead.email.isnot(None),
+                    Lead.email != "",
+                    Lead.id.notin_(drafted_lead_ids),
+                )
             else:
                 base = base.where(Lead.status == status)
         if min_score > 0: base = base.where(Lead.score >= min_score)
@@ -2604,8 +2616,11 @@ def create_drafts_bulk(
     """
     if not payload.lead_ids:
         raise HTTPException(status_code=400, detail="Brak lead_ids.")
-    if len(payload.lead_ids) > 50:
-        raise HTTPException(status_code=400, detail="Max 50 leadow naraz.")
+    if len(payload.lead_ids) > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="Max 500 leadow naraz - inaczej UI polling spowolni i koszty LLM rozpierdoli ogranicze. Podziel na partie.",
+        )
 
     with SessionLocal() as session:
         # Wczytaj leady ktore matchuja workspace + sa researched + nie maja
