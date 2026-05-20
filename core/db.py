@@ -375,6 +375,12 @@ class DiscoveryRun(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float)         # szacunkowy koszt
     error: Mapped[str | None] = mapped_column(Text)               # jak run padl
 
+    # job_id - tag laczacy DiscoveryRun z autonomous_discovery jobem ktory go
+    # utworzyl. Pozwala zgrupowac historie: 1 autonomous job = N (segment,city)
+    # runow -> w panelu Historia pokazujemy 1 zwijany wpis zamiast 350 wierszy.
+    # Nullable: manual discovery_search nie ustawia (single run = single wpis).
+    job_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+
     run_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
@@ -576,6 +582,7 @@ def _migrate_workspace_columns() -> None:
         ("events", "user_id", "INTEGER"),
         ("events", "lead_id", "INTEGER"),
         ("events", "payload", "JSON" if is_pg else "TEXT"),
+        ("discovery_runs", "job_id", "INTEGER"),
     ]
     added = 0
     for table, column, coltype in migrations:

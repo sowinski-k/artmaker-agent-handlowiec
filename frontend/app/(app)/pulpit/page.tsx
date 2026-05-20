@@ -65,6 +65,22 @@ interface ActiveJob {
   last_error: string | null;
 }
 
+// Wynik autonomous_discovery joba - do kompaktowego live panelu na Hala pulpit.
+interface AutonomousResult {
+  current_city?: string;
+  current_segment?: string;
+  segments?: string[];
+  cities_processed?: number;
+  cities_total?: number;
+  new_leads_count?: number;
+  target_new_leads?: number;
+  drafts_made?: number;
+  estimated_cost_usd?: number;
+  max_cost_usd?: number;
+  cities_from_cache?: number;
+  research_errors_count?: number;
+}
+
 const JOB_LABELS: Record<string, string> = {
   discovery_pipeline: 'Agent w terenie (pozyskiwanie + research)',
   research_lead: 'Research leada',
@@ -83,6 +99,7 @@ export default function HalaPulpit() {
   const [data, setData] = useState<Overview | null>(null);
   const [events, setEvents] = useState<ActivityItem[]>([]);
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
+  const [autonomousResults, setAutonomousResults] = useState<Record<number, AutonomousResult>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
@@ -101,7 +118,27 @@ export default function HalaPulpit() {
         api<ActiveJob[]>('/api/jobs?status=running&limit=20').catch(() => []),
         api<ActiveJob[]>('/api/jobs?status=pending&limit=20').catch(() => []),
       ]);
-      setActiveJobs([...running, ...pending]);
+      const jobs = [...running, ...pending];
+      setActiveJobs(jobs);
+      // Dla autonomous_discovery dociagamy pelny job (lite payload nie ma
+      // result) - zeby pokazac kompaktowy live panel jak w /pozyskiwaniu.
+      const autoJobs = jobs.filter((j) => j.type === 'autonomous_discovery');
+      if (autoJobs.length > 0) {
+        const details = await Promise.all(
+          autoJobs.map((j) =>
+            api<{ id: number; result: AutonomousResult | null }>(`/api/jobs/${j.id}`)
+              .then((full) => [j.id, full.result] as const)
+              .catch(() => [j.id, null] as const)
+          )
+        );
+        setAutonomousResults((prev) => {
+          const next = { ...prev };
+          for (const [jid, res] of details) {
+            if (res) next[jid] = res;
+          }
+          return next;
+        });
+      }
     } catch {
       setActiveJobs([]);
     }
@@ -291,6 +328,38 @@ export default function HalaPulpit() {
                       {j.last_error && (
                         <div className="aj-error">Ostatni błąd: {j.last_error}</div>
                       )}
+                      {/* Kompaktowy live panel dla autonomous - segment->miasto
+                          + kluczowe liczniki, jak w /pozyskiwaniu */}
+                      {j.type === 'autonomous_discovery' && autonomousResults[j.id] && (() => {
+                        const r = autonomousResults[j.id];
+                        return (
+                          <div className="aj-autonomous">
+                            <div className="aj-auto-hero">
+                              <span className="aj-auto-dot" />
+                              <strong>{r.current_segment || '—'}</strong>
+                              <span className="aj-auto-arrow">→</span>
+                              <strong className="aj-auto-city">{r.current_city || '…'}</strong>
+                              {(r.segments?.length || 0) > 1 && (
+                                <span className="aj-auto-multi">
+                                  multi-segment ({r.segments!.length})
+                                </span>
+                              )}
+                            </div>
+                            <div className="aj-auto-stats">
+                              <span><b>{r.new_leads_count || 0}</b>/{r.target_new_leads || 0} leadów</span>
+                              <span>{r.cities_processed || 0}/{r.cities_total || '?'} miast</span>
+                              <span>{r.drafts_made || 0} draftów</span>
+                              <span>${(r.estimated_cost_usd || 0).toFixed(2)}/${(r.max_cost_usd || 0).toFixed(2)}</span>
+                              {(r.cities_from_cache || 0) > 0 && (
+                                <span className="aj-auto-cache">{r.cities_from_cache} z cache</span>
+                              )}
+                              {(r.research_errors_count || 0) > 0 && (
+                                <span className="aj-auto-err">{r.research_errors_count} błędów</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <button
                       className="aj-cancel"
@@ -599,6 +668,39 @@ const HALA_CSS = `
   color: var(--red-dark);
   font-family: 'JetBrains Mono', monospace;
 }
+/* Kompaktowy live panel autonomous na Hala pulpit */
+.aj-autonomous {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #1C1C1C;
+  border-radius: 7px;
+}
+.aj-auto-hero {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: #fff; flex-wrap: wrap;
+}
+.aj-auto-hero strong { font-weight: 700; }
+.aj-auto-arrow { color: rgba(255,255,255,0.4); }
+.aj-auto-city { color: #FECACA; }
+.aj-auto-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #DC2626; display: inline-block;
+  animation: ajpulse 1.4s ease-in-out infinite;
+}
+@keyframes ajpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.aj-auto-multi {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7);
+}
+.aj-auto-stats {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-top: 6px; font-size: 11px;
+  color: rgba(255,255,255,0.65);
+  font-family: 'JetBrains Mono', monospace;
+}
+.aj-auto-stats b { color: #86EFAC; }
+.aj-auto-cache { color: #86EFAC; }
+.aj-auto-err { color: #FCA5A5; }
 .aj-cancel {
   display: flex; align-items: center; gap: 4px;
   background: var(--bg);

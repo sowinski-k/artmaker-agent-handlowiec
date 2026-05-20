@@ -3358,39 +3358,89 @@ def discovery_peek(payload: DiscoverIn, cur: CurrentUser = Depends(get_current_u
 def discovery_history(
     limit: int = 50, cur: CurrentUser = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    """Lista ostatnich discovery runow workspace - dla "Historia" panelu.
+    """Historia discovery runow workspace - dla panelu "Historia".
 
-    Pokazuje co user juz sprawdzal, kiedy, ile firm wrocilo i czy
-    skonczylo sie błędem.
+    Grupowanie: runy autonomous (maja job_id) sa zwijane w 1 wpis per job
+    (autonomous = N runow segment×miasto). Manual discovery (job_id=NULL)
+    to pojedyncze wpisy. Zwijany wpis autonomous ma `details` z per-miasto
+    rozbiciem.
 
-    Bezpieczne na missing table - jak production Postgres jeszcze nie
-    ma `discovery_runs` (deploy podczas migracji), zwracamy pusta liste
-    + warning log zamiast 500.
+    Bezpieczne na missing table/kolumne - zwraca pusta liste + warning.
     """
     limit = max(1, min(limit, 200))
     try:
         with SessionLocal() as session:
+            # Fetch szerzej (autonomous = setki wierszy) - grupujemy w Pythonie.
             runs = session.execute(
                 select(DiscoveryRun).where(
                     DiscoveryRun.workspace_id == cur.workspace_id,
-                ).order_by(DiscoveryRun.run_at.desc()).limit(limit)
+                ).order_by(DiscoveryRun.run_at.desc()).limit(2000)
             ).scalars().all()
             cutoff = _cache_cutoff_naive()
-            return [{
-                "id": r.id,
-                "segment": r.segment,
-                "location": r.location,
-                "sources": r.sources or [],
-                "query": r.query,
-                "result_count": r.result_count,
-                "leads_added": r.leads_added,
-                "cost_usd": r.cost_usd,
-                "error": r.error,
-                "run_at": iso_utc(r.run_at),
-                # True jezeli ten run jest jeszcze w okresie cache - znaczy ze
-                # kolejne zapytanie z tym samym query_hash nie zapłaci za API.
-                "cache_active": r.run_at >= cutoff and r.cached_places is not None,
-            } for r in runs]
+
+            def _cache_active(r: DiscoveryRun) -> bool:
+                return r.run_at >= cutoff and r.cached_places is not None
+
+            # Rozdziel: autonomous (job_id) vs manual (job_id=NULL)
+            autonomous_groups: dict[int, list[DiscoveryRun]] = {}
+            manual_runs: list[DiscoveryRun] = []
+            for r in runs:
+                jid = getattr(r, "job_id", None)
+                if jid is not None:
+                    autonomous_groups.setdefault(jid, []).append(r)
+                else:
+                    manual_runs.append(r)
+
+            out: list[dict[str, Any]] = []
+
+            # Autonomous - 1 zwijany wpis per job
+            for jid, group in autonomous_groups.items():
+                group_sorted = sorted(group, key=lambda x: x.run_at, reverse=True)
+                segments = sorted({g.segment for g in group if g.segment})
+                out.append({
+                    "kind": "autonomous",
+                    "job_id": jid,
+                    "run_at": iso_utc(group_sorted[0].run_at),
+                    "segments": segments,
+                    "cities_count": len(group),
+                    "result_count": sum(g.result_count or 0 for g in group),
+                    "leads_added": sum(g.leads_added or 0 for g in group),
+                    "cost_usd": round(sum(g.cost_usd or 0.0 for g in group), 3),
+                    "errors": sum(1 for g in group if g.error),
+                    "cache_active_count": sum(1 for g in group if _cache_active(g)),
+                    "details": [{
+                        "id": g.id,
+                        "segment": g.segment,
+                        "location": g.location,
+                        "result_count": g.result_count,
+                        "leads_added": g.leads_added,
+                        "cost_usd": g.cost_usd,
+                        "error": g.error,
+                        "run_at": iso_utc(g.run_at),
+                        "cache_active": _cache_active(g),
+                    } for g in group_sorted],
+                })
+
+            # Manual - pojedyncze wpisy
+            for r in manual_runs:
+                out.append({
+                    "kind": "manual",
+                    "id": r.id,
+                    "segment": r.segment,
+                    "location": r.location,
+                    "sources": r.sources or [],
+                    "query": r.query,
+                    "result_count": r.result_count,
+                    "leads_added": r.leads_added,
+                    "cost_usd": r.cost_usd,
+                    "error": r.error,
+                    "run_at": iso_utc(r.run_at),
+                    "cache_active": _cache_active(r),
+                })
+
+            # Sortuj zbiorczo po run_at desc, tnij do limit
+            out.sort(key=lambda x: x["run_at"], reverse=True)
+            return out[:limit]
     except Exception as exc:
         # Najczestszy powod: tabela discovery_runs jeszcze nie istnieje
         # na production (deploy w trakcie, init_db nie odpalil sie albo

@@ -17,7 +17,7 @@
 
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
@@ -58,18 +58,42 @@ interface PeekResponse {
   };
 }
 
-interface DiscoveryHistoryItem {
+// Pojedynczy run (segment×miasto) - uzywany jako manual wpis ALBO jako
+// element `details` w zwinietej grupie autonomous.
+interface DiscoveryRunDetail {
   id: number;
   segment: string;
   location: string | null;
-  sources: string[];
-  query: string | null;
   result_count: number;
   leads_added: number;
   cost_usd: number | null;
   error: string | null;
   run_at: string;
   cache_active: boolean;
+}
+
+// Wpis historii: manual (pojedynczy) albo autonomous (zwijana grupa N runow).
+interface DiscoveryHistoryItem {
+  kind: 'manual' | 'autonomous';
+  run_at: string;
+  // manual
+  id?: number;
+  segment?: string;
+  location?: string | null;
+  sources?: string[];
+  query?: string | null;
+  result_count: number;
+  leads_added: number;
+  cost_usd: number | null;
+  error?: string | null;
+  cache_active?: boolean;
+  // autonomous (grupa)
+  job_id?: number;
+  segments?: string[];
+  cities_count?: number;
+  errors?: number;
+  cache_active_count?: number;
+  details?: DiscoveryRunDetail[];
 }
 
 interface DiscoveryExclusion {
@@ -288,6 +312,8 @@ export default function PozyskiwaniePage() {
 
   // Historia error state - widoczny jak fetch padl (zamiast silent fail)
   const [historyError, setHistoryError] = useState<string | null>(null);
+  // Rozwiniete grupy autonomous w panelu Historia (po job_id)
+  const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
 
   // Pobierz historie discovery runow (do panelu "Historia").
   async function loadHistory() {
@@ -871,8 +897,8 @@ export default function PozyskiwaniePage() {
             <div className="history-head">
               <strong>Historia discovery</strong>
               <span className="history-sub">
-                {history.filter((h) => h.cache_active).length} runów w cache (30 dni) ·
-                pozostałe to historyczne
+                {history.filter((h) => h.kind === 'autonomous').length} autonomicznych ·{' '}
+                {history.filter((h) => h.kind === 'manual').length} ręcznych
               </span>
               <button
                 className="btn-icon"
@@ -907,38 +933,119 @@ export default function PozyskiwaniePage() {
                 <thead>
                   <tr>
                     <th>Data</th>
-                    <th>Segment</th>
+                    <th>Typ / Segment</th>
                     <th>Lokalizacja</th>
-                    <th>Źródła</th>
-                    <th style={{ textAlign: 'right' }}>Wyniki</th>
+                    <th style={{ textAlign: 'right' }}>Firmy</th>
+                    <th style={{ textAlign: 'right' }}>Leady</th>
+                    <th style={{ textAlign: 'right' }}>Koszt</th>
                     <th>Cache</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((h) => (
-                    <tr key={h.id}>
-                      <td>{new Date(h.run_at).toLocaleString('pl-PL')}</td>
-                      <td>{h.segment}</td>
-                      <td>{h.location || <em style={{ color: '#9CA3AF' }}>—</em>}</td>
-                      <td style={{ fontSize: 11, color: '#6B7280' }}>{h.sources.join(', ')}</td>
-                      <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
-                        {h.error ? (
-                          <span style={{ color: '#DC2626' }}>error</span>
-                        ) : (
-                          h.result_count
-                        )}
-                      </td>
-                      <td>
-                        {h.cache_active ? (
-                          <span style={{ color: '#10B981', fontSize: 11 }}>
-                            <i className="ti ti-database-check" /> aktywny
-                          </span>
-                        ) : (
-                          <span style={{ color: '#9CA3AF', fontSize: 11 }}>—</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                  {history.map((h, hi) => {
+                    if (h.kind === 'autonomous') {
+                      const expanded = h.job_id != null && expandedHistory.has(h.job_id);
+                      const segLabels = (h.segments || [])
+                        .map((s) => SEGMENT_INFO[s]?.label || s);
+                      return (
+                        <Fragment key={`auto-${h.job_id}`}>
+                          <tr
+                            className="history-group-row"
+                            onClick={() => {
+                              if (h.job_id == null) return;
+                              setExpandedHistory((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(h.job_id!)) next.delete(h.job_id!);
+                                else next.add(h.job_id!);
+                                return next;
+                              });
+                            }}
+                          >
+                            <td>{new Date(h.run_at).toLocaleString('pl-PL')}</td>
+                            <td>
+                              <i className={`ti ti-chevron-${expanded ? 'down' : 'right'}`} />{' '}
+                              <strong>Autonomiczny</strong>
+                              <span className="hg-sub">
+                                {' '}#{h.job_id} · {h.cities_count} miast · {segLabels.length} segm.
+                              </span>
+                              <div className="hg-segs">{segLabels.join(', ')}</div>
+                            </td>
+                            <td><em style={{ color: '#9CA3AF' }}>top miasta PL</em></td>
+                            <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                              {h.result_count}
+                            </td>
+                            <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                              <strong style={{ color: h.leads_added > 0 ? '#059669' : '#9CA3AF' }}>
+                                {h.leads_added}
+                              </strong>
+                            </td>
+                            <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                              ${(h.cost_usd || 0).toFixed(2)}
+                            </td>
+                            <td>
+                              {(h.errors || 0) > 0 && (
+                                <span style={{ color: '#DC2626', fontSize: 11 }}>
+                                  {h.errors} błąd.
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                          {expanded && (h.details || []).map((d) => (
+                            <tr key={`d-${d.id}`} className="history-detail-row">
+                              <td>{new Date(d.run_at).toLocaleTimeString('pl-PL')}</td>
+                              <td style={{ paddingLeft: 24 }}>
+                                {SEGMENT_INFO[d.segment]?.label || d.segment}
+                              </td>
+                              <td>{d.location || <em style={{ color: '#9CA3AF' }}>—</em>}</td>
+                              <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                                {d.error ? <span style={{ color: '#DC2626' }}>error</span> : d.result_count}
+                              </td>
+                              <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                                {d.leads_added}
+                              </td>
+                              <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                                ${(d.cost_usd || 0).toFixed(2)}
+                              </td>
+                              <td>
+                                {d.cache_active ? (
+                                  <span style={{ color: '#10B981', fontSize: 11 }}>
+                                    <i className="ti ti-database-check" /> aktywny
+                                  </span>
+                                ) : <span style={{ color: '#9CA3AF', fontSize: 11 }}>—</span>}
+                              </td>
+                            </tr>
+                          ))}
+                        </Fragment>
+                      );
+                    }
+                    // manual
+                    return (
+                      <tr key={`m-${h.id ?? hi}`}>
+                        <td>{new Date(h.run_at).toLocaleString('pl-PL')}</td>
+                        <td>
+                          <span className="hg-manual-tag">ręczne</span>{' '}
+                          {SEGMENT_INFO[h.segment || '']?.label || h.segment}
+                        </td>
+                        <td>{h.location || <em style={{ color: '#9CA3AF' }}>—</em>}</td>
+                        <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                          {h.error ? <span style={{ color: '#DC2626' }}>error</span> : h.result_count}
+                        </td>
+                        <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                          {h.leads_added}
+                        </td>
+                        <td style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}>
+                          ${(h.cost_usd || 0).toFixed(2)}
+                        </td>
+                        <td>
+                          {h.cache_active ? (
+                            <span style={{ color: '#10B981', fontSize: 11 }}>
+                              <i className="ti ti-database-check" /> aktywny
+                            </span>
+                          ) : <span style={{ color: '#9CA3AF', fontSize: 11 }}>—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
@@ -2070,6 +2177,22 @@ const CSS = `
 }
 .history-table tbody tr:hover { background: #FAFAF7; }
 .history-table tbody tr:last-child td { border-bottom: none; }
+
+/* Autonomous - zwijany wiersz-grupa */
+.history-group-row { cursor: pointer; background: #FEFCE8; }
+.history-group-row:hover { background: #FEF9C3 !important; }
+.history-group-row .ti-chevron-right,
+.history-group-row .ti-chevron-down { color: #B45309; font-size: 13px; }
+.hg-sub { font-size: 11px; color: #92400E; }
+.hg-segs { font-size: 10.5px; color: #6B7280; margin-top: 2px; }
+/* Detail sub-row (rozwiniete miasta autonomous) */
+.history-detail-row { background: #FAFAF7; font-size: 11.5px; }
+.history-detail-row td { color: #6B7280; }
+.history-detail-row:hover { background: #F3F4F6 !important; }
+.hg-manual-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE;
+}
 
 /* Peek options - toggle'i nad CTA (force_refresh, expand_queries) */
 .peek-options {
