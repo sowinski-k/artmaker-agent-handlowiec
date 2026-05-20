@@ -1031,7 +1031,6 @@ export default function PozyskiwaniePage() {
                 max_cost_usd?: number;
                 cities_skipped_no_results?: number;
                 cities_from_cache?: number;
-                cities_skipped_all_duplicates?: number;
                 borderline_below_threshold?: number;
                 stopped_reason?: string;
                 research_errors_count?: number;
@@ -1120,17 +1119,6 @@ export default function PozyskiwaniePage() {
                           title="Miasta wziete z cache (DiscoveryRun w ostatnich 30 dniach) - zero kosztu API"
                         >
                           {r.cities_from_cache}
-                        </div>
-                      </div>
-                    )}
-                    {(r.cities_skipped_all_duplicates || 0) > 0 && (
-                      <div className="as-stat as-stat-cache">
-                        <div className="as-label">Skip (juz wszystko)</div>
-                        <div
-                          className="as-value as-mono"
-                          title="Miasta gdzie poprzedni run dal 0 nowych leadow (wszystko duplikaty) - skip calkowicie, brak API call"
-                        >
-                          {r.cities_skipped_all_duplicates}
                         </div>
                       </div>
                     )}
