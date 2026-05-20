@@ -728,6 +728,9 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     # Bez tego widzial "0 nowych leadow" i mial wrazenie ze nic sie nie stalo.
     research_errors_count = 0
     last_research_error: str | None = None
+    # Borderline leady (score 3-4, ponizej progu ale nie smiec) - zliczamy
+    # zeby user widzial ile "moze sensownych" firm nie weszlo do researchu.
+    total_borderline = 0
     # Bail-out counter: liczba CONSECUTIVE fail'ow research bez ani jednego
     # sukcesu. Po RESEARCH_BAILOUT_THRESHOLD straconych prob STOP autonomous -
     # cos systemowo nie dziala (LLM API key invalid, sieciowy outage),
@@ -764,6 +767,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "cities_skipped_no_results": cities_skipped_no_results,
             "cities_from_cache": cities_from_cache,
             "cities_skipped_all_duplicates": cities_skipped_all_duplicates,
+            "borderline_below_threshold": total_borderline,
             "research_errors_count": research_errors_count,
             "last_research_error": last_research_error,
             "recent": list(recent),  # deque maxlen=15, juz bounded
@@ -887,6 +891,10 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         targets = []
         # Pairs (place, llm_score) - score zachowany do fallback'a gdy research padnie
         city_targets_with_scores: list[tuple[Any, float]] = []
+        # Borderline = score ponizej progu ale >= 3 (LLM nie uznal za smiec).
+        # Trzymamy do widocznosci - user musi wiedziec ile "moze sensownych"
+        # leadow nie weszlo do researchu.
+        city_borderline = 0
         if new_places_for_llm:
             try:
                 items, _ = score_relevance_batch(
@@ -896,10 +904,13 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 )
                 estimated_cost += 0.005  # LLM call
                 for it in items:
-                    if it.score >= threshold and 0 <= it.idx < len(new_places_for_llm):
-                        pl = new_places_for_llm[it.idx]
-                        targets.append(pl)
-                        city_targets_with_scores.append((pl, float(it.score)))
+                    if 0 <= it.idx < len(new_places_for_llm):
+                        if it.score >= threshold:
+                            pl = new_places_for_llm[it.idx]
+                            targets.append(pl)
+                            city_targets_with_scores.append((pl, float(it.score)))
+                        elif it.score >= 3:
+                            city_borderline += 1
             except Exception as exc:
                 log.warning(f"Job #{job.id} relevance batch failed for {city_name}: {exc}")
                 recent.append({
@@ -920,7 +931,11 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "places_found": len(places),
             "duplicates_in_db": existing_count,
             "matching_relevance": len(targets),
+            # ile firm LLM ocenil 3-4 (ponizej progu 5 ale nie smiec) -
+            # potencjalnie sensowne, do recznego przejrzenia w manual mode
+            "borderline_below_threshold": city_borderline,
         })
+        total_borderline += city_borderline
         _save_progress(current_city=city_name)
 
         # History entry per (segment, city) - zeby autonomous run pojawil sie w
@@ -1101,6 +1116,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         "cities_skipped_no_results": cities_skipped_no_results,
         "cities_from_cache": cities_from_cache,
         "cities_skipped_all_duplicates": cities_skipped_all_duplicates,
+        "borderline_below_threshold": total_borderline,
         "research_errors_count": research_errors_count,
         "last_research_error": last_research_error,
         "estimated_cost_usd": round(estimated_cost, 3),

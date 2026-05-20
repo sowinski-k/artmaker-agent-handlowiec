@@ -197,7 +197,9 @@ export default function PozyskiwaniePage() {
   const [maxPerSource, setMaxPerSource] = useState(50);
   const [selectedSources, setSelectedSources] = useState<string[]>(['google_places']);
   const [autoDraft, setAutoDraft] = useState(false);
-  const [relevanceThreshold, setRelevanceThreshold] = useState(6);
+  // Default 5 (nie 6): lapiemy tez "niepewny ale potencjalnie pasuje" band.
+  // flash-lite research jest tani, a przeoczony hot lead kosztuje duzo wiecej.
+  const [relevanceThreshold, setRelevanceThreshold] = useState(5);
   // Bulk discovery state - jeden klik = N jobow per city.
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
   const [bulkCount, setBulkCount] = useState<30 | 50 | 100>(30);
@@ -1030,6 +1032,7 @@ export default function PozyskiwaniePage() {
                 cities_skipped_no_results?: number;
                 cities_from_cache?: number;
                 cities_skipped_all_duplicates?: number;
+                borderline_below_threshold?: number;
                 stopped_reason?: string;
                 research_errors_count?: number;
                 last_research_error?: string;
@@ -1128,6 +1131,17 @@ export default function PozyskiwaniePage() {
                           title="Miasta gdzie poprzedni run dal 0 nowych leadow (wszystko duplikaty) - skip calkowicie, brak API call"
                         >
                           {r.cities_skipped_all_duplicates}
+                        </div>
+                      </div>
+                    )}
+                    {(r.borderline_below_threshold || 0) > 0 && (
+                      <div className="as-stat">
+                        <div className="as-label">Borderline (3-4)</div>
+                        <div
+                          className="as-value as-mono"
+                          title="Firmy ktore LLM ocenil 3-4/10 - ponizej progu researchu ale NIE smiec. Mozesz je przejrzec recznie w trybie Praca reczna jak chcesz byc dokladny."
+                        >
+                          {r.borderline_below_threshold}
                         </div>
                       </div>
                     )}

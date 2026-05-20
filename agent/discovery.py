@@ -1298,13 +1298,24 @@ def score_relevance_batch(
 
     system = (
         f"{BRAND_CONTEXT}\n\n"
-        "Jesteś bezlitosnym filtrem leadów dla agenta sprzedaży B2B Artmakera. "
-        "Twoim zadaniem jest odsiać firmy, które nie pasują do zadanego segmentu "
-        "ani do oferty Artmakera. Lepiej odrzucić wątpliwy lead niż zmarnować "
-        "budżet research'u na ewidentny mismatch. Bądź surowy. Zwracasz wyłącznie "
-        "poprawny JSON zgodny ze schematem."
+        "Jesteś filtrem leadów dla agenta sprzedaży B2B Artmakera. Oceniasz "
+        "DOPASOWANIE firmy do zadanego segmentu i oferty Artmakera - nic wiecej.\n\n"
+        "ZASADY OCENY:\n"
+        "- Oceniaj WYLACZNIE typ biznesu i jego dopasowanie do segmentu/oferty.\n"
+        "- MIASTO / lokalizacja NIE MA ZNACZENIA dla oceny. Firma z innego "
+        "miasta moze byc rownie dobrym leadem - nie obnizaj za to score.\n"
+        "- Gdy wahasz sie miedzy dwoma score - wybierz WYZSZY. Przeoczony hot "
+        "lead kosztuje nas duzo wiecej niz tani research sredniego leada.\n"
+        "- Odrzucaj (score 0-2) TYLKO ewidentne smieci - firmy z calkiem innej "
+        "branzy bez zwiazku z artykulami plastycznymi/kreatywnymi/papierniczymi.\n"
+        "Zwracasz wylacznie poprawny JSON zgodny ze schematem."
     )
-    city_clause = f"Miasto docelowe: {city}\n" if city else ""
+    # Miasto podajemy jako KONTEKST (nie kryterium oceny) - pomaga LLM zrozumiec
+    # skad sa kandydaci, ale NIE wolno mu za nie karac.
+    city_clause = (
+        f"Miasto skanowane (TYLKO kontekst, NIE wplywa na score): {city}\n"
+        if city else ""
+    )
     user = (
         f"Segment docelowy: {target_label}\n"
         f"Definicja targetu: {target_description}\n"
@@ -1313,9 +1324,10 @@ def score_relevance_batch(
         "Dla KAŻDEGO kandydata zwróć obiekt {idx, score, reason}:\n"
         "- score 10 = idealny lead, dokładnie ten typ firmy + pasuje do oferty Artmakera\n"
         "- score 7-9 = bardzo prawdopodobny lead, warto zresearchować\n"
-        "- score 4-6 = niepewny, potencjalnie pasuje ale ryzyko mismatch\n"
-        "- score 1-3 = ewidentnie nie pasuje (inna branża, inne miasto)\n"
-        "- score 0 = na pewno śmieć (supermarket, apteka, motoryzacja itp.)\n"
+        "- score 4-6 = niepewny ale potencjalnie pasuje - warto sprawdzić\n"
+        "- score 1-3 = prawdopodobnie inna branża, słabe dopasowanie\n"
+        "- score 0 = na pewno śmieć (supermarket, apteka, motoryzacja, branża bez związku)\n"
+        "PAMIETAJ: miasto/lokalizacja NIE obniża score. Liczy się tylko typ biznesu.\n"
         "Pisz reason po polsku, jedno krótkie zdanie. Zwróć WSZYSTKIE indeksy."
     )
 
