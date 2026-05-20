@@ -942,6 +942,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 session.add(DiscoveryRun(
                     workspace_id=job.workspace_id,
                     user_id=job.user_id,
+                    job_id=job.id,  # tag do grupowania w panelu Historia
                     query_hash=query_hash,
                     segment=current_segment_label,
                     location=city_name,
