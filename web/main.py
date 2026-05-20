@@ -2682,7 +2682,7 @@ class DiscoverIn(BaseModel):
     location: str | None = None
     custom_description: str | None = None
     use_relevance_filter: bool = True
-    relevance_threshold: int = 6
+    relevance_threshold: int = 5  # 5 nie 6 - lapie "niepewny ale potencjalnie pasuje"
     auto_research: bool = True
     auto_draft_threshold: int | None = 7
     # Per-source query override. Klucz = source key (np. "apify_allegro").
@@ -3479,7 +3479,7 @@ class BulkDiscoveryIn(BaseModel):
     sources: list[str]
     cities: list[str]
     force_refresh: bool = False
-    relevance_threshold: int = 6
+    relevance_threshold: int = 5  # 5 nie 6 - lapie niepewne ale potencjalne leady
     auto_draft_threshold: int | None = None
     custom_description: str | None = None
 
@@ -3623,7 +3623,7 @@ class AutonomousDiscoveryIn(BaseModel):
     sources: list[str]
     target_new_leads: int = 50           # cel: tyle nowych leadow w bazie
     max_cost_usd: float = 5.0            # twardy budzet
-    relevance_threshold: int = 6
+    relevance_threshold: int = 5  # 5 nie 6 - lapie niepewne ale potencjalne leady
     auto_draft_threshold: int | None = 7  # >=N -> auto-draft po researchu
     custom_description: str | None = None
     voivodeship_filter: str | None = None  # opcjonalnie tylko z tego wojew
@@ -4051,7 +4051,7 @@ class PatrolIn(BaseModel):
     max_per_run: int = 10
     cap_per_day: int = 30
     frequency_hours: int = 12
-    relevance_threshold: int = 6
+    relevance_threshold: int = 5  # 5 nie 6 - lapie niepewne ale potencjalne leady
     auto_draft_threshold: int | None = None
 
 
