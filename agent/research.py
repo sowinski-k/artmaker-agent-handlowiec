@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from agent.enrichment import build_user_message, gather_pages
 from agent.scoring import ResearchResult
+from core.email_validate import is_valid_business_email
 from core.config import PROJECT_ROOT, settings
 from core.db import Lead, LeadStatus, SessionLocal, init_db
 from core.kill_switch import is_stopped
@@ -156,6 +157,14 @@ def save_lead(
         return s
 
     email = _clean(result.email)
+    # SCISLA walidacja emaila z LLM. Gemini czasem zwraca syf wyciagniety ze
+    # zminifikowanego JS / URL-i (d@e.gettime, cre@ivecommons.org). Lepiej
+    # zapisac lead BEZ emaila niz z syfem ktory potem trafi do Woodpeckera.
+    if email and not is_valid_business_email(email):
+        logger.bind(source="research").info(
+            f"Odrzucono niepoprawny email z LLM: {email!r} dla {target_url}"
+        )
+        email = None
     phone = _clean(result.phone)
     instagram = _clean(result.instagram)
     contact_name = _clean(result.contact_name)

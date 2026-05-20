@@ -481,14 +481,22 @@ def _autonomous_cache_lookup(
     sources_list: list[str],
     custom_desc: str | None,
     ttl_days: int = 30,
-) -> tuple[list[Any] | None, int, bool]:
+) -> list[Any] | None:
     """Sprawdza cache w discovery_runs dla (workspace, segment, city, sources).
 
-    Returns (cached_places, prev_leads_added, skip_because_zero_new):
-    - cached_places: lista DiscoveredPlace z cache albo None (cache miss)
-    - prev_leads_added: ile leadow poprzedni run dodal (0 = wszystko duplikaty)
-    - skip_because_zero_new: True jezeli poprzedni run dal 0 nowych - znaczy ze
-      ta kombinacja juz nic nie da, mozemy skipowac calkowicie (oszczednosc API)
+    Returns: cached_places (lista DiscoveredPlace) albo None (cache miss).
+
+    WAZNE - NIE robimy juz hard-skipu. Cache hit oznacza TYLKO "uzyj zapisanych
+    miejsc zamiast wywolywac Google Places API". Pelny pipeline (relevance +
+    research) LECI DALEJ na cached places. Czemu to bezpieczne i potrzebne:
+    - Wczesniejsza wersja skipowala miasto calkowicie gdy poprzedni leads_added==0.
+      Ale leads_added bylo ZAWSZE 0 (bug - nigdy nie aktualizowane) -> KAZDE
+      miasto z cache bylo skipowane na 2gim runie. Hot leady przepadaly.
+    - Dodatkowo: jak LLM zle ocenil lead (np. stary prompt karal za miasto),
+      re-run relevance z poprawionym promptem MUSI miec szanse go zlapac.
+    - Koszt re-runu jest minimalny: mark_existing odfiltruje duplikaty, wiec
+      relevance dostaje tylko NOWE miejsca. Jak wszystko duplikat -> 0 LLM call,
+      0 kosztu. Google Places API (drogie) i tak pominiete (mamy snapshot).
 
     TTL 30d match z manual discovery_search cache logic w web/main.py.
     """
@@ -513,27 +521,17 @@ def _autonomous_cache_lookup(
                 DiscoveryRun.workspace_id == workspace_id,
                 DiscoveryRun.query_hash == query_hash,
                 DiscoveryRun.run_at >= cutoff,
+                DiscoveryRun.cached_places.isnot(None),
             ).order_by(DiscoveryRun.run_at.desc()).limit(1)
         ).scalar_one_or_none()
 
-        if latest is None:
-            return None, 0, False
-
-        # Hard skip: jezeli poprzedni run mial >= 1 place ale dodal 0 leadow,
-        # znaczy ze WSZYSTKO juz w bazie. Nie ma sensu odpalac LLM relevance
-        # bo i tak filter `existing_lead_id is None` da pusta liste.
-        if latest.result_count > 0 and latest.leads_added == 0:
-            return [], int(latest.leads_added), True
-
-        if latest.cached_places is None:
-            return None, int(latest.leads_added), False
+        if latest is None or latest.cached_places is None:
+            return None
 
         try:
-            places = [DiscoveredPlace(**p) for p in latest.cached_places]
+            return [DiscoveredPlace(**p) for p in latest.cached_places]
         except Exception:
-            return None, int(latest.leads_added), False
-
-        return places, int(latest.leads_added), False
+            return None
 
 
 def _save_fallback_lead_from_place(
@@ -721,7 +719,6 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
     cities_processed = 0
     cities_skipped_no_results = 0
     cities_from_cache = 0  # ile (segment,city) wzietych z cache zamiast API
-    cities_skipped_all_duplicates = 0  # ile poprzedni run dal 0 nowych - skip
     drafts_made = 0
     # Tracking bledow researchu - user musi widziec ile leadow przeleciało
     # przez filter ALE research nie poszedl (timeout, CloudFlare, brak API key).
@@ -766,7 +763,6 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             "max_cost_usd": max_cost,
             "cities_skipped_no_results": cities_skipped_no_results,
             "cities_from_cache": cities_from_cache,
-            "cities_skipped_all_duplicates": cities_skipped_all_duplicates,
             "borderline_below_threshold": total_borderline,
             "research_errors_count": research_errors_count,
             "last_research_error": last_research_error,
@@ -803,9 +799,10 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         # CACHE LOOKUP: jezeli ta sama kombinacja (workspace, segment, city,
         # sources, custom_desc) byla skanowana w ostatnich 30 dniach - bierzemy
         # cached places z DB zamiast wywolywac Google Places / Apify ponownie.
-        # Plus: jezeli poprzedni run dal places ALE 0 nowych leadow
-        # (wszystko duplikaty) - skip calkowicie, bo i tak nic nowego nie da.
-        cached_places, prev_leads_added, skip_zero = _autonomous_cache_lookup(
+        # NIE skipujemy miasta - pelny pipeline (relevance+research) leci dalej
+        # na cached places. Duplikaty odpadna przez mark_existing, wiec re-run
+        # jest tani, a mis-scored hot leady dostaja drugą szanse z nowym promptem.
+        cached_places = _autonomous_cache_lookup(
             workspace_id=job.workspace_id,
             segment=current_segment_label,
             city=city_name,
@@ -814,28 +811,12 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
             ttl_days=30,
         )
 
-        if skip_zero:
-            cities_skipped_all_duplicates += 1
-            log.info(
-                f"Job #{job.id} SKIP {current_segment_label}+{city_name} "
-                f"(poprzedni run = 0 nowych, wszystko duplikaty)"
-            )
-            recent.append({
-                "name": city_name, "segment": current_segment_label,
-                "city": city_name,
-                "status": "city_skipped_cache_no_new",
-                "places_found": 0,
-                "matching_relevance": 0,
-            })
-            _save_progress(current_city=city_name)
-            continue
-
         if cached_places is not None:
             cities_from_cache += 1
             places = cached_places
             log.info(
                 f"Job #{job.id} CACHE HIT {current_segment_label}+{city_name} "
-                f"({len(places)} places, prev_leads={prev_leads_added})"
+                f"({len(places)} places) - skip API, pipeline leci dalej"
             )
             # Cache hit = ZERO kosztu API. Nic nie dodajemy do estimated_cost.
         else:
@@ -938,41 +919,48 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         total_borderline += city_borderline
         _save_progress(current_city=city_name)
 
-        # History entry per (segment, city) - zeby autonomous run pojawil sie w
-        # panelu Historia rownolegle z manual discovery. Cache aktywny (30d):
-        # nastepny autonomous z tym samym segment+city dostanie cached_places.
-        try:
-            from core.db import DiscoveryRun
-            import hashlib
-            sources_csv = ",".join(sorted(sources_list))
-            key = "|".join([
-                current_segment_label.lower(),
-                city_name.lower(),
-                sources_csv,
-                (custom_desc or "").strip().lower(),
-            ])
-            query_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
-            session.add(DiscoveryRun(
-                workspace_id=job.workspace_id,
-                user_id=job.user_id,
-                query_hash=query_hash,
-                segment=current_segment_label,
-                location=city_name,
-                sources=sources_list,
-                query=query,
-                custom_description=custom_desc,
-                cached_places=[pl.model_dump() for pl in places] if places else None,
-                result_count=len(places),
-                leads_added=0,  # zaktualizujemy ponizej jak research zrobi nowy lead
-                cost_usd=round(len(sources_list) * 0.03, 3),
-                error=None,
-            ))
-            session.commit()
-        except Exception as exc:
-            log.warning(f"Job #{job.id} discovery_runs history write failed for {city_name}: {exc}")
+        # Licznik nowych leadow Z TEGO MIASTA - krytyczne dla DiscoveryRun.
+        # leads_added zapisujemy DOPIERO po petli research (wczesniej bylo 0
+        # zawsze - bug ktory powodowal falszywe cache-skipy).
+        city_new_leads = 0
+
+        # _write_city_history: zapis DiscoveryRun (cache snapshot + historia).
+        # Wolane PO petli research zeby leads_added bylo prawdziwe. Idempotentne
+        # bezpieczne - kazdy city tworzy 1 wpis.
+        def _write_city_history(leads_added_count: int) -> None:
+            try:
+                from core.db import DiscoveryRun
+                import hashlib
+                sources_csv = ",".join(sorted(sources_list))
+                key = "|".join([
+                    current_segment_label.lower(),
+                    city_name.lower(),
+                    sources_csv,
+                    (custom_desc or "").strip().lower(),
+                ])
+                query_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+                session.add(DiscoveryRun(
+                    workspace_id=job.workspace_id,
+                    user_id=job.user_id,
+                    query_hash=query_hash,
+                    segment=current_segment_label,
+                    location=city_name,
+                    sources=sources_list,
+                    query=query,
+                    custom_description=custom_desc,
+                    cached_places=[pl.model_dump() for pl in places] if places else None,
+                    result_count=len(places),
+                    leads_added=leads_added_count,
+                    cost_usd=round(len(sources_list) * 0.03, 3),
+                    error=None,
+                ))
+                session.commit()
+            except Exception as exc:
+                log.warning(f"Job #{job.id} discovery_runs history write failed for {city_name}: {exc}")
 
         if not targets:
             cities_skipped_no_results += 1
+            _write_city_history(0)
             continue
 
         # Build mapping place.website -> relevance score (do fallback'a gdy
@@ -1007,6 +995,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 if was_researched:
                     estimated_cost += 0.02  # LLM research call
                     new_leads_count += 1
+                    city_new_leads += 1
                     consecutive_failures = 0  # sukces resetuje bail-out counter
 
                     drafted_now = False
@@ -1063,6 +1052,7 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
 
                 if fallback_lead_id is not None:
                     new_leads_count += 1
+                    city_new_leads += 1
                     consecutive_failures = 0  # mamy w bazie - nie bail-out
                     recent.append({
                         "name": place.name, "url": place.website,
@@ -1097,6 +1087,12 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
                 )
                 break  # wyjdz z petli per-place targets
 
+        # Zapis DiscoveryRun PO petli research - leads_added = realny licznik
+        # nowych leadow z tego miasta. To naprawia cache: nastepny run wie ile
+        # faktycznie dodal, a _autonomous_cache_lookup nie robi juz falszywych
+        # skipow (skip_zero usuniety calkowicie).
+        _write_city_history(city_new_leads)
+
         # Drugi bail-out check po petli targets - wyjdz tez z work_queue
         if consecutive_failures >= RESEARCH_BAILOUT_THRESHOLD and new_leads_count == 0:
             break
@@ -1115,7 +1111,6 @@ def handle_autonomous_discovery(session: Session, job: Job) -> dict:
         "cities_processed": cities_processed,
         "cities_skipped_no_results": cities_skipped_no_results,
         "cities_from_cache": cities_from_cache,
-        "cities_skipped_all_duplicates": cities_skipped_all_duplicates,
         "borderline_below_threshold": total_borderline,
         "research_errors_count": research_errors_count,
         "last_research_error": last_research_error,

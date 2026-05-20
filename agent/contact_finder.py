@@ -26,6 +26,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from core.email_validate import is_valid_business_email
+
 log = logging.getLogger("ecombinat.contact_finder")
 
 # Lead bez kontaktu po enrichmencie -> dead_end. Recheckujemy po RECHECK_DAYS
@@ -182,18 +184,32 @@ def _normalize_phone(raw: str) -> str:
 
 
 # Wzorce obfuskacji emaila ktore widzimy na polskich stronach kontaktowych.
-# Lista NIE wyczerpujaca - to top-10 patternow.
-# (?:...) = non-capturing group, ([a-z0-9._%+-]+) = email local part
-# i ([a-z0-9.-]+\.[a-z]{2,}) = domena - po decode wracamy do EMAIL_RE.
+#
+# KRYTYCZNE: "at" MUSI byc otoczone nawiasami [at] (at) ALBO obowiazkowymi
+# spacjami ( at ). Wczesniejsza wersja miala \s* (zero spacji) co matchowalo
+# literalne "at" w SRODKU normalnych slow:
+#   gravatar      -> grav@ar
+#   creativecommons -> cre@ivecommons
+#   politykaprywatnosci -> politykapryw@nosci
+#   Math.random   -> m@h.random
+# Kazde slowo z "at" w srodku stawalo sie falszywym emailem. Stad syf w leadach.
+# Real obfuskacja ZAWSZE ma separator (nawias albo spacja) - bez separatora
+# to zwykle slowo, nie email.
+#
+# (?:...) = non-capturing, ([a-z0-9._%+-]+) = local part, ([a-z0-9.-]+\.[a-z]{2,}) = domena
 _OBFUSCATION_PATTERNS = [
-    # info [at] domena.pl / info[at]domena.pl / info @at@ domena.pl
-    r"([a-z0-9._%+-]+)\s*[\[\(]?\s*(?:at|AT|małpa|małpka)\s*[\]\)]?\s*([a-z0-9.-]+\.[a-z]{2,})",
-    # info ‒ at ‒ domena.pl (z roznymi myslnikami: -, –, —)
+    # info[at]domena.pl / info [at] domena.pl / info[małpa]domena.pl - nawiasy
+    r"([a-z0-9._%+-]+)\s*[\[\(]\s*(?:at|małpa|małpka)\s*[\]\)]\s*([a-z0-9.-]+\.[a-z]{2,})",
+    # info małpa domena.pl - "małpa"/"małpka" jest jednoznaczne (nikt nie pisze
+    # "małpa" w srodku slowa), wiec spacje wystarcza bez nawiasow.
+    r"([a-z0-9._%+-]+)\s+(?:małpa|małpka)\s+([a-z0-9.-]+\.[a-z]{2,})",
+    # info at domena.pl - "at" to zwykle ang. slowo, WYMAGANE spacje po OBU
+    # stronach (min 1 kazda). Bez tego "gravatar" -> "grav@ar" itp.
+    r"([a-z0-9._%+-]+)\s+at\s+([a-z0-9.-]+\.[a-z]{2,})",
+    # info ‒ at ‒ domena.pl (myslniki: -, –, —) - separator obowiazkowy
     r"([a-z0-9._%+-]+)\s*[\-‒–—]\s*at\s*[\-‒–—]\s*([a-z0-9.-]+\.[a-z]{2,})",
-    # info(at)domena(dot)pl
+    # info(at)domena(dot)pl - nawiasy obowiazkowe
     r"([a-z0-9._%+-]+)\s*\(at\)\s*([a-z0-9.-]+)\s*\(dot\)\s*([a-z]{2,})",
-    # i n f o @ d o m e n a . p l (spaced for anti-scraper)
-    # (skomplikowany - pomijam, rzadko spotykany)
 ]
 
 
@@ -258,8 +274,14 @@ def _extract_emails(html_text: str, domain_hint: str | None = None) -> list[str]
             if EMAIL_RE.fullmatch(reconstructed):
                 candidates.add(reconstructed)
 
-    # Filter junk
-    clean = [e for e in candidates if not _is_junk_email(e)]
+    # Filter junk - dwie warstwy:
+    # 1. _is_junk_email: legacy blacklist (hosty CDN, fake TLD, prefiksy)
+    # 2. is_valid_business_email: scisla walidacja (TLD whitelist, struktura)
+    #    - to glowny filtr odcinajacy syf typu d@e.gettime, cre@ivecommons.org
+    clean = [
+        e for e in candidates
+        if not _is_junk_email(e) and is_valid_business_email(e)
+    ]
 
     # Rank: domain match first, .pl second, rest last
     def _rank(e: str) -> tuple[int, int, str]:

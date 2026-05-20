@@ -500,23 +500,26 @@ def _backfill_lead_status() -> None:
 
 
 def _cleanup_junk_emails() -> None:
-    """One-shot migracja: wyczysc Lead.email gdzie wartosc to junk
-    (fragmenty JS/HTML sparsowane jak email - jquery-migr@e.min.js,
-    edge-ch@.facebook.com, st@ic.cdninstagram.com, etc).
+    """Migracja: wyczysc Lead.email gdzie wartosc NIE jest poprawnym
+    biznesowym emailem (fragmenty JS/HTML/URL sparsowane jak email).
 
-    Powod: regex EMAIL_RE byl za luzny przed fixami w PR #38/#39.
-    Stare leady (sprzed deploya) maja te smieci jako email co psuje
-    UI i moze powodowac bouncey przy proba wysylki.
+    Przyklady syfu ktory wpadl: d@e.gettime, cre@ivecommons.org,
+    secure.grav@ar.com, 29818881.two_step_verific@ion.pre,
+    https%3a%2f%2fsztuk@worzenia.pl, ko*****@*********ry.pl.
 
-    Idempotent: po pierwszym przebiegu junk-emaile zastapione None.
-    Drugi run no-op.
+    Uzywa is_valid_business_email (TLD whitelist + struktura) - znacznie
+    scislejsze niz stary _is_junk_email blacklist. Czysci email = NULL,
+    lead zostaje (mozna go potem re-research'owac z drawera).
+
+    Idempotent: po przebiegu syf zastapiony None. Drugi run no-op (poprawne
+    emaile zostaja).
     """
     import logging
     log = logging.getLogger("ecombinat.cleanup")
     try:
-        from agent.contact_finder import _is_junk_email
+        from core.email_validate import is_valid_business_email
     except Exception:
-        return  # contact_finder moze nie byc dostepny w niektorych contextach
+        return
 
     try:
         with _engine.begin() as conn:
@@ -526,7 +529,7 @@ def _cleanup_junk_emails() -> None:
             )).all()
             junk_ids: list[int] = []
             for lead_id, email in rows:
-                if _is_junk_email(email):
+                if not is_valid_business_email(email):
                     junk_ids.append(lead_id)
             if junk_ids:
                 # Update w batchach po 500 (Postgres ma limit parametrow w IN)
@@ -538,7 +541,7 @@ def _cleanup_junk_emails() -> None:
                     ))
                 log.info(
                     f"Junk email cleanup: cleared email on {len(junk_ids)} leads "
-                    f"(jquery-migr@..., document.loc@..., etc - fragmenty JS sparsowane przez stary regex)"
+                    f"(niepoprawne emaile - fragmenty JS/URL/maski, walidacja is_valid_business_email)"
                 )
     except Exception as exc:
         log.warning(f"Junk email cleanup failed (non-critical): {exc}")
